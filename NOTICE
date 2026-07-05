@@ -1,7 +1,26 @@
 reader-webgpu
 
 Copyright (c) CarbonEngineJS contributors.
+CarbonEngine source material, formats, class names, and schema semantics remain
+copyright their original CarbonEngine authors.
 
 This package is a CarbonEngineJS-facing reader shell for future WebGPU package
 data. It contains original project code only unless this notice is expanded
 with third-party attribution.
+
+Provenance and legal requirements
+---------------------------------
+
+This scaffold currently contains CarbonEngineJS original project code only. It
+does not include copied CarbonEngine source code or third-party parser code.
+
+If future work copies, ports, translates, or derives from CarbonEngine, ccpwgl,
+CCP/EVE assets or tools, or any third-party library, update this NOTICE before
+committing that work with:
+
+- upstream copyright holders;
+- upstream project/repository, file path, and revision when known;
+- upstream license name, license text or required notice location, and any
+  redistribution obligations;
+- whether the material was copied/ported/adapted, or used only as a behavioral
+  reference with no copied expression.
