@@ -4,6 +4,11 @@ This folder is a temporary home for CarbonEngine/library-shaped classes that
 are needed by this reader or tooling package before their proper standalone
 library exists.
 
+When classes here mirror, reference, or are derived from CarbonEngine or Fenris
+Creations (CCP Games) behavior, formats, source structure, tools, assets, or
+shader conventions, record that provenance in the package README/NOTICE before
+shipping the change. Do not imply affiliation with or endorsement by CCP Games.
+
 Classes here are transient:
 
 - They are not the reader boundary API.

@@ -7,6 +7,13 @@ shape expectations while WebGPU package formats are designed.
 The package currently defines the standalone public API shell. `Read` and
 `Inspect` intentionally throw until the WebGPU package parser lands.
 
+## Provenance
+
+CarbonEngine and Fenris Creations (CCP Games) are named in this package for
+interoperability and schema-provenance context. This scaffold contains
+CarbonEngineJS original code only unless `NOTICE` is expanded; it is not
+affiliated with or endorsed by CCP Games.
+
 ## Public API
 
 The package root exports one public class: `CjsWebGPUReader`.
