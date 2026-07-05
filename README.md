@@ -1,4 +1,4 @@
-# reader-webgpu
+# @carbonenginejs/reader-webgpu
 
 CarbonEngineJS-facing placeholder reader for future WebGPU package data. This
 package mirrors the reader API so downstream tooling can reserve imports and
@@ -12,7 +12,7 @@ The package currently defines the standalone public API shell. `Read` and
 The package root exports one public class: `CjsWebGPUReader`.
 
 ```js
-import CjsWebGPUReader from "reader-webgpu";
+import CjsWebGPUReader from "@carbonenginejs/reader-webgpu";
 
 const reader = new CjsWebGPUReader({
   emit: "json",       // "json" (default) | "raw"
@@ -36,7 +36,7 @@ const text = JSON.stringify(reader.ToJSON(json));
 Named import is also available:
 
 ```js
-import { CjsWebGPUReader } from "reader-webgpu";
+import { CjsWebGPUReader } from "@carbonenginejs/reader-webgpu";
 ```
 
 ## Reader Rules

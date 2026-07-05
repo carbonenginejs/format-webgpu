@@ -1,5 +1,5 @@
 {
-  "name": "reader-webgpu",
+  "name": "@carbonenginejs/reader-webgpu",
   "version": "0.1.0",
   "description": "CarbonEngineJS WebGPU package reader placeholder mirroring the reader package API.",
   "type": "module",
