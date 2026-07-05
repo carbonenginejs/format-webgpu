@@ -10,9 +10,9 @@ import {
     validateClassKey
 } from "./core/helpers.js";
 
-const READER_NAME = "CjsWebGPUReader";
+const FORMAT_NAME = "CjsFormatWebgpu";
 
-export class CjsWebGPUReader
+export class CjsFormatWebgpu
 {
 
     #emit = DEFAULT_VALUES.emit;
@@ -26,7 +26,7 @@ export class CjsWebGPUReader
 
     SetValues(options = {})
     {
-        const values = normalizeValues(this.GetValues(), options, CLASS_KEYS, READER_NAME);
+        const values = normalizeValues(this.GetValues(), options, CLASS_KEYS, FORMAT_NAME);
         this.#emit = values.emit;
         this.#schema = values.schema;
         this.#classes = values.classes;
@@ -39,7 +39,7 @@ export class CjsWebGPUReader
             emit: this.#emit,
             schema: this.#schema,
             classes: this.#classes
-        }, options, CLASS_KEYS, READER_NAME);
+        }, options, CLASS_KEYS, FORMAT_NAME);
     }
 
     SetClasses(classes = {})
@@ -49,21 +49,21 @@ export class CjsWebGPUReader
 
     SetClass(type, Class)
     {
-        validateClassKey(CLASS_KEYS, type, READER_NAME);
+        validateClassKey(CLASS_KEYS, type, FORMAT_NAME);
         if (Class === null || Class === undefined)
         {
             delete this.#classes[type];
             return this;
         }
 
-        validateClass(CLASS_KEYS, type, Class, READER_NAME);
+        validateClass(CLASS_KEYS, type, Class, FORMAT_NAME);
         this.#classes = { ...this.#classes, [type]: Class };
         return this;
     }
 
     GetClass(type)
     {
-        validateClassKey(CLASS_KEYS, type, READER_NAME);
+        validateClassKey(CLASS_KEYS, type, FORMAT_NAME);
         return this.#classes[type];
     }
 
@@ -74,12 +74,12 @@ export class CjsWebGPUReader
 
     Read(input, options = {})
     {
-        return CjsWebGPUReader.read(input, this.GetValues(options));
+        return CjsFormatWebgpu.read(input, this.GetValues(options));
     }
 
     Inspect(input, options = {})
     {
-        return CjsWebGPUReader.inspect(input, this.GetValues(options));
+        return CjsFormatWebgpu.inspect(input, this.GetValues(options));
     }
 
     ToJSON(value)
@@ -89,16 +89,16 @@ export class CjsWebGPUReader
 
     static read(input, options = {})
     {
-        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, READER_NAME);
+        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME);
         void input;
-        throw notImplemented(READER_NAME, "read");
+        throw notImplemented(FORMAT_NAME, "read");
     }
 
     static inspect(input, options = {})
     {
-        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, READER_NAME);
+        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME);
         void input;
-        throw notImplemented(READER_NAME, "inspect");
+        throw notImplemented(FORMAT_NAME, "inspect");
     }
 
     static toJSON(value)
@@ -112,4 +112,4 @@ export class CjsWebGPUReader
 
 }
 
-export default CjsWebGPUReader;
+export default CjsFormatWebgpu;

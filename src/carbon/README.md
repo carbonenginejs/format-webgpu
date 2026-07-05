@@ -1,7 +1,7 @@
 # src/carbon
 
 This folder is a temporary home for CarbonEngine/library-shaped classes that
-are needed by this reader or tooling package before their proper standalone
+are needed by this format or tooling package before their proper standalone
 library exists.
 
 When classes here mirror, reference, or are derived from CarbonEngine or Fenris
@@ -11,8 +11,8 @@ shipping the change. Do not imply affiliation with or endorsement by CCP Games.
 
 Classes here are transient:
 
-- They are not the reader boundary API.
-- Keep the public reader class in `src/Cjs*Reader.js`.
+- They are not the format boundary API.
+- Keep the public format class in `src/CjsFormat*.js`.
 - Keep parser, codec, conversion, and validation helpers in `src/core`.
 - Move these classes into the correct standalone library package when that
   package exists.

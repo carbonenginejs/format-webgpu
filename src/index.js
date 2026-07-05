@@ -1,1 +1,1 @@
-export { CjsWebGPUReader, default } from "./CjsWebGPUReader.js";
+export { CjsFormatWebgpu, default } from "./CjsFormatWebgpu.js";

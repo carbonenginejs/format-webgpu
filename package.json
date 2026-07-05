@@ -1,7 +1,7 @@
 {
-  "name": "@carbonenginejs/reader-webgpu",
+  "name": "@carbonenginejs/format-webgpu",
   "version": "0.1.0",
-  "description": "CarbonEngineJS WebGPU package reader placeholder mirroring the reader package API.",
+  "description": "CarbonEngineJS WebGPU format package placeholder mirroring the shared format API.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -12,11 +12,11 @@
   },
   "scripts": {
     "test": "node --test",
-    "lint": "node --check src/index.js && node --check src/CjsWebGPUReader.js && node --check src/core/helpers.js && node --check src/core/schema.js && node --check test/public-api.test.mjs"
+    "lint": "node --check src/index.js && node --check src/CjsFormatWebgpu.js && node --check src/core/helpers.js && node --check src/core/schema.js && node --check test/public-api.test.mjs"
   },
   "keywords": [
     "carbonenginejs",
-    "reader-webgpu",
+    "format-webgpu",
     "webgpu",
     "package"
   ],

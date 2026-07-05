@@ -1,4 +1,4 @@
-# @carbonenginejs/reader-webgpu
+# @carbonenginejs/format-webgpu
 
 CarbonEngineJS-facing placeholder reader for future WebGPU package data. This
 package mirrors the reader API so downstream tooling can reserve imports and
@@ -16,12 +16,12 @@ affiliated with or endorsed by CCP Games.
 
 ## Public API
 
-The package root exports one public class: `CjsWebGPUReader`.
+The package root exports one public class: `CjsFormatWebgpu`.
 
 ```js
-import CjsWebGPUReader from "@carbonenginejs/reader-webgpu";
+import CjsFormatWebgpu from "@carbonenginejs/format-webgpu";
 
-const reader = new CjsWebGPUReader({
+const reader = new CjsFormatWebgpu({
   emit: "json",       // "json" (default) | "raw"
   schema: webgpuSchema,
   classes: {
@@ -43,17 +43,17 @@ const text = JSON.stringify(reader.ToJSON(json));
 Named import is also available:
 
 ```js
-import { CjsWebGPUReader } from "@carbonenginejs/reader-webgpu";
+import { CjsFormatWebgpu } from "@carbonenginejs/format-webgpu";
 ```
 
 ## Reader Rules
 
 - Instance methods are PascalCase to avoid collisions with CarbonClass data.
-- Static one-shot methods are camelCase and live on `CjsWebGPUReader`.
+- Static one-shot methods are camelCase and live on `CjsFormatWebgpu`.
 - Use `reader.SetClass(type, Class)`, `reader.SetClasses(classes)`, or
   `classes` in the options object for class hydration.
 - Accepted class keys are shown in the example above and exposed as
-  `CjsWebGPUReader.CLASS_KEYS`.
+  `CjsFormatWebgpu.CLASS_KEYS`.
 - Shared schema, decorators, registries, and hydration utilities belong in the
   future `core-types` package.
 
