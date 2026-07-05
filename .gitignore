@@ -1,0 +1,12 @@
+node_modules/
+*.log
+.DS_Store
+
+# Local agent/tool state. The org root owns durable agent KB by default.
+.agents/
+.claude/
+.codex/
+.skill/
+.skills/
+
+/cache/

@@ -1,0 +1,29 @@
+{
+  "name": "reader-webgpu",
+  "version": "0.1.0",
+  "description": "CarbonEngineJS WebGPU package reader placeholder mirroring the reader package API.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check src/index.js && node --check src/CjsWebGPUReader.js && node --check src/core/helpers.js && node --check src/core/schema.js && node --check test/public-api.test.mjs"
+  },
+  "keywords": [
+    "carbonenginejs",
+    "reader-webgpu",
+    "webgpu",
+    "package"
+  ],
+  "files": [
+    "src",
+    "NOTICE",
+    "README.md"
+  ],
+  "license": "SEE LICENSE IN NOTICE"
+}
