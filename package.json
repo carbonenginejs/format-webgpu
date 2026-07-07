@@ -26,5 +26,8 @@
     "NOTICE",
     "README.md"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
