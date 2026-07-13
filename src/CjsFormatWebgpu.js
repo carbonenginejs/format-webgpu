@@ -1,10 +1,19 @@
 import { CLASS_KEYS } from "./core/schema.js";
+import { lowerDxbcToIr } from "./core/ir/lowerDxbcToIr.js";
+import { buildWgsl } from "./core/wgsl/emitWgsl.js";
+import { buildWgslSet } from "./core/wgsl/buildWgslSet.js";
 import {
+    CEWGPU_ANALYSIS_FORMAT,
+    CEWGPU_FORMAT,
     DEFAULT_VALUES,
     OUTPUT_JSON,
     OUTPUT_RAW,
+    analyzeEffectWithValues,
+    buildPackage,
+    inspectWithValues,
+    isCewgpu,
     normalizeValues,
-    notImplemented,
+    readWithValues,
     toJsonValue,
     validateClass,
     validateClassKey
@@ -13,16 +22,18 @@ import {
 const FORMAT_NAME = "CjsFormatWebgpu";
 
 /**
- * CarbonEngineJS-facing WebGPU format profile.
+ * CarbonEngineJS-facing format surface for `.cewgpu` WebGPU packages, plus an
+ * offline effect-analysis helper built on `format-hlsl` and `format-dxbc`.
  *
- * This package currently defines the public API shape and schema/class
- * registration boundary. WebGPU output is intentionally reserved for the
- * implementation pass so callers can depend on the same surface early.
+ * Phase 1 owns the package read/build surface and normalized shader analysis.
+ * WGSL emission is intentionally a later pass.
  */
 export class CjsFormatWebgpu
 {
-
     #emit = DEFAULT_VALUES.emit;
+    #source = DEFAULT_VALUES.source;
+    #decodeInstructions = DEFAULT_VALUES.decodeInstructions;
+    #permutation = DEFAULT_VALUES.permutation;
     #schema = DEFAULT_VALUES.schema;
     #classes = {};
 
@@ -46,6 +57,9 @@ export class CjsFormatWebgpu
     {
         const values = normalizeValues(this.GetValues(), options, CLASS_KEYS, FORMAT_NAME);
         this.#emit = values.emit;
+        this.#source = values.source;
+        this.#decodeInstructions = values.decodeInstructions;
+        this.#permutation = values.permutation;
         this.#schema = values.schema;
         this.#classes = values.classes;
         return this;
@@ -61,6 +75,9 @@ export class CjsFormatWebgpu
     {
         return normalizeValues({
             emit: this.#emit,
+            source: this.#source,
+            decodeInstructions: this.#decodeInstructions,
+            permutation: this.#permutation,
             schema: this.#schema,
             classes: this.#classes
         }, options, CLASS_KEYS, FORMAT_NAME);
@@ -81,7 +98,7 @@ export class CjsFormatWebgpu
      * Set one node-class constructor for this profile.
      *
      * @param {string} type Node class key.
-     * @param {Function|null|undefined} Class Constructor to use, or nullish to delete.
+     * @param {Function|null|undefined} Class constructor to use, or nullish to delete.
      * @returns {CjsFormatWebgpu} This format profile.
      */
     SetClass(type, Class)
@@ -122,27 +139,86 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Read WebGPU data with this profile's values.
+     * Read a CEWGPU package with this profile's values.
      *
-     * @param {unknown} input WebGPU format input.
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input CEWGPU package bytes.
      * @param {object} [options] Per-call value overrides.
-     * @returns {object} Format output once implemented.
+     * @returns {object} Plain JSON data, or the raw package instance when emit is "raw".
      */
     Read(input, options = {})
     {
-        return CjsFormatWebgpu.read(input, this.GetValues(options));
+        return readWithValues(input, this.GetValues(options));
     }
 
     /**
-     * Inspect WebGPU data with this profile's values.
+     * Inspect a CEWGPU package without building the full JSON shape.
      *
-     * @param {unknown} input WebGPU format input.
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input CEWGPU package bytes.
      * @param {object} [options] Per-call value overrides.
-     * @returns {object} Plain summary data once implemented.
+     * @returns {object} Plain summary data.
      */
     Inspect(input, options = {})
     {
-        return CjsFormatWebgpu.inspect(input, this.GetValues(options));
+        return inspectWithValues(input, this.GetValues(options));
+    }
+
+    /**
+     * Assembles a CEWGPU package from ordered chunk payloads.
+     *
+     * @param {Array<[string, string|object|Uint8Array|ArrayBuffer|ArrayBufferView]>} chunks Ordered package chunks.
+     * @returns {Uint8Array} Package bytes.
+     */
+    Build(chunks)
+    {
+        return buildPackage(chunks);
+    }
+
+    /**
+     * Analyzes one compiled effect payload into a normalized WebGPU-facing
+     * document using the current profile's values.
+     *
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input Tr2 effect bytes.
+     * @param {object} [options] Per-call value overrides.
+     * @returns {object} Plain JSON-compatible analysis data.
+     */
+    AnalyzeEffect(input, options = {})
+    {
+        return analyzeEffectWithValues(input, this.GetValues(options));
+    }
+
+    /**
+     * Lowers DXBC bytes or decoded instructions into the front-end shader IR.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC input.
+     * @param {object} [options] IR provenance options.
+     * @returns {object} Frozen shader IR program.
+     */
+    BuildShaderIr(input, options = {})
+    {
+        return lowerDxbcToIr(input, options);
+    }
+
+    /**
+     * Emits WGSL for the currently supported typed shader slice.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC or shader IR.
+     * @param {object} [options] Source/provenance options.
+     * @returns {object} Frozen WGSL shader descriptor.
+     */
+    BuildWgsl(input, options = {})
+    {
+        return buildWgsl(input, options);
+    }
+
+    /**
+     * Assembles emitted shader descriptors into a portable WGSL set.
+     *
+     * @param {object[]} entries Canonically keyed emitted shader descriptors.
+     * @returns {object} Frozen CJS_WGSL_SET document.
+     */
+    BuildWgslSet(entries)
+    {
+        return buildWgslSet(entries);
     }
 
     /**
@@ -157,31 +233,96 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Static one-shot read. Static methods use camelCase by convention.
+     * Static payload sniff. Static methods use camelCase by convention.
      *
-     * @param {unknown} input WebGPU format input.
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input Candidate bytes.
+     * @returns {boolean} True when the payload starts with the CEWGPU magic.
+     */
+    static isCewgpu(input)
+    {
+        return isCewgpu(input);
+    }
+
+    /**
+     * Static one-shot read.
+     *
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input CEWGPU package bytes.
      * @param {object} [options] Format values.
-     * @returns {object} Format output once implemented.
+     * @returns {object} Plain JSON data, or the raw package instance when emit is "raw".
      */
     static read(input, options = {})
     {
-        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME);
-        void input;
-        throw notImplemented(FORMAT_NAME, "read");
+        return readWithValues(input, normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME));
     }
 
     /**
      * Static one-shot inspection.
      *
-     * @param {unknown} input WebGPU format input.
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input CEWGPU package bytes.
      * @param {object} [options] Format values.
-     * @returns {object} Plain summary data once implemented.
+     * @returns {object} Plain summary data.
      */
     static inspect(input, options = {})
     {
-        normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME);
-        void input;
-        throw notImplemented(FORMAT_NAME, "inspect");
+        return inspectWithValues(input, normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME));
+    }
+
+    /**
+     * Static one-shot package build.
+     *
+     * @param {Array<[string, string|object|Uint8Array|ArrayBuffer|ArrayBufferView]>} chunks Ordered package chunks.
+     * @returns {Uint8Array} Package bytes.
+     */
+    static build(chunks)
+    {
+        return buildPackage(chunks);
+    }
+
+    /**
+     * Static one-shot effect analysis.
+     *
+     * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input Tr2 effect bytes.
+     * @param {object} [options] Format values.
+     * @returns {object} Plain JSON-compatible analysis data.
+     */
+    static analyzeEffect(input, options = {})
+    {
+        return analyzeEffectWithValues(input, normalizeValues(DEFAULT_VALUES, options, CLASS_KEYS, FORMAT_NAME));
+    }
+
+    /**
+     * Static DXBC-to-front-end-IR helper.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC input.
+     * @param {object} [options] IR provenance options.
+     * @returns {object} Frozen shader IR program.
+     */
+    static buildShaderIr(input, options = {})
+    {
+        return lowerDxbcToIr(input, options);
+    }
+
+    /**
+     * Static WGSL emission helper for the currently supported typed slice.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC or shader IR.
+     * @param {object} [options] Source/provenance options.
+     * @returns {object} Frozen WGSL shader descriptor.
+     */
+    static buildWgsl(input, options = {})
+    {
+        return buildWgsl(input, options);
+    }
+
+    /**
+     * Static WGSL-set assembly helper.
+     *
+     * @param {object[]} entries Canonically keyed emitted shader descriptors.
+     * @returns {object} Frozen CJS_WGSL_SET document.
+     */
+    static buildWgslSet(entries)
+    {
+        return buildWgslSet(entries);
     }
 
     /**
@@ -198,7 +339,14 @@ export class CjsFormatWebgpu
     static OUTPUT_JSON = OUTPUT_JSON;
     static OUTPUT_RAW = OUTPUT_RAW;
     static CLASS_KEYS = CLASS_KEYS;
-
+    static type = Object.freeze([ "shader" ]);
+    static mediaTypes = Object.freeze([ "shader" ]);
+    static inputTypes = Object.freeze([ "cewgpu" ]);
+    static outputTypes = Object.freeze([ OUTPUT_JSON ]);
+    static debugOutputTypes = Object.freeze([ OUTPUT_RAW ]);
+    static implementationStatus = "partial";
+    static format = CEWGPU_FORMAT;
+    static analysisFormat = CEWGPU_ANALYSIS_FORMAT;
 }
 
 export default CjsFormatWebgpu;

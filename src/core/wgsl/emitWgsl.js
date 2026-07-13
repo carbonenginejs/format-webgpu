@@ -1,0 +1,128 @@
+import { lowerDxbcToIr } from "../ir/lowerDxbcToIr.js";
+import { lowerFragmentProgram } from "./lowerFragmentProgram.js";
+import { lowerVertexProgram } from "./lowerVertexProgram.js";
+
+const COMPONENTS = [ "x", "y", "z", "w" ];
+
+function attribute(field)
+{
+    return field.attribute.kind === "builtin"
+        ? `@builtin(${field.attribute.name})`
+        : `@location(${field.attribute.index})`;
+}
+
+function access(base, field, components)
+{
+    const natural = COMPONENTS.slice(0, field.components.length);
+    const suffix = components.length === natural.length
+        && components.every((component, index) => component === natural[index])
+        ? ""
+        : `.${components.join("")}`;
+    return `${base}.${field.name}${suffix}`;
+}
+
+function emitStruct(lines, name, fields)
+{
+    lines.push(`struct ${name}`, "{");
+    for (const field of fields)
+    {
+        lines.push(`    ${attribute(field)} ${field.name}: ${field.type},`);
+    }
+    lines.push("};", "");
+}
+
+function deepFreeze(value)
+{
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+    for (const entry of Object.values(value)) deepFreeze(entry);
+    return Object.freeze(value);
+}
+
+/**
+ * Builds deterministic WGSL and a DXBC-offset source map for the supported IR.
+ *
+ * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC or CJS IR.
+ * @param {object} [options] Source/provenance options.
+ * @returns {object} Frozen WGSL shader descriptor.
+ */
+export function buildWgsl(input, options = {})
+{
+    const ir = input?.format === "CJS_SHADER_IR" ? input : lowerDxbcToIr(input, options);
+    const program = ir.stage === "vertex" ? lowerVertexProgram(ir) : lowerFragmentProgram(ir);
+    const lines = [];
+    const sourceMap = [];
+    const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
+    emitStruct(lines, `${prefix}Input`, program.interface.inputs);
+    emitStruct(lines, `${prefix}Output`, program.interface.outputs);
+    for (const binding of program.bindings || [])
+    {
+        lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);
+    }
+    if (program.bindings?.length) lines.push("");
+    lines.push(`@${program.stage}`, `fn ${program.entryPoint}(input: ${prefix}Input) -> ${prefix}Output`, "{", `    var output: ${prefix}Output;`);
+
+    const inputById = new Map(program.interface.inputs.map((field) => [ field.id, field ]));
+    const outputById = new Map(program.interface.outputs.map((field) => [ field.id, field ]));
+
+    function emitStatement(statement, depth)
+    {
+        const indent = "    ".repeat(depth);
+        const line = lines.length + 1;
+        if (statement.kind === "assignment")
+        {
+            const targetField = outputById.get(statement.target.fieldId);
+            if (statement.expression.fieldId)
+            {
+                const sourceField = inputById.get(statement.expression.fieldId);
+                lines.push(`${indent}${access("output", targetField, statement.target.components)} = ${access("input", sourceField, statement.expression.components)};`);
+            }
+            else
+            {
+                lines.push(`${indent}${access("output", targetField, statement.target.components)} = ${statement.expression.code};`);
+            }
+        }
+        else if (statement.kind === "let")
+        {
+            lines.push(`${indent}let ${statement.name}: ${statement.type} = ${statement.expression.code};`);
+        }
+        else if (statement.kind === "var")
+        {
+            lines.push(`${indent}var ${statement.name}: ${statement.type} = ${statement.expression.code};`);
+        }
+        else if (statement.kind === "value-assignment")
+        {
+            lines.push(`${indent}${statement.name} = ${statement.expression.code};`);
+        }
+        else if (statement.kind === "return")
+        {
+            lines.push(`${indent}return output;`);
+        }
+        else if (statement.kind === "if")
+        {
+            lines.push(`${indent}if (${statement.condition.code})`, `${indent}{`);
+            sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
+            for (const child of statement.statements) emitStatement(child, depth + 1);
+            lines.push(`${indent}}`);
+            return;
+        }
+        if (Number.isInteger(statement.instructionIndex) && Number.isInteger(statement.dxbcOffset))
+        {
+            sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
+        }
+    }
+
+    for (const statement of program.statements) emitStatement(statement, 1);
+    lines.push("}", "");
+
+    return deepFreeze({
+        kind: "wgsl-shader",
+        format: "CJS_WGSL_SHADER",
+        formatVersion: 1,
+        source: program.source,
+        stage: program.stage,
+        entryPoint: program.entryPoint,
+        code: lines.join("\n"),
+        sourceMap,
+        program
+    });
+}
