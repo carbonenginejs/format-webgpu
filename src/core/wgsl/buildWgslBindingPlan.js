@@ -7,6 +7,10 @@ const KIND_ORDER = Object.freeze({
     "storage-resource": 3
 });
 
+const STAGE_VISIBILITY = Object.freeze({ vertex: "vertex", pixel: "fragment" });
+const STAGE_ORDER = Object.freeze({ vertex: 0, fragment: 1 });
+const IDENTITY_PATTERN = /^(uniform-buffer|sampled-resource|sampler|storage-resource):\d+:\d+$/u;
+
 function identity(binding)
 {
     return `${binding.resourceKind}:${binding.registerSpace}:${binding.registerIndex}`;
@@ -14,8 +18,9 @@ function identity(binding)
 
 function portableBinding(binding)
 {
+    const d3dIdentity = identity(binding);
     return {
-        identity: identity(binding),
+        identity: d3dIdentity,
         resourceKind: binding.resourceKind,
         generatedSymbol: binding.generatedSymbol,
         registerSpace: binding.registerSpace,
@@ -30,7 +35,7 @@ function portableBinding(binding)
 
 function fingerprint(binding)
 {
-    return JSON.stringify(portableBinding(binding));
+    return JSON.stringify(binding);
 }
 
 function deepFreeze(value)
@@ -41,10 +46,11 @@ function deepFreeze(value)
 }
 
 /**
- * Builds one deterministic numeric binding plan shared by all shader stages in
- * a pass. Callers feed the returned plan back into BuildWgsl for every stage.
+ * Builds one deterministic numeric binding plan for all shader stages in a
+ * pass. Unshared D3D tuples remain stage-scoped unless the caller explicitly
+ * confirms that compatible declarations describe one shared resource.
  *
- * @param {object[]} programs CJS shader IR programs from one effect pass.
+ * @param {object[]} programs Complete CJS shader IR stage set for one effect pass.
  * @param {object} [options] Explicit pass-level identity policy.
  * @param {string[]} [options.sharedIdentities] D3D identities confirmed by
  * pass metadata/CjsLibrary to represent one resource across stages.
@@ -56,45 +62,91 @@ export function buildWgslBindingPlan(programs, options = {})
     {
         throw new TypeError("BuildWgslBindingPlan expects at least one CJS shader IR program");
     }
-    const sharedIdentities = new Set(options.sharedIdentities || []);
-    if (![ ...sharedIdentities ].every((entry) => typeof entry === "string" && /^(uniform-buffer|sampled-resource|sampler|storage-resource):\d+:\d+$/u.test(entry)))
+    if (!options || typeof options !== "object" || Array.isArray(options))
     {
-        throw new TypeError("BuildWgslBindingPlan sharedIdentities must contain D3D resource identities");
+        throw new TypeError("BuildWgslBindingPlan options must be an object");
     }
+    const requestedShared = options.sharedIdentities === undefined ? [] : options.sharedIdentities;
+    if (!Array.isArray(requestedShared)
+        || requestedShared.some((entry) => typeof entry !== "string" || !IDENTITY_PATTERN.test(entry))
+        || new Set(requestedShared).size !== requestedShared.length)
+    {
+        throw new TypeError("BuildWgslBindingPlan sharedIdentities must contain unique D3D resource identities");
+    }
+    const sharedIdentities = new Set(requestedShared);
     const identities = new Map();
+    const programStages = new Set();
     for (const [ index, program ] of programs.entries())
     {
-        if (program?.format !== "CJS_SHADER_IR")
+        if (program?.format !== "CJS_SHADER_IR" || program.formatVersion !== 1)
         {
-            throw new TypeError(`BuildWgslBindingPlan program ${index} is not CJS_SHADER_IR`);
+            throw new TypeError(`BuildWgslBindingPlan program ${index} is not CJS_SHADER_IR version 1`);
         }
+        const stage = STAGE_VISIBILITY[program.stage];
+        if (!stage)
+        {
+            throw new Error(`BuildWgslBindingPlan program ${index} has unsupported stage ${program.stage || "unknown"}`);
+        }
+        if (programStages.has(stage))
+        {
+            throw new Error(`BuildWgslBindingPlan contains multiple ${stage} programs for one pass`);
+        }
+        programStages.add(stage);
         for (const binding of lowerBindingLayout(program))
         {
             const key = identity(binding);
             const entry = portableBinding(binding);
-            const existing = identities.get(key);
-            if (existing && fingerprint(existing.binding) !== fingerprint(entry))
-            {
-                throw new Error(`WGSL pass binding ${key} has incompatible stage declarations`);
-            }
-            if (existing && !sharedIdentities.has(key))
-            {
-                throw new Error(`WGSL pass binding ${key} appears in multiple stages without an explicit shared identity`);
-            }
-            if (!existing) identities.set(key, { binding: entry, programIndex: index });
+            if (!identities.has(key)) identities.set(key, []);
+            identities.get(key).push({ binding: entry, stage });
         }
     }
-    const bindings = Array.from(identities.values(), (entry) => entry.binding)
-        .sort((left, right) =>
-            left.registerSpace - right.registerSpace
-            || (KIND_ORDER[left.resourceKind] ?? 99) - (KIND_ORDER[right.resourceKind] ?? 99)
-            || left.registerIndex - right.registerIndex
-            || left.generatedSymbol.localeCompare(right.generatedSymbol))
+
+    const bindings = [];
+    for (const [ key, occurrences ] of identities)
+    {
+        const stages = occurrences.map((entry) => entry.stage)
+            .sort((left, right) => STAGE_ORDER[left] - STAGE_ORDER[right]);
+        if (sharedIdentities.has(key))
+        {
+            if (occurrences.length < 2)
+            {
+                throw new Error(`WGSL shared identity ${key} does not occur in multiple stages`);
+            }
+            const expected = fingerprint(occurrences[0].binding);
+            if (occurrences.some((entry) => fingerprint(entry.binding) !== expected))
+            {
+                throw new Error(`WGSL shared identity ${key} has incompatible stage declarations`);
+            }
+            bindings.push({ ...occurrences[0].binding, scopeIdentity: key, stages });
+            continue;
+        }
+        for (const occurrence of occurrences)
+        {
+            bindings.push({
+                ...occurrence.binding,
+                scopeIdentity: `${key}@${occurrence.stage}`,
+                stages: [ occurrence.stage ]
+            });
+        }
+    }
+    for (const key of sharedIdentities)
+    {
+        if (!identities.has(key)) throw new Error(`WGSL shared identity ${key} does not occur in the pass`);
+    }
+
+    bindings.sort((left, right) =>
+        left.registerSpace - right.registerSpace
+        || (KIND_ORDER[left.resourceKind] ?? 99) - (KIND_ORDER[right.resourceKind] ?? 99)
+        || left.registerIndex - right.registerIndex
+        || (STAGE_ORDER[left.stages[0]] ?? 99) - (STAGE_ORDER[right.stages[0]] ?? 99)
+        || left.generatedSymbol.localeCompare(right.generatedSymbol)
+        || left.scopeIdentity.localeCompare(right.scopeIdentity));
+    const plannedBindings = bindings
         .map((binding, bindingIndex) => ({ ...binding, group: 0, binding: bindingIndex }));
     return deepFreeze({
         format: "CJS_WGSL_BINDING_PLAN",
-        formatVersion: 1,
+        formatVersion: 2,
         ...(sharedIdentities.size ? { sharedIdentities: Object.freeze([ ...sharedIdentities ].sort()) } : {}),
-        bindings
+        bindings: plannedBindings
     });
 }

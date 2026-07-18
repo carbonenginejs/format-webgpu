@@ -126,6 +126,21 @@ function instruction(offset, opcodeName, operands, values = {})
     return { offset, opcode: 0, opcodeName, isDeclaration: false, operands, ...values };
 }
 
+function globalFlagsDeclaration(refactoringAllowed = true)
+{
+    return {
+        offset: 0,
+        opcode: 0,
+        opcodeName: "dcl_global_flags",
+        isDeclaration: true,
+        declaration: {
+            globalFlags: refactoringAllowed ? 1 << 11 : 0,
+            refactoringAllowed
+        },
+        operands: []
+    };
+}
+
 function arithmeticVertex(minor = 0)
 {
     const range1 = minor === 1 ? 5 : null;
@@ -143,6 +158,7 @@ function arithmeticVertex(minor = 0)
             ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             cbufferDeclaration(2, 1, 4, range1),
             cbufferDeclaration(5, 3, 2, range3),
             instruction(8, "mov", [
@@ -221,6 +237,7 @@ function packedMathVertex(minor = 0)
             ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             instruction(2, "sincos", [
                 register("temp", 0, { mask: "xyzw" }),
                 register("temp", 1, { mask: "xyzw" }),
@@ -263,7 +280,7 @@ function structuredSkinningVertex(minor = 0, { precise = false, swizzle = "xzyw"
 {
     const cbRange = minor === 1 ? 7 : null;
     const resourceRange = minor === 1 ? 9 : null;
-    const controls = precise ? { preciseMask: mask } : {};
+    const controls = (preciseMask) => precise ? { preciseMask } : {};
     return {
         program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: minor },
         signatures: {
@@ -271,23 +288,24 @@ function structuredSkinningVertex(minor = 0, { precise = false, swizzle = "xzyw"
             output: [ signature("SV_Position", 0, 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             cbufferDeclaration(2, 3, 27, cbRange),
             structuredDeclaration(6, minor, resourceRange),
             instruction(10, "iadd", [
                 register("temp", 0, { mask: "x" }),
                 register("input", 1, { selected: "x" }),
                 cbuffer(3, 26, "xxxx", cbRange)
-            ], controls),
+            ], controls("x")),
             instruction(16, "ld_structured", [
                 register("temp", 1, { mask }),
                 register("temp", 0, { selected: "x" }),
                 immediate([ 16 ]),
                 structuredResource(minor, swizzle, resourceRange)
-            ], controls),
+            ], controls(mask)),
             instruction(22, "mov", [
                 register("output", 0, { mask }),
                 register("temp", 1, { swizzle: "xyzw" })
-            ], controls),
+            ], controls(mask)),
             ...(mask === "xyzw" ? [] : [
                 instruction(26, "mov", [
                     register("output", 0, { mask: Array.from("xyzw").filter((entry) => !mask.includes(entry)).join("") }),
@@ -308,6 +326,7 @@ function dualIndexStructuredVertex()
             output: [ signature("SV_Position", 0, 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             cbufferDeclaration(2, 3, 27),
             structuredDeclaration(6, 0),
             instruction(10, "iadd", [
@@ -442,14 +461,75 @@ test("structured skinning requires complete vector result reinterpretation metad
     assert.throws(() => CjsFormatWebgpu.buildWgsl(missing), /inconsistent register bitcast metadata/u);
 });
 
-test("structured skinning keeps precise controls strict without a lossy escape hatch", () =>
+test("structured skinning accepts only vacuous precise integer and bit-transport operations", () =>
 {
     const decoded = structuredSkinningVertex(0, { precise: true });
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /uses precise controls/u);
+    const shader = CjsFormatWebgpu.buildWgsl(decoded);
+    assert.match(shader.code, /let value\d+: u32 = bitcast<u32>\(\(bitcast<i32>/u);
+    assert.match(shader.code, /var<storage, read> t0: array<u32>/u);
+
+    const partial = structuredClone(CjsFormatWebgpu.buildShaderIr(decoded));
+    partial.instructions.find((entry) => entry.opcodeName === "ld_structured").preciseMask = "xz";
+    assert.match(CjsFormatWebgpu.buildWgsl(partial).code, /bitcast<f32>\(t0\[/u);
+
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(decoded, { precisionPolicy: "relaxed" }),
         /precisionPolicy is not supported/u
     );
+});
+
+test("precise floating arithmetic remains a strict WGSL portability boundary", () =>
+{
+    const decoded = arithmeticVertex();
+    decoded.instructions.find((entry) => entry.opcodeName === "dp4").preciseMask = "x";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(decoded),
+        /precise dp4 mask x requires no-refactoring controls unavailable in WGSL/u
+    );
+});
+
+test("precise metadata rejects malformed masks, unrelated lanes, and arithmetic modifiers", () =>
+{
+    const malformed = structuredSkinningVertex(0, { precise: true });
+    malformed.instructions.find((entry) => entry.opcodeName === "iadd").preciseMask = "zx";
+    assert.throws(() => CjsFormatWebgpu.buildShaderIr(malformed), /invalid precise component mask/u);
+
+    const unrelated = structuredSkinningVertex(0, { precise: true });
+    unrelated.instructions.find((entry) => entry.opcodeName === "iadd").preciseMask = "y";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(unrelated),
+        /requires one destination write containing every precise lane/u
+    );
+
+    const modified = structuredSkinningVertex(0, { precise: true });
+    modified.instructions.find((entry) => entry.opcodeName === "mov").operands[1].modifierName = "neg";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(modified),
+        /requires unsaturated, unmodified operands/u
+    );
+
+    const direct = structuredClone(CjsFormatWebgpu.buildShaderIr(structuredSkinningVertex()));
+    direct.instructions.find((entry) => entry.opcodeName === "mov").preciseMask = null;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(direct), /malformed component mask null/u);
+});
+
+test("WGSL lowering requires consistent DXBC refactoring controls", () =>
+{
+    const absent = structuredSkinningVertex();
+    absent.instructions = absent.instructions.filter((entry) => entry.opcodeName !== "dcl_global_flags");
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(absent), /requires exactly one dcl_global_flags/u);
+
+    const disabled = structuredSkinningVertex();
+    Object.assign(disabled.instructions[0].declaration, { globalFlags: 0, refactoringAllowed: false });
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(disabled), /disables refactoring globally/u);
+
+    const duplicate = structuredSkinningVertex();
+    duplicate.instructions.push(globalFlagsDeclaration());
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(duplicate), /requires exactly one dcl_global_flags/u);
+
+    const inconsistent = structuredSkinningVertex();
+    inconsistent.instructions[0].declaration.globalFlags = 0;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(inconsistent), /inconsistent dcl_global_flags metadata/u);
 });
 
 test("structured skinning rejects minimum precision on every operand role", () =>

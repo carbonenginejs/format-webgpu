@@ -58,10 +58,16 @@ function portableLayout(layout)
     return layout.map(({ rangeId, ...entry }) => entry);
 }
 
-function vertexConstantBuffers(entries)
+function constantBuffers(stageName, entries)
 {
+    const vertex = stageName === "vertex";
     return {
-        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        program: {
+            programType: vertex ? 1 : 0,
+            programTypeName: vertex ? "vertex" : "pixel",
+            majorVersion: 5,
+            minorVersion: 0
+        },
         instructions: [
             ...entries.map(([ registerIndex, sizeInVec4 ], index) => ({
                 offset: 2 + index * 3,
@@ -76,6 +82,16 @@ function vertexConstantBuffers(entries)
     };
 }
 
+function vertexConstantBuffers(entries)
+{
+    return constantBuffers("vertex", entries);
+}
+
+function pixelConstantBuffers(entries)
+{
+    return constantBuffers("pixel", entries);
+}
+
 function structuredVertexBinding(minor, stride = 48)
 {
     return {
@@ -84,6 +100,23 @@ function structuredVertexBinding(minor, stride = 48)
             declaration(3, "dcl_resource_structured", "resource", { structureStride: stride }, minor),
             { offset: 20, opcode: 62, opcodeName: "ret", isDeclaration: false, operands: [] }
         ]
+    };
+}
+
+function emitted(stage, bindings)
+{
+    return {
+        format: "CJS_WGSL_SHADER",
+        formatVersion: 1,
+        stage,
+        code: `@${stage} fn main() {}`,
+        entryPoint: "main",
+        sourceMap: [],
+        program: {
+            format: "CJS_TYPED_SHADER",
+            formatVersion: 1,
+            bindings
+        }
     };
 }
 
@@ -159,6 +192,8 @@ test("structured SRV lowering preserves the t-register identity as a read-only s
     assert.deepEqual(dx11[0], {
         kind: "wgsl-binding",
         id: "sampled-resource:space0:range0",
+        identity: "sampled-resource:0:0",
+        scopeIdentity: "sampled-resource:0:0@vertex",
         resourceKind: "sampled-resource",
         generatedSymbol: "t0",
         registerSpace: 0,
@@ -176,7 +211,10 @@ test("structured SRV lowering preserves the t-register identity as a read-only s
 
     const plan = CjsFormatWebgpu.buildWgslBindingPlan([ dx11Ir ]);
     assert.equal(plan.bindings[0].structureStride, 48);
-    assert.deepEqual(lowerBindingLayout(dx11Ir, plan), dx11);
+    assert.deepEqual(lowerBindingLayout(dx11Ir, plan), [ {
+        ...dx11[0],
+        scopeIdentity: "sampled-resource:0:0@vertex"
+    } ]);
 });
 
 test("structured SRV lowering rejects non-DWORD strides", () =>
@@ -191,12 +229,15 @@ test("pass-global binding planning assigns one dense union across vertex and pix
     const pixel = CjsFormatWebgpu.buildShaderIr(copyblitPixelBindings(0));
     const plan = CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ]);
 
-    assert.deepEqual(plan.bindings.map((entry) => [ entry.identity, entry.group, entry.binding ]), [
-        [ "uniform-buffer:0:0", 0, 0 ],
-        [ "uniform-buffer:0:1", 0, 1 ],
-        [ "uniform-buffer:0:3", 0, 2 ],
-        [ "sampled-resource:0:0", 0, 3 ],
-        [ "sampler:0:0", 0, 4 ]
+    assert.equal(plan.formatVersion, 2);
+    assert.deepEqual(plan.bindings.map((entry) => [
+        entry.identity, entry.scopeIdentity, entry.stages, entry.group, entry.binding
+    ]), [
+        [ "uniform-buffer:0:0", "uniform-buffer:0:0@fragment", [ "fragment" ], 0, 0 ],
+        [ "uniform-buffer:0:1", "uniform-buffer:0:1@vertex", [ "vertex" ], 0, 1 ],
+        [ "uniform-buffer:0:3", "uniform-buffer:0:3@vertex", [ "vertex" ], 0, 2 ],
+        [ "sampled-resource:0:0", "sampled-resource:0:0@fragment", [ "fragment" ], 0, 3 ],
+        [ "sampler:0:0", "sampler:0:0@fragment", [ "fragment" ], 0, 4 ]
     ]);
     assert.deepEqual(
         lowerBindingLayout(vertex, plan).map((entry) => [ entry.generatedSymbol, entry.binding ]),
@@ -208,33 +249,167 @@ test("pass-global binding planning assigns one dense union across vertex and pix
     );
     assert.equal(Object.isFrozen(plan.bindings), true);
     assert.deepEqual(new CjsFormatWebgpu().BuildWgslBindingPlan([ vertex, pixel ]), plan);
+    assert.deepEqual(CjsFormatWebgpu.buildWgslBindingPlan([ pixel, vertex ]), plan);
 });
 
-test("pass-global binding planning rejects incompatible declarations for one identity", () =>
+test("pass-global binding planning scopes incompatible t0 declarations by stage", () =>
 {
-    const first = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
-    const second = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 5 ] ]));
+    const vertex = CjsFormatWebgpu.buildShaderIr(structuredVertexBinding(0));
+    const pixel = CjsFormatWebgpu.buildShaderIr(copyblitPixelBindings(0));
+    const plan = CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ]);
 
+    assert.deepEqual(plan.bindings.map((entry) => [ entry.scopeIdentity, entry.binding ]), [
+        [ "uniform-buffer:0:0@fragment", 0 ],
+        [ "sampled-resource:0:0@vertex", 1 ],
+        [ "sampled-resource:0:0@fragment", 2 ],
+        [ "sampler:0:0@fragment", 3 ]
+    ]);
+    assert.equal(lowerBindingLayout(vertex, plan)[0].binding, 1);
+    assert.equal(lowerBindingLayout(pixel, plan).find((entry) => entry.generatedSymbol === "t0").binding, 2);
     assert.throws(
-        () => CjsFormatWebgpu.buildWgslBindingPlan([ first, second ]),
-        /incompatible stage declarations/u
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ], {
+            sharedIdentities: [ "sampled-resource:0:0" ]
+        }),
+        /shared identity .* incompatible stage declarations/u
     );
 });
 
-test("pass-global binding planning requires explicit confirmation before sharing a cross-stage identity", () =>
+test("pass-global binding planning shares compatible declarations only when confirmed", () =>
 {
-    const first = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
-    const second = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
+    const vertex = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
+    const pixel = CjsFormatWebgpu.buildShaderIr(pixelConstantBuffers([ [ 1, 4 ] ]));
+    const local = CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ]);
 
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgslBindingPlan([ first, second ]),
-        /without an explicit shared identity/u
-    );
-    const plan = CjsFormatWebgpu.buildWgslBindingPlan([ first, second ], {
+    assert.deepEqual(local.bindings.map((entry) => [ entry.scopeIdentity, entry.stages, entry.binding ]), [
+        [ "uniform-buffer:0:1@vertex", [ "vertex" ], 0 ],
+        [ "uniform-buffer:0:1@fragment", [ "fragment" ], 1 ]
+    ]);
+    assert.deepEqual(CjsFormatWebgpu.buildWgslBindingPlan([ pixel, vertex ]), local);
+
+    const plan = CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ], {
         sharedIdentities: [ "uniform-buffer:0:1" ]
     });
     assert.deepEqual(plan.sharedIdentities, [ "uniform-buffer:0:1" ]);
-    assert.deepEqual(plan.bindings.map((entry) => [ entry.identity, entry.binding ]), [
-        [ "uniform-buffer:0:1", 0 ]
+    assert.deepEqual(plan.bindings.map((entry) => [ entry.identity, entry.scopeIdentity, entry.stages, entry.binding ]), [
+        [ "uniform-buffer:0:1", "uniform-buffer:0:1", [ "vertex", "fragment" ], 0 ]
     ]);
+    assert.equal(lowerBindingLayout(vertex, plan)[0].scopeIdentity, "uniform-buffer:0:1");
+    assert.equal(lowerBindingLayout(pixel, plan)[0].scopeIdentity, "uniform-buffer:0:1");
+});
+
+test("pass-global binding planning rejects ambiguous stages and invalid sharing requests", () =>
+{
+    const vertex = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
+
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex, vertex ]),
+        /multiple vertex programs/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex ], {
+            sharedIdentities: [ "uniform-buffer:0:1" ]
+        }),
+        /does not occur in multiple stages/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex ], {
+            sharedIdentities: [ "sampler:0:9" ]
+        }),
+        /does not occur in the pass/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex ], {
+            sharedIdentities: [ "uniform-buffer:0:1", "uniform-buffer:0:1" ]
+        }),
+        /unique D3D resource identities/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex ], { sharedIdentities: null }),
+        /unique D3D resource identities/u
+    );
+});
+
+test("binding-plan consumption rejects malformed scopes, coverage, sharing, and slots", () =>
+{
+    const vertex = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
+    const pixel = CjsFormatWebgpu.buildShaderIr(pixelConstantBuffers([ [ 1, 4 ] ]));
+    const local = structuredClone(CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ]));
+
+    const malformed = structuredClone(local);
+    malformed.bindings[0].scopeIdentity = "uniform-buffer:0:1@fragment";
+    assert.throws(() => lowerBindingLayout(vertex, malformed), /invalid scope identity/u);
+
+    const overlapping = structuredClone(local);
+    overlapping.bindings[1].scopeIdentity = "uniform-buffer:0:1@vertex";
+    overlapping.bindings[1].stages = [ "vertex" ];
+    assert.throws(() => lowerBindingLayout(vertex, overlapping), /duplicate scope identity|overlapping vertex identity/u);
+
+    const duplicateSlot = structuredClone(local);
+    duplicateSlot.bindings[1].binding = duplicateSlot.bindings[0].binding;
+    assert.throws(() => lowerBindingLayout(vertex, duplicateSlot), /assigns 0:0 to multiple scope identities/u);
+
+    const shared = structuredClone(CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ], {
+        sharedIdentities: [ "uniform-buffer:0:1" ]
+    }));
+    delete shared.sharedIdentities;
+    assert.throws(() => lowerBindingLayout(vertex, shared), /shares unconfirmed identity/u);
+
+    const unsharedBase = structuredClone(local);
+    unsharedBase.bindings[0].scopeIdentity = "uniform-buffer:0:1";
+    assert.throws(() => lowerBindingLayout(vertex, unsharedBase), /unshared base identity/u);
+
+    const malformedShared = structuredClone(local);
+    malformedShared.sharedIdentities = null;
+    assert.throws(() => lowerBindingLayout(vertex, malformedShared), /invalid shared identities/u);
+
+    const legacy = structuredClone(CjsFormatWebgpu.buildWgslBindingPlan([ vertex ]));
+    legacy.formatVersion = 1;
+    legacy.bindings.forEach((entry) =>
+    {
+        entry.scopeIdentity = "arbitrary-v2-scope";
+        delete entry.stages;
+    });
+    const legacyVertexBinding = lowerBindingLayout(vertex, legacy)[0];
+    assert.equal(legacyVertexBinding.scopeIdentity, "uniform-buffer:0:1@vertex");
+    const legacySet = CjsFormatWebgpu.buildWgslSet([
+        { key: "Main.pass0.vertex", shader: emitted("vertex", [ legacyVertexBinding ]) }
+    ]);
+    assert.equal(
+        legacySet.layouts[0].bindGroups[0].bindings[0].scopeIdentity,
+        "uniform-buffer:0:1@vertex"
+    );
+
+    const legacyShared = structuredClone(CjsFormatWebgpu.buildWgslBindingPlan([ vertex, pixel ], {
+        sharedIdentities: [ "uniform-buffer:0:1" ]
+    }));
+    legacyShared.formatVersion = 1;
+    legacyShared.bindings.forEach((entry) =>
+    {
+        delete entry.scopeIdentity;
+        delete entry.stages;
+    });
+    const legacySharedVertex = lowerBindingLayout(vertex, legacyShared)[0];
+    const legacySharedPixel = lowerBindingLayout(pixel, legacyShared)[0];
+    assert.equal(legacySharedVertex.scopeIdentity, "uniform-buffer:0:1");
+    assert.equal(legacySharedPixel.scopeIdentity, "uniform-buffer:0:1");
+    const legacySharedSet = CjsFormatWebgpu.buildWgslSet([
+        { key: "Main.pass0.vertex", shader: emitted("vertex", [ legacySharedVertex ]) },
+        { key: "Main.pass0.pixel", shader: emitted("fragment", [ legacySharedPixel ]) }
+    ]);
+    assert.deepEqual(
+        legacySharedSet.layouts[0].bindGroups[0].bindings[0].visibility,
+        [ "vertex", "fragment" ]
+    );
+});
+
+test("binding lowering rejects negative registers and future IR versions", () =>
+{
+    const negative = structuredClone(CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ])));
+    negative.bindings[0].range.lowerBound = -1;
+    assert.throws(() => lowerBindingLayout(negative), /unresolved register identity/u);
+
+    const future = structuredClone(CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ])));
+    future.formatVersion = 2;
+    assert.throws(() => lowerBindingLayout(future), /CJS_SHADER_IR version 1/u);
+    assert.throws(() => CjsFormatWebgpu.buildWgslBindingPlan([ future ]), /CJS_SHADER_IR version 1/u);
 });

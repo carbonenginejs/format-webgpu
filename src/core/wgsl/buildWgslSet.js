@@ -57,6 +57,23 @@ function portableBinding(binding, visibility)
     {
         throw new Error(`WGSL binding ${binding.id || binding.generatedSymbol || "unknown"} has an invalid portable identity`);
     }
+    const identity = `${binding.resourceKind}:${binding.registerSpace}:${binding.registerIndex}`;
+    if (binding.scopeIdentity !== undefined
+        && (typeof binding.scopeIdentity !== "string" || !binding.scopeIdentity))
+    {
+        throw new Error(`WGSL binding ${binding.generatedSymbol} has invalid scope identity ${binding.scopeIdentity || "<empty>"}`);
+    }
+    const scopeIdentity = binding.scopeIdentity === undefined
+        ? `${identity}@${visibility}`
+        : binding.scopeIdentity;
+    if (binding.identity !== undefined && binding.identity !== identity)
+    {
+        throw new Error(`WGSL binding ${binding.generatedSymbol} has inconsistent D3D identity ${binding.identity}`);
+    }
+    if (scopeIdentity !== identity && scopeIdentity !== `${identity}@${visibility}`)
+    {
+        throw new Error(`WGSL binding ${binding.generatedSymbol} has invalid scope identity ${scopeIdentity}`);
+    }
     const descriptorKeys = [ "buffer", "texture", "sampler" ].filter((key) => binding[key]);
     const expectedDescriptors = {
         "uniform-buffer": [ "buffer" ],
@@ -68,6 +85,8 @@ function portableBinding(binding, visibility)
         throw new Error(`WGSL binding ${binding.generatedSymbol} has an invalid ${binding.resourceKind} layout descriptor`);
     }
     return {
+        identity,
+        scopeIdentity,
         resourceKind: binding.resourceKind,
         generatedSymbol: binding.generatedSymbol,
         registerSpace: binding.registerSpace,
@@ -85,13 +104,15 @@ function portableBinding(binding, visibility)
 
 function bindingIdentity(binding)
 {
-    return `${binding.resourceKind}:${binding.registerSpace}:${binding.registerIndex}`;
+    return binding.scopeIdentity || `${binding.resourceKind}:${binding.registerSpace}:${binding.registerIndex}`;
 }
 
 function bindingFingerprint(binding)
 {
     return JSON.stringify({
         resourceKind: binding.resourceKind,
+        identity: binding.identity,
+        scopeIdentity: binding.scopeIdentity,
         generatedSymbol: binding.generatedSymbol,
         registerSpace: binding.registerSpace,
         registerIndex: binding.registerIndex,
@@ -111,16 +132,33 @@ function buildLayouts(entries)
     for (const entry of entries)
     {
         const passKey = `${entry.techniqueName}.pass${entry.passIndex}`;
-        if (!passes.has(passKey)) passes.set(passKey, { identities: new Map(), slots: new Map() });
+        if (!passes.has(passKey))
+        {
+            passes.set(passKey, { identities: new Map(), baseScopes: new Map(), slots: new Map() });
+        }
         const pass = passes.get(passKey);
         const symbols = new Map();
+        const d3dIdentities = new Set();
         for (const source of entry.shader.program.bindings || [])
         {
             const binding = portableBinding(source, entry.stage);
             const identity = bindingIdentity(binding);
-            if (symbols.has(binding.generatedSymbol) && symbols.get(binding.generatedSymbol) !== identity)
+            if (d3dIdentities.has(binding.identity))
             {
-                throw new Error(`WGSL shader ${entry.key} uses ${binding.generatedSymbol} for multiple D3D identities`);
+                throw new Error(`WGSL shader ${entry.key} contains duplicate D3D identity ${binding.identity}`);
+            }
+            d3dIdentities.add(binding.identity);
+            if (!pass.baseScopes.has(binding.identity)) pass.baseScopes.set(binding.identity, new Set());
+            const baseScopes = pass.baseScopes.get(binding.identity);
+            if ((identity === binding.identity && Array.from(baseScopes).some((scope) => scope !== binding.identity))
+                || (identity !== binding.identity && baseScopes.has(binding.identity)))
+            {
+                throw new Error(`WGSL set ${passKey} mixes shared and stage-scoped forms for ${binding.identity}`);
+            }
+            baseScopes.add(identity);
+            if (symbols.has(binding.generatedSymbol))
+            {
+                throw new Error(`WGSL shader ${entry.key} contains duplicate generated symbol ${binding.generatedSymbol}`);
             }
             symbols.set(binding.generatedSymbol, identity);
             const slot = `${binding.group}:${binding.binding}`;
@@ -146,6 +184,13 @@ function buildLayouts(entries)
     }
     return Array.from(passes, ([ key, pass ]) =>
     {
+        for (const [ identity, scopes ] of pass.baseScopes)
+        {
+            if (scopes.has(identity) && pass.identities.get(identity)?.visibility.length < 2)
+            {
+                throw new Error(`WGSL set ${key} shared identity ${identity} does not cover multiple stages`);
+            }
+        }
         const groups = new Map();
         for (const binding of pass.identities.values())
         {
@@ -199,7 +244,7 @@ export function buildWgslSet(input)
         || [ "vertex", "pixel" ].indexOf(left.stageName) - [ "vertex", "pixel" ].indexOf(right.stageName));
     return deepFreeze({
         format: "CJS_WGSL_SET",
-        formatVersion: 1,
+        formatVersion: 2,
         shaders,
         layouts: buildLayouts(entries)
     });

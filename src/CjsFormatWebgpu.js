@@ -214,8 +214,12 @@ export class CjsFormatWebgpu
 
     /**
      * Assign one canonical numeric binding layout across shader stages in a pass.
+     * Unshared D3D tuples remain stage-scoped unless shared explicitly.
      *
-     * @param {object[]} programs CJS shader IR programs from one pass.
+     * @param {object[]} programs Complete CJS shader IR stage set for one pass.
+     * @param {object} [options] Pass-level binding policy.
+     * @param {string[]} [options.sharedIdentities] Compatible D3D identities
+     * confirmed to represent one resource across stages.
      * @returns {object} Frozen CJS_WGSL_BINDING_PLAN document.
      */
     BuildWgslBindingPlan(programs, options = {})
@@ -328,9 +332,13 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Static pass-global WGSL binding-plan helper.
+     * Static pass-global WGSL binding-plan helper. Unshared D3D tuples remain
+     * stage-scoped unless listed in options.sharedIdentities.
      *
-     * @param {object[]} programs CJS shader IR programs from one pass.
+     * @param {object[]} programs Complete CJS shader IR stage set for one pass.
+     * @param {object} [options] Pass-level binding policy.
+     * @param {string[]} [options.sharedIdentities] Compatible D3D identities
+     * confirmed to represent one resource across stages.
      * @returns {object} Frozen CJS_WGSL_BINDING_PLAN document.
      */
     static buildWgslBindingPlan(programs, options = {})

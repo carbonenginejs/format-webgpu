@@ -34,9 +34,24 @@ function signature(semanticName, registerIndex, mask, readWriteMask)
     };
 }
 
+function globalFlagsDeclaration(refactoringAllowed = true)
+{
+    return {
+        offset: 0,
+        opcode: 0,
+        opcodeName: "dcl_global_flags",
+        isDeclaration: true,
+        declaration: {
+            globalFlags: refactoringAllowed ? 1 << 11 : 0,
+            refactoringAllowed
+        },
+        operands: []
+    };
+}
+
 function copyblitVertex(minor = 0, includeTexcoordMove = true)
 {
-    const instructions = [ {
+    const instructions = [ globalFlagsDeclaration(), {
         offset: 16,
         opcode: 54,
         opcodeName: "mov",
@@ -130,8 +145,9 @@ test("BuildWgsl requires every signature-declared output lane", () =>
 test("BuildWgsl rejects unsupported reachable vertex operations", () =>
 {
     const decoded = copyblitVertex();
-    decoded.instructions[0] = {
-        ...decoded.instructions[0],
+    const index = decoded.instructions.findIndex((entry) => !entry.isDeclaration);
+    decoded.instructions[index] = {
+        ...decoded.instructions[index],
         opcode: 0,
         opcodeName: "div",
         operands: [

@@ -6,6 +6,7 @@ import { inferValueTypes, SCALAR_TYPES } from "./inferValueTypes.js";
 
 export const SHADER_IR_FORMAT = "CJS_SHADER_IR";
 export const SHADER_IR_VERSION = 1;
+const PRECISE_MASK = /^x?y?z?w?$/u;
 
 const BINDING_KINDS = Object.freeze({
     dcl_constant_buffer: "uniform-buffer",
@@ -268,6 +269,10 @@ function validateProgram(program)
     for (const instruction of program.instructions)
     {
         if (!instruction.typeInfo) throw new Error("Shader IR instruction is missing type information");
+        if (typeof instruction.preciseMask !== "string" || !PRECISE_MASK.test(instruction.preciseMask))
+        {
+            throw new Error(`Shader IR instruction ${instruction.index} has an invalid precise component mask`);
+        }
         if (instruction.typeInfo.bitcasts.some((bitcast) =>
             !SCALAR_TYPES.includes(bitcast.from) || !SCALAR_TYPES.includes(bitcast.to)))
         {

@@ -1,5 +1,6 @@
 import { fixedSourceLanes } from "../ir/sourceLanes.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
+import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SYSTEM_BUILTINS = Object.freeze({
@@ -478,10 +479,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     {
         throw new Error(`WGSL vertex opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
     }
-    if (instruction.preciseMask)
-    {
-        throw new Error(`WGSL vertex instruction ${instruction.index} uses precise controls ${instruction.preciseMask}`);
-    }
+    validatePreciseInstruction(instruction, "vertex");
     if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
     {
         throw new Error(`WGSL vertex instruction ${instruction.index} uses minimum precision`);
@@ -608,6 +606,7 @@ export function lowerVertexProgram(program, options = {})
     {
         throw new Error("WGSL vertex body slice currently supports only SM5.0/SM5.1");
     }
+    requireRefactoringAllowed(program, "vertex");
     const liveRegisters = liveInputRegisters(program);
     const inputs = interfaceFields(program, "input").filter((field) => liveRegisters.has(field.registerIndex));
     const outputs = interfaceFields(program, "output");

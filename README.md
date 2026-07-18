@@ -94,15 +94,23 @@ const text = JSON.stringify(reader.ToJSON(pkg));
 ```
 
 A D3D `(resource class, register space, register index)` tuple is stage-local
-unless pass metadata confirms it names one shared resource. The planner fails
-closed when the same tuple appears in multiple stages. `CjsLibrary` or another
-policy owner may confirm a known shared resource explicitly:
+unless pass metadata confirms it names one shared resource. The version-2
+binding plan retains that tuple as `identity` and carries a separate
+`scopeIdentity`. Every unshared version-2 binding receives an `@vertex` or
+`@fragment` scope, including a tuple used by only one pass stage. The compact
+base scope is reserved for a compatible resource that `CjsLibrary` or another
+policy owner explicitly confirms is shared across stages:
 
 ```js
 const bindingPlan = reader.BuildWgslBindingPlan([ vertexIr, fragmentIr ], {
   sharedIdentities: [ "uniform-buffer:0:0" ]
 });
 ```
+
+The planner input must contain the complete stage set that will later be
+combined into one pass. Do not plan vertex and pixel modules independently and
+then combine them: only one complete-pass plan can decide whether a repeated
+tuple is local or explicitly shared.
 
 Named import is also available:
 
@@ -150,14 +158,21 @@ scalar float phis to typed function variables and true-edge assignments; this
 is not general control-flow lowering. A fragment whose executable program reads
 no input register emits no empty input structure and uses `fn main() ->
 FragmentOutput`; declared-but-dead inputs do not block emission.
-JSON `CJS_WGSL_SET` records may also include optional pass-level `layouts`.
+JSON `CJS_WGSL_SET` version-2 records may also include optional pass-level `layouts`.
 Those records carry canonical numeric bind groups and the exact buffer,
 texture, and sampler layout used by emitted WGSL; they are exposed separately
 from ANLS Carbon metadata without changing CEWGPU container version 1.
 `BuildWgslSet` validates those emitted numeric slots across the stages in each
-pass. It unions compatible stage visibility, rejects identity or slot
-collisions, and never renumbers bindings because the WGSL source already owns
-its `@group` and `@binding` attributes.
+pass. Each binding retains its base D3D `identity` plus the resource-resolution
+`scopeIdentity`. The builder unions visibility only for one explicitly shared
+base scope, requires that scope to cover multiple stages, permits stage-scoped
+declarations of the same D3D tuple at distinct slots, rejects mixed shared/
+stage-scoped forms, duplicate scopes, or duplicate slots, and never renumbers
+bindings because the WGSL source already owns its `@group` and `@binding`
+attributes. Version-1 binding plans remain accepted as a legacy input; all
+newly built plans and sets are version 2. When a v1 plan is consumed, its
+unshared entries normalize to stage-qualified scopes while identities listed in
+its legacy `sharedIdentities` metadata retain their shared base scope.
 
 ## Reader Rules
 
@@ -240,9 +255,9 @@ pass topology by body index, caches identical DXBC programs, then runs binding
 planning, WGSL emission, and `BuildWgslSet` per distinct pass program. The full
 report records every body-to-variant mapping, empty techniques, independently
 emitted shader modules, pass-ready variants, and occurrence-weighted unsupported
-boundaries. It never guesses that a repeated D3D identity is shared; ambiguous
-identity reuse remains a reported policy boundary for `CjsLibrary` or the
-calling test preset to resolve explicitly.
+boundaries. It never guesses that a repeated D3D identity is shared: repeated
+tuples receive separate stage scopes, while `CjsLibrary` or a calling test
+preset may explicitly confirm compatible sharing.
 
 The 2026-07-18 exact `spaceobject/unpacked_quadv5.sm_lo` 480-body matrix
 qualifies all 8,960 stage occurrences through the front end. The complete
@@ -260,10 +275,12 @@ mask-selection chain. The strict 240-body
 loads as `array<u32>` read-only storage: DX11 emits 1,600/2,240 stages and
 DX12 emits 1,420/2,240, with 480/1,120 ready passes per backend. Its browser
 gate compiled 33 modules and prepared 8 pipelines, covering 3,020 emitted
-stages and 960 ready passes with zero warnings. Remaining skinned boundaries
-are unsupported DXBC `precise` controls, incompatible cross-stage `t0`
-declarations (structured vertex buffer versus pixel texture), and the DX12
-bindless range. There is no relaxed-precision escape hatch.
+stages and 960 ready passes with zero warnings. The structured vertex `t0` and
+pixel texture `t0` now receive independent stage scopes and slots; the former
+incompatible-declaration boundary is gone. Readiness is unchanged because the
+same passes next reach unsupported exact DXBC `precise` controls. The remaining
+skinned boundaries are `precise` and the DX12 bindless range. There is no
+relaxed-precision escape hatch.
 
 The `qualify:effects` command recursively pairs `.sm_lo`, `.sm_hi`, and `.sm_depth` files by
 relative path, decodes every selected stage through the current sibling

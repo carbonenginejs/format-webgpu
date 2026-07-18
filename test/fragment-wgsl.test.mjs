@@ -59,6 +59,21 @@ function instruction(offset, opcodeName, operands)
     return { offset, opcode: 0, opcodeName, isDeclaration: false, operands };
 }
 
+function globalFlagsDeclaration(refactoringAllowed = true)
+{
+    return {
+        offset: 0,
+        opcode: 0,
+        opcodeName: "dcl_global_flags",
+        isDeclaration: true,
+        declaration: {
+            globalFlags: refactoringAllowed ? 1 << 11 : 0,
+            refactoringAllowed
+        },
+        operands: []
+    };
+}
+
 function fragmentFixture(minor = 0)
 {
     const zeroOne = immediate([ 0, 0, 0x3f800000, 0x3f800000 ]);
@@ -69,6 +84,7 @@ function fragmentFixture(minor = 0)
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             declaration(2, "dcl_constant_buffer", "constant_buffer", { accessPattern: "immediate_indexed", sizeInVec4: 3 }),
             declaration(5, "dcl_sampler", "sampler", { samplerModeName: "default" }),
             declaration(7, "dcl_resource", "resource", {
@@ -128,6 +144,7 @@ function inputlessFragmentFixture()
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -149,6 +166,7 @@ function roundingFragmentFixture(minor = 0)
         program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: minor },
         signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
         instructions: [
+            globalFlagsDeclaration(),
             instruction(2, "frc", [ register("output", 0, { mask: "xy" }), values ]),
             instruction(6, "round_ni", [ register("output", 0, { mask: "zw" }), values ]),
             instruction(10, "ret", [])
@@ -161,6 +179,7 @@ function integerDiscardFragmentFixture(minor = 0, { projection = "nonzero", expl
     const zero = immediate([ 0 ]);
     const color = immediate([ 0x3f800000, 0, 0x3f000000, 0x3f800000 ]);
     const instructions = [
+        globalFlagsDeclaration(),
         {
             offset: 2,
             opcode: 0,
@@ -232,6 +251,7 @@ function bitpatternInputFragmentFixture()
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -258,6 +278,7 @@ function bitpatternOutputFragmentFixture()
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -296,6 +317,7 @@ function outputReadFragmentFixture(bitpattern = false)
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -325,6 +347,7 @@ function threeLaneDotFragmentFixture(selected = false)
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -361,6 +384,7 @@ function scalarMergeFixture()
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -395,6 +419,7 @@ function undefinedMergeChainFixture(secondTestBoolean = "zero")
             output: [ signature("SV_Target", 0, 15) ]
         },
         instructions: [
+            globalFlagsDeclaration(),
             {
                 offset: 2,
                 opcode: 0,
@@ -466,7 +491,10 @@ test("fragment lowering emits a parameterless entry point when declared inputs a
 
     const noDeclaredInput = inputlessFragmentFixture();
     noDeclaredInput.signatures.input = [];
-    noDeclaredInput.instructions.shift();
+    noDeclaredInput.instructions.splice(
+        noDeclaredInput.instructions.findIndex((entry) => entry.opcodeName === "dcl_input_ps"),
+        1
+    );
     assert.equal(CjsFormatWebgpu.buildWgsl(noDeclaredInput).code, shader.code);
 
     const missingOutput = inputlessFragmentFixture();

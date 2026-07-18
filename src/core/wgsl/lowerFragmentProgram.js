@@ -1,5 +1,6 @@
 import { fixedSourceLanes } from "../ir/sourceLanes.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
+import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SUPPORTED_OPCODES = new Set([
@@ -438,10 +439,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     {
         throw new Error(`WGSL fragment opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
     }
-    if (instruction.preciseMask)
-    {
-        throw new Error(`WGSL fragment instruction ${instruction.index} uses precise controls ${instruction.preciseMask}`);
-    }
+    validatePreciseInstruction(instruction, "fragment");
     if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
     {
         throw new Error(`WGSL fragment instruction ${instruction.index} uses minimum precision`);
@@ -838,6 +836,7 @@ export function lowerFragmentProgram(program, options = {})
     {
         throw new Error("WGSL fragment body slice currently supports only SM5.0/SM5.1");
     }
+    requireRefactoringAllowed(program, "fragment");
     const liveRegisters = liveInputRegisters(program);
     const inputs = program.signatures.input
         .filter((entry) => liveRegisters.has(entry.registerIndex))
@@ -877,10 +876,7 @@ export function lowerFragmentProgram(program, options = {})
             {
                 throw new Error("WGSL fragment selection boundaries are malformed");
             }
-            if (ifInstruction.preciseMask)
-            {
-                throw new Error(`WGSL fragment instruction ${ifInstruction.index} uses precise controls ${ifInstruction.preciseMask}`);
-            }
+            validatePreciseInstruction(ifInstruction, "fragment");
             validateRegisterBitcasts(program, ifInstruction);
             const conditionOperand = ifInstruction.operands[0];
             const conditionRead = sourceRead(ifInstruction, 0);
