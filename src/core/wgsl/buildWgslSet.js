@@ -58,12 +58,12 @@ function portableBinding(binding, visibility)
         throw new Error(`WGSL binding ${binding.id || binding.generatedSymbol || "unknown"} has an invalid portable identity`);
     }
     const descriptorKeys = [ "buffer", "texture", "sampler" ].filter((key) => binding[key]);
-    const expectedDescriptor = {
-        "uniform-buffer": "buffer",
-        "sampled-resource": "texture",
-        sampler: "sampler"
+    const expectedDescriptors = {
+        "uniform-buffer": [ "buffer" ],
+        "sampled-resource": [ "buffer", "texture" ],
+        sampler: [ "sampler" ]
     }[binding.resourceKind];
-    if (!expectedDescriptor || descriptorKeys.length !== 1 || descriptorKeys[0] !== expectedDescriptor)
+    if (!expectedDescriptors || descriptorKeys.length !== 1 || !expectedDescriptors.includes(descriptorKeys[0]))
     {
         throw new Error(`WGSL binding ${binding.generatedSymbol} has an invalid ${binding.resourceKind} layout descriptor`);
     }
@@ -76,6 +76,7 @@ function portableBinding(binding, visibility)
         binding: binding.binding,
         visibility: [ visibility ],
         type: binding.type,
+        ...(Number.isInteger(binding.structureStride) ? { structureStride: binding.structureStride } : {}),
         ...(binding.buffer ? { buffer: clonePlain(binding.buffer) } : {}),
         ...(binding.texture ? { texture: clonePlain(binding.texture) } : {}),
         ...(binding.sampler ? { sampler: clonePlain(binding.sampler) } : {})
@@ -97,6 +98,7 @@ function bindingFingerprint(binding)
         group: binding.group,
         binding: binding.binding,
         type: binding.type,
+        structureStride: binding.structureStride ?? null,
         buffer: binding.buffer || null,
         texture: binding.texture || null,
         sampler: binding.sampler || null

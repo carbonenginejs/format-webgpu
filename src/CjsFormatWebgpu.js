@@ -1,6 +1,7 @@
 import { CLASS_KEYS } from "./core/schema.js";
 import { lowerDxbcToIr } from "./core/ir/lowerDxbcToIr.js";
 import { buildWgsl } from "./core/wgsl/emitWgsl.js";
+import { buildWgslBindingPlan } from "./core/wgsl/buildWgslBindingPlan.js";
 import { buildWgslSet } from "./core/wgsl/buildWgslSet.js";
 import {
     CEWGPU_ANALYSIS_FORMAT,
@@ -25,8 +26,9 @@ const FORMAT_NAME = "CjsFormatWebgpu";
  * CarbonEngineJS-facing format surface for `.cewgpu` WebGPU packages, plus an
  * offline effect-analysis helper built on `format-hlsl` and `format-dxbc`.
  *
- * Phase 1 owns the package read/build surface and normalized shader analysis.
- * WGSL emission is intentionally a later pass.
+ * The package owns read/build, normalized shader analysis, and the current
+ * bounded DXBC-to-WGSL profiles. Broader shader-semantic coverage remains an
+ * explicit qualification ladder.
  */
 export class CjsFormatWebgpu
 {
@@ -211,6 +213,17 @@ export class CjsFormatWebgpu
     }
 
     /**
+     * Assign one canonical numeric binding layout across shader stages in a pass.
+     *
+     * @param {object[]} programs CJS shader IR programs from one pass.
+     * @returns {object} Frozen CJS_WGSL_BINDING_PLAN document.
+     */
+    BuildWgslBindingPlan(programs, options = {})
+    {
+        return buildWgslBindingPlan(programs, options);
+    }
+
+    /**
      * Assembles emitted shader descriptors into a portable WGSL set.
      *
      * @param {object[]} entries Canonically keyed emitted shader descriptors.
@@ -312,6 +325,17 @@ export class CjsFormatWebgpu
     static buildWgsl(input, options = {})
     {
         return buildWgsl(input, options);
+    }
+
+    /**
+     * Static pass-global WGSL binding-plan helper.
+     *
+     * @param {object[]} programs CJS shader IR programs from one pass.
+     * @returns {object} Frozen CJS_WGSL_BINDING_PLAN document.
+     */
+    static buildWgslBindingPlan(programs, options = {})
+    {
+        return buildWgslBindingPlan(programs, options);
     }
 
     /**

@@ -47,19 +47,25 @@ function deepFreeze(value)
  */
 export function buildWgsl(input, options = {})
 {
+    if (options.precisionPolicy !== undefined)
+    {
+        throw new TypeError("WGSL precisionPolicy is not supported; precise controls require exact lowering");
+    }
     const ir = input?.format === "CJS_SHADER_IR" ? input : lowerDxbcToIr(input, options);
-    const program = ir.stage === "vertex" ? lowerVertexProgram(ir) : lowerFragmentProgram(ir);
+    const program = ir.stage === "vertex" ? lowerVertexProgram(ir, options) : lowerFragmentProgram(ir, options);
     const lines = [];
     const sourceMap = [];
     const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
-    emitStruct(lines, `${prefix}Input`, program.interface.inputs);
+    const hasInputs = program.interface.inputs.length > 0;
+    if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
     emitStruct(lines, `${prefix}Output`, program.interface.outputs);
     for (const binding of program.bindings || [])
     {
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);
     }
     if (program.bindings?.length) lines.push("");
-    lines.push(`@${program.stage}`, `fn ${program.entryPoint}(input: ${prefix}Input) -> ${prefix}Output`, "{", `    var output: ${prefix}Output;`);
+    const parameters = hasInputs ? `input: ${prefix}Input` : "";
+    lines.push(`@${program.stage}`, `fn ${program.entryPoint}(${parameters}) -> ${prefix}Output`, "{", `    var output: ${prefix}Output;`);
 
     const inputById = new Map(program.interface.inputs.map((field) => [ field.id, field ]));
     const outputById = new Map(program.interface.outputs.map((field) => [ field.id, field ]));
@@ -96,6 +102,10 @@ export function buildWgsl(input, options = {})
         else if (statement.kind === "return")
         {
             lines.push(`${indent}return output;`);
+        }
+        else if (statement.kind === "discard")
+        {
+            lines.push(`${indent}discard;`);
         }
         else if (statement.kind === "if")
         {

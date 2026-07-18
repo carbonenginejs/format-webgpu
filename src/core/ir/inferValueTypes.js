@@ -62,6 +62,14 @@ function ruleFor(opcodeName, program, instruction)
         if (opcodeName === "sample_d") Object.assign(sourceByOperand, { 4: "float32", 5: "float32" });
         return { name: "sample-resource", destination: sampleResultType(program, instruction), sourceByOperand };
     }
+    if (opcodeName === "ld_structured")
+    {
+        return {
+            name: "structured-load",
+            destination: null,
+            sourceByOperand: { 1: "uint32", 2: "uint32" }
+        };
+    }
     const conversions = {
         ftoi: [ "int32", "float32" ],
         ftou: [ "uint32", "float32" ],

@@ -1,3 +1,5 @@
+import { fixedSourceLanes } from "./sourceLanes.js";
+
 const COMPONENTS = [ "x", "y", "z", "w" ];
 
 const REGISTER_FILES = new Set([
@@ -27,8 +29,7 @@ const NO_DESTINATION = new Set([
 
 const DUAL_DESTINATION = new Set([ "sincos", "imul", "umul", "udiv", "swapc" ]);
 const FULL_SOURCE_LANES = new Set([
-    "dp2", "dp3", "dp4", "ld", "ld_ms", "resinfo", "sample", "sample_b",
-    "sample_c", "sample_c_lz", "sample_d", "sample_l", "gather4"
+    "ld", "ld_ms", "resinfo"
 ]);
 
 function operandComponents(operand, destination = false, activeComponents = null)
@@ -137,7 +138,10 @@ function analyzeBlock(program, block, values)
             if (role !== "source") continue;
             const register = registerKey(operand);
             if (!register) continue;
-            const components = operandComponents(operand, false, activeSourceComponents);
+            const components = operandComponents(
+                operand,
+                false,
+                fixedSourceLanes(instruction, operandIndex) || activeSourceComponents);
             const refs = components.map((component) => ensureComponent(state, values, register, component, block.id));
             for (const ref of refs)
             {

@@ -32,6 +32,7 @@ function binding(resourceKind, generatedSymbol, bindingIndex, extra = {})
         group: 0,
         binding: bindingIndex,
         type: extra.type || "sampler",
+        ...(Number.isInteger(extra.structureStride) ? { structureStride: extra.structureStride } : {}),
         ...(extra.buffer ? { buffer: extra.buffer } : {}),
         ...(extra.texture ? { texture: extra.texture } : {}),
         ...(extra.sampler ? { sampler: extra.sampler } : {})
@@ -91,6 +92,24 @@ test("BuildWgslSet unions compatible cross-stage visibility", () =>
         { key: "Main.pass0.pixel", shader: emitted("fragment", [ shared ]) }
     ]);
     assert.deepEqual(set.layouts[0].bindGroups[0].bindings[0].visibility, [ "vertex", "fragment" ]);
+});
+
+test("BuildWgslSet accepts a structured SRV as a sampled-resource read-only buffer", () =>
+{
+    const structured = binding("sampled-resource", "t0", 0, {
+        type: "array<u32>",
+        structureStride: 48,
+        buffer: { type: "read-only-storage", hasDynamicOffset: false, minBindingSize: 48 }
+    });
+    const set = CjsFormatWebgpu.buildWgslSet([
+        { key: "Shadow.pass0.vertex", shader: emitted("vertex", [ structured ]) }
+    ]);
+
+    const result = set.layouts[0].bindGroups[0].bindings[0];
+    assert.equal(result.resourceKind, "sampled-resource");
+    assert.equal(result.structureStride, 48);
+    assert.deepEqual(result.buffer, structured.buffer);
+    assert.equal(Object.isFrozen(result.buffer), true);
 });
 
 test("BuildWgslSet rejects binding conflicts and ambiguous generated symbols", () =>

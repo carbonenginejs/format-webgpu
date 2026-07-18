@@ -1,6 +1,6 @@
 {
   "name": "@carbonenginejs/format-webgpu",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "CarbonEngineJS WebGPU format package reader/builder for .cewgpu packages, plus offline effect analysis built on format-hlsl and format-dxbc.",
   "type": "module",
   "main": "src/index.js",
@@ -14,7 +14,8 @@
     "test": "node --test",
     "package:effect": "node scripts/package-effect.js",
     "qualify:effects": "node scripts/qualify-effect-pairs.js",
-    "lint": "node --check src/index.js && node --check src/CjsFormatWebgpu.js && node --check src/core/helpers.js && node --check src/core/effectAnalysis.js && node --check src/core/schema.js && node --check src/core/errors.js && node --check src/core/cewgpu/binary.js && node --check src/core/cewgpu/CewgpuPackage.js && node --check src/core/cewgpu/CewgpuPackageBuilder.js && node --check src/core/ir/lowerDxbcToIr.js && node --check src/core/ir/buildControlFlow.js && node --check src/core/ir/analyzeRegisterValues.js && node --check src/core/ir/resolveRegisterFlow.js && node --check src/core/ir/inferValueTypes.js && node --check src/core/wgsl/lowerBindingLayout.js && node --check src/core/wgsl/lowerFragmentProgram.js && node --check src/core/wgsl/lowerVertexProgram.js && node --check src/core/wgsl/emitWgsl.js && node --check src/core/wgsl/buildWgslSet.js && node --check scripts/package-effect.js && node --check scripts/qualify-effect-pairs.js && node --check test/public-api.test.mjs && node --check test/cewgpu.test.mjs && node --check test/shader-ir.test.mjs && node --check test/binding-layout.test.mjs && node --check test/fragment-wgsl.test.mjs && node --check test/wgsl.test.mjs && node --check test/wgsl-set.test.mjs && node --check test/synthetic.js"
+    "qualify:matrix": "node scripts/qualify-effect-matrix.js",
+    "lint": "node --check src/index.js && node --check src/CjsFormatWebgpu.js && node --check src/core/helpers.js && node --check src/core/effectAnalysis.js && node --check src/core/schema.js && node --check src/core/errors.js && node --check src/core/cewgpu/binary.js && node --check src/core/cewgpu/CewgpuPackage.js && node --check src/core/cewgpu/CewgpuPackageBuilder.js && node --check src/core/ir/lowerDxbcToIr.js && node --check src/core/ir/buildControlFlow.js && node --check src/core/ir/sourceLanes.js && node --check src/core/ir/analyzeRegisterValues.js && node --check src/core/ir/resolveRegisterFlow.js && node --check src/core/ir/inferValueTypes.js && node --check src/core/wgsl/lowerBindingLayout.js && node --check src/core/wgsl/buildWgslBindingPlan.js && node --check src/core/wgsl/lowerFragmentProgram.js && node --check src/core/wgsl/lowerVertexProgram.js && node --check src/core/wgsl/emitWgsl.js && node --check src/core/wgsl/buildWgslSet.js && node --check scripts/packageEffectSelection.js && node --check scripts/package-effect.js && node --check scripts/qualify-effect-pairs.js && node --check scripts/effectMatrixHelpers.js && node --check scripts/effectMatrixQualification.js && node --check scripts/qualify-effect-matrix.js && node --check test/public-api.test.mjs && node --check test/cewgpu.test.mjs && node --check test/shader-ir.test.mjs && node --check test/binding-layout.test.mjs && node --check test/fragment-wgsl.test.mjs && node --check test/package-effect-selection.test.mjs && node --check test/effect-matrix.test.mjs && node --check test/vertex-wgsl.test.mjs && node --check test/wgsl.test.mjs && node --check test/wgsl-set.test.mjs && node --check test/synthetic.js"
   },
   "keywords": [
     "carbonenginejs",

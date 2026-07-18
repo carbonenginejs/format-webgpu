@@ -86,13 +86,13 @@ struct VertexOutput
 fn main(input: VertexInput) -> VertexOutput
 {
     var output: VertexOutput;
-    output.position = input.input0;
-    output.output1 = input.input1;
+    output.position = vec4<f32>(input.input0.x, input.input0.y, input.input0.z, input.input0.w);
+    output.output1 = vec2<f32>(input.input1.x, input.input1.y);
     return output;
 }
 `;
 
-test("BuildWgsl emits deterministic mov-only copyblit vertex WGSL", () =>
+test("BuildWgsl emits deterministic straight-line copyblit vertex WGSL", () =>
 {
     const ir = CjsFormatWebgpu.buildShaderIr(copyblitVertex(), { source: "synthetic-copyblit-vs" });
     const shader = CjsFormatWebgpu.buildWgsl(ir);
@@ -106,7 +106,7 @@ test("BuildWgsl emits deterministic mov-only copyblit vertex WGSL", () =>
         { line: 18, instructionIndex: 1, dxbcOffset: 21 },
         { line: 19, instructionIndex: 2, dxbcOffset: 26 }
     ]);
-    assert.equal(shader.program.statements[1].expression.components.join(""), "xy");
+    assert.equal(shader.program.statements[1].expression.code, "vec2<f32>(input.input1.x, input.input1.y)");
     assert.equal(Object.isFrozen(shader), true);
     assert.deepEqual(CjsFormatWebgpu.buildWgsl(ir), shader);
 });
@@ -133,14 +133,14 @@ test("BuildWgsl rejects unsupported reachable vertex operations", () =>
     decoded.instructions[0] = {
         ...decoded.instructions[0],
         opcode: 0,
-        opcodeName: "add",
+        opcodeName: "div",
         operands: [
             register("output", 0, "xyzw"),
             register("input", 0, "", "xyzw"),
             register("input", 0, "", "xyzw")
         ]
     };
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /opcode add.*not supported/i);
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /opcode div.*not supported/i);
 });
 
 test("generated WGSL descriptors round-trip through a CEWGPU WGSL chunk", () =>

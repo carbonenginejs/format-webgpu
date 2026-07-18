@@ -38,6 +38,7 @@ test("reader exposes the expected public profile API", () =>
         "AnalyzeEffect",
         "BuildShaderIr",
         "BuildWgsl",
+        "BuildWgslBindingPlan",
         "BuildWgslSet",
         "Build",
         "GetClass",

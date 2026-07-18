@@ -1,10 +1,11 @@
+import { fixedSourceLanes } from "../ir/sourceLanes.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SUPPORTED_OPCODES = new Set([
-    "add", "and", "div", "dp2", "dp3", "exp", "ge", "log", "lt", "mad",
-    "max", "mov", "movc", "mul", "rsq", "sample", "sample_b", "sqrt",
-    "if", "endif", "ret"
+    "add", "and", "discard", "div", "dp2", "dp3", "exp", "frc", "ge", "iadd",
+    "if", "itof", "log", "lt", "mad", "max", "mov", "movc", "mul", "round_ni",
+    "rsq", "sample", "sample_b", "sqrt", "endif", "ret"
 ]);
 
 function componentsFromMask(mask)
@@ -123,6 +124,19 @@ function vectorCode(parts, scalarType)
     return `vec${parts.length}<${scalarTypeName(scalarType)}>(${parts.join(", ")})`;
 }
 
+function reinterpretCode(code, fromType, toType, count, context)
+{
+    const from = scalarTypeName(fromType);
+    const to = scalarTypeName(toType);
+    if (!from || !to) throw new Error(`WGSL fragment cannot resolve ${context} type ${fromType} to ${toType}`);
+    if (from === to) return code;
+    if (![ "f32", "i32", "u32" ].includes(from) || ![ "f32", "i32", "u32" ].includes(to))
+    {
+        throw new Error(`WGSL fragment cannot reinterpret ${context} from ${fromType} to ${toType}`);
+    }
+    return `bitcast<${fieldType(toType, count)}>(${code})`;
+}
+
 function valueReference(program, ref, inputs)
 {
     const value = program.values.find((entry) => entry.id === ref.valueId);
@@ -134,25 +148,26 @@ function valueReference(program, ref, inputs)
         const field = inputs.find((entry) => entry.registerIndex === registerIndex);
         if (!field) throw new Error(`WGSL fragment has no live input field for ${value.register}`);
         const packed = packedComponent(field.components.join(""), ref.component);
-        return field.components.length === 1 ? `input.${field.name}` : `input.${field.name}.${packed}`;
+        const code = field.components.length === 1 ? `input.${field.name}` : `input.${field.name}.${packed}`;
+        return reinterpretCode(code, field.scalarType, value.componentTypes?.[ref.component], 1, `${value.register}.${ref.component}`);
     }
     const packed = packedComponent(value.writeMask, ref.component);
     return value.writeMask.length === 1 ? value.id : `${value.id}.${packed}`;
 }
 
-function rawSelectedComponents(operand, destinationMask, count)
+function rawSelectedComponents(operand, destinationMask, count, activeComponents = null)
 {
     const selected = operand.selected || "";
     if (selected) return Array.from({ length: count }, () => selected);
     const swizzle = operand.swizzle || "xyzw";
-    const mask = Array.from(destinationMask);
+    const mask = activeComponents || Array.from(destinationMask);
     return mask.slice(0, count).map((component) => swizzle[COMPONENTS.indexOf(component)] || swizzle[0]);
 }
 
-function immediateParts(operand, destinationMask, count, expectedType)
+function immediateParts(operand, destinationMask, count, expectedType, activeComponents = null)
 {
     const values = operand.immediateValues || [];
-    const components = rawSelectedComponents(operand, destinationMask, count);
+    const components = rawSelectedComponents(operand, destinationMask, count, activeComponents);
     return components.map((component, index) =>
     {
         const sourceIndex = values.length === 1 ? 0 : COMPONENTS.indexOf(component);
@@ -181,15 +196,22 @@ function bindingForOperand(bindings, resourceKind, operand)
         entry.resourceKind === resourceKind && entry.registerIndex === operand.registerIndex) || null;
 }
 
-function cbufferParts(operand, destinationMask, count, bindings)
+function cbufferParts(operand, destinationMask, count, bindings, expectedType, activeComponents = null)
 {
     const binding = bindingForOperand(bindings, "uniform-buffer", operand);
     if (!binding) throw new Error(`WGSL fragment cannot resolve cb${operand.registerIndex}`);
     if (operand.indices?.some((entry) => entry.relative)) throw new Error("WGSL fragment does not support relative cbuffer indexing");
     const vectorIndex = operand.indices?.at(-1)?.values?.[0];
     if (!Number.isInteger(vectorIndex)) throw new Error("WGSL fragment cbuffer operand has no immediate vector index");
-    return rawSelectedComponents(operand, destinationMask, count)
+    const parts = rawSelectedComponents(operand, destinationMask, count, activeComponents)
         .map((component) => `${binding.generatedSymbol}[${vectorIndex}].${component}`);
+    if (expectedType === "float32") return parts;
+    if (![ "int32", "uint32", "bitpattern32" ].includes(expectedType))
+    {
+        throw new Error(`WGSL fragment cannot reinterpret cbuffer lanes as ${expectedType}`);
+    }
+    const target = scalarTypeName(expectedType);
+    return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
 function applyModifier(parts, operand)
@@ -211,19 +233,31 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
         throw new Error(`WGSL fragment instruction ${instruction.index} uses minimum precision`);
     }
     const read = sourceRead(instruction, operandIndex);
+    const activeComponents = fixedSourceLanes(instruction, operandIndex);
     let parts;
     if (read)
     {
         if (read.refs.length < count) throw new Error(`WGSL fragment instruction ${instruction.index} has too few source lanes`);
-        parts = read.refs.slice(0, count).map((ref) => valueReference(program, ref, inputs));
+        parts = read.refs.slice(0, count).map((ref, componentIndex) =>
+        {
+            let part = valueReference(program, ref, inputs);
+            const bitcast = instruction.typeInfo.bitcasts.find((entry) => entry.kind === "read-bitcast"
+                && entry.operandIndex === operandIndex && entry.componentIndex === componentIndex
+                && entry.valueId === ref.valueId && entry.component === ref.component);
+            if (bitcast)
+            {
+                part = reinterpretCode(part, bitcast.from, bitcast.to, 1, `instruction ${instruction.index} read`);
+            }
+            return part;
+        });
     }
     else if (operand.typeName === "immediate32")
     {
-        parts = immediateParts(operand, destinationMask, count, expectedType);
+        parts = immediateParts(operand, destinationMask, count, expectedType, activeComponents);
     }
     else if (operand.typeName === "constant_buffer")
     {
-        parts = cbufferParts(operand, destinationMask, count, bindings);
+        parts = cbufferParts(operand, destinationMask, count, bindings, expectedType, activeComponents);
     }
     else
     {
@@ -235,6 +269,80 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
 function expectedType(instruction, operandIndex)
 {
     return instruction.typeInfo.operandTypes.find((entry) => entry.operandIndex === operandIndex)?.expectedType || "unknown";
+}
+
+function valueStorageType(program, ref)
+{
+    const value = program.values.find((entry) => entry.id === ref.valueId);
+    return value?.componentTypes?.[ref.component] || "unknown";
+}
+
+function bitcastKey(entry)
+{
+    if (entry.kind === "read-bitcast")
+    {
+        return [ entry.kind, entry.operandIndex, entry.componentIndex, entry.valueId, entry.component,
+            entry.from, entry.to ].join(":");
+    }
+    return [ entry.kind, entry.operandIndex, entry.valueId, entry.component, entry.from, entry.to ].join(":");
+}
+
+function validateRegisterBitcasts(program, instruction)
+{
+    const required = [];
+    for (const read of instruction.dataflow.reads)
+    {
+        const expected = expectedType(instruction, read.operandIndex);
+        if (expected === "unknown") continue;
+        read.refs.forEach((ref, componentIndex) =>
+        {
+            const storage = valueStorageType(program, ref);
+            if (storage !== "unknown" && storage !== expected)
+            {
+                required.push({
+                    kind: "read-bitcast",
+                    operandIndex: read.operandIndex,
+                    componentIndex,
+                    valueId: ref.valueId,
+                    component: ref.component,
+                    from: storage,
+                    to: expected
+                });
+            }
+        });
+    }
+    const intrinsicResult = instruction.typeInfo.resultType;
+    if (intrinsicResult !== "unknown")
+    {
+        for (const write of instruction.dataflow.writes)
+        {
+            for (const component of write.mask)
+            {
+                const storage = valueStorageType(program, { valueId: write.valueId, component });
+                if (storage !== "unknown" && storage !== intrinsicResult)
+                {
+                    required.push({
+                        kind: "result-bitcast",
+                        operandIndex: write.operandIndex,
+                        valueId: write.valueId,
+                        component,
+                        from: intrinsicResult,
+                        to: storage
+                    });
+                }
+            }
+        }
+    }
+    const actual = instruction.typeInfo.bitcasts.filter((entry) =>
+        entry.kind === "read-bitcast" || entry.kind === "result-bitcast");
+    const requiredKeys = required.map(bitcastKey).sort();
+    const actualKeys = actual.map(bitcastKey).sort();
+    if (new Set(actualKeys).size !== actualKeys.length
+        || requiredKeys.length !== actualKeys.length
+        || requiredKeys.some((entry, index) => entry !== actualKeys[index]))
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} has inconsistent register bitcast metadata`);
+    }
 }
 
 function zeroMask(count)
@@ -259,9 +367,9 @@ function expressionFor(program, instruction, write, inputs, bindings)
     const source = (index, forcedCount = count) => operandExpression(
         program, instruction, index, mask, forcedCount, expectedType(instruction, index), inputs, bindings);
     const op = instruction.opcodeName;
-    if ([ "add", "div", "mul" ].includes(op))
+    if ([ "add", "div", "iadd", "mul" ].includes(op))
     {
-        const operator = { add: "+", div: "/", mul: "*" }[op];
+        const operator = { add: "+", div: "/", iadd: "+", mul: "*" }[op];
         return `(${source(1)} ${operator} ${source(2)})`;
     }
     if (op === "mad") return `((${source(1)} * ${source(2)}) + ${source(3)})`;
@@ -275,9 +383,20 @@ function expressionFor(program, instruction, write, inputs, bindings)
     if (op === "mov") return source(1);
     if (op === "movc") return `select(${source(3)}, ${source(2)}, ${source(1)} != ${zeroMask(count)})`;
     if (op === "exp") return `exp2(${source(1)})`;
+    if (op === "frc") return `fract(${source(1)})`;
     if (op === "log") return `log2(${source(1)})`;
+    if (op === "round_ni") return `floor(${source(1)})`;
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
     if (op === "sqrt") return `sqrt(${source(1)})`;
+    if (op === "itof")
+    {
+        const conversion = instruction.typeInfo.conversion;
+        if (conversion?.from !== "int32" || conversion?.to !== "float32")
+        {
+            throw new Error(`WGSL fragment instruction ${instruction.index} has invalid itof conversion metadata`);
+        }
+        return `${fieldType(conversion.to, count)}(${source(1)})`;
+    }
     if (op === "dp2") return `dot(${source(1, 2)}, ${source(2, 2)})`;
     if (op === "dp3") return `dot(${source(1, 3)}, ${source(2, 3)})`;
     if (op === "sample" || op === "sample_b")
@@ -296,7 +415,24 @@ function expressionFor(program, instruction, write, inputs, bindings)
     throw new Error(`WGSL fragment opcode ${op} at instruction ${instruction.index} is not supported`);
 }
 
-function lowerInstruction(program, instruction, inputs, outputs, bindings, written)
+function applyResultBitcast(instruction, write, expression, type)
+{
+    const bitcasts = instruction.typeInfo.bitcasts.filter((entry) => entry.kind === "result-bitcast"
+        && entry.operandIndex === write.operandIndex && entry.valueId === write.valueId);
+    if (!bitcasts.length) return expression;
+    const components = Array.from(write.mask);
+    const intrinsicType = instruction.typeInfo.resultType;
+    if (bitcasts.length !== components.length || bitcasts.some((entry) =>
+        entry.from !== intrinsicType || entry.to !== type.scalarType)
+        || components.some((component) => !bitcasts.some((entry) => entry.component === component)))
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} has unsupported partial result bitcasts`);
+    }
+    return reinterpretCode(expression, intrinsicType, type.scalarType, components.length,
+        `instruction ${instruction.index} result`);
+}
+
+function lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds)
 {
     if (!SUPPORTED_OPCODES.has(instruction.opcodeName))
     {
@@ -306,6 +442,11 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     {
         throw new Error(`WGSL fragment instruction ${instruction.index} uses precise controls ${instruction.preciseMask}`);
     }
+    if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} uses minimum precision`);
+    }
+    validateRegisterBitcasts(program, instruction);
     if (instruction.opcodeName === "ret")
     {
         for (const field of outputs)
@@ -315,6 +456,39 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         }
         return { kind: "return", instructionIndex: instruction.index, dxbcOffset: instruction.dxbcOffset };
     }
+    if (instruction.opcodeName === "discard")
+    {
+        const projection = instruction.testBoolean;
+        const operand = instruction.operands[0];
+        const read = sourceRead(instruction, 0);
+        if (![ "zero", "nonzero" ].includes(projection))
+        {
+            throw new Error(`WGSL fragment discard instruction ${instruction.index} has no supported condition projection`);
+        }
+        const scalarShape = operand?.typeName === "immediate32"
+            ? operand.immediateValues?.length === 1
+            : COMPONENTS.includes(operand?.selected);
+        if (instruction.operands.length !== 1 || !operand || !scalarShape || (read && read.refs.length !== 1))
+        {
+            throw new Error(`WGSL fragment discard instruction ${instruction.index} requires one scalar condition`);
+        }
+        if ((operand.modifierName || "none") !== "none")
+        {
+            throw new Error(`WGSL fragment discard instruction ${instruction.index} cannot modify its condition`);
+        }
+        if (instruction.saturate)
+        {
+            throw new Error(`WGSL fragment discard instruction ${instruction.index} cannot saturate its condition`);
+        }
+        const condition = operandExpression(program, instruction, 0, "x", 1, "uint32", inputs, bindings);
+        return {
+            kind: "if",
+            instructionIndex: instruction.index,
+            dxbcOffset: instruction.dxbcOffset,
+            condition: { code: `${condition} ${projection === "zero" ? "==" : "!="} 0u`, type: "bool" },
+            statements: [ { kind: "discard" } ]
+        };
+    }
     const write = instruction.dataflow.writes[0];
     if (!write) throw new Error(`WGSL fragment instruction ${instruction.index} has no result write`);
     const destination = instruction.operands[write.operandIndex];
@@ -322,25 +496,55 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     let expression = expressionFor(program, instruction, write, inputs, bindings);
     if (instruction.saturate)
     {
-        if (type.scalarType !== "float32")
+        if (instruction.typeInfo.resultType !== "float32")
         {
             throw new Error(`WGSL fragment instruction ${instruction.index} saturates a non-float result`);
         }
         expression = `clamp(${expression}, ${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")})`;
     }
+    expression = applyResultBitcast(instruction, write, expression, type);
     if (destination.typeName === "output")
     {
         const field = outputs.find((entry) => entry.registerIndex === destination.registerIndex);
         if (!field) throw new Error(`WGSL fragment instruction ${instruction.index} references undeclared output r${destination.registerIndex}`);
         const components = Array.from(write.mask).map((component) => packedComponent(field.components.join(""), component));
         Array.from(write.mask).forEach((component) => written.get(field.id).add(component));
-        return {
+        const outputType = fieldType(field.scalarType, write.mask.length);
+        const assignmentExpression = reinterpretCode(
+            expression,
+            type.scalarType,
+            field.scalarType,
+            write.mask.length,
+            `output ${field.semanticName}${field.semanticIndex}`
+        );
+        const assignment = {
             kind: "assignment",
             instructionIndex: instruction.index,
             dxbcOffset: instruction.dxbcOffset,
-            target: { fieldId: field.id, components, type: type.wgslType },
-            expression: { code: expression, type: type.wgslType }
+            target: { fieldId: field.id, components, type: outputType },
+            expression: { code: assignmentExpression, type: outputType }
         };
+        if (!readValueIds.has(write.valueId)) return assignment;
+        return [
+            {
+                kind: "let",
+                instructionIndex: instruction.index,
+                dxbcOffset: instruction.dxbcOffset,
+                name: write.valueId,
+                type: type.wgslType,
+                expression: { code: expression, type: type.wgslType }
+            },
+            {
+                ...assignment,
+                instructionIndex: undefined,
+                dxbcOffset: undefined,
+                expression: {
+                    code: reinterpretCode(write.valueId, type.scalarType, field.scalarType, write.mask.length,
+                        `output ${field.semanticName}${field.semanticIndex}`),
+                    type: outputType
+                }
+            }
+        ];
     }
     if (destination.typeName !== "temp")
     {
@@ -526,7 +730,11 @@ function buildSelectionPlans(program)
         const conditionId = conditionRefs.length === 1
             ? conditionRefs[0].valueId
             : `selection:${region.startInstruction}`;
-        const testBoolean = ifInstruction.testBoolean === "zero" ? "zero" : "nonzero";
+        if (![ "zero", "nonzero" ].includes(ifInstruction.testBoolean))
+        {
+            throw new Error(`WGSL fragment if instruction ${ifInstruction.index} has no supported condition projection`);
+        }
+        const testBoolean = ifInstruction.testBoolean;
         const merges = mergeIds.map((id) =>
         {
             const value = values.get(id);
@@ -619,9 +827,10 @@ function containsOutputAssignment(statements)
  * selections and scalar component merges.
  *
  * @param {object} program Frozen CJS shader IR.
+ * @param {object} [options] Binding-plan and lowering options.
  * @returns {object} Frozen typed fragment program.
  */
-export function lowerFragmentProgram(program)
+export function lowerFragmentProgram(program, options = {})
 {
     if (program?.format !== "CJS_SHADER_IR") throw new TypeError("WGSL fragment lowering expects CJS_SHADER_IR input");
     if (program.stage !== "pixel") throw new Error(`WGSL fragment lowering cannot lower ${program.stage}`);
@@ -634,11 +843,16 @@ export function lowerFragmentProgram(program)
         .filter((entry) => liveRegisters.has(entry.registerIndex))
         .map((entry) => interfaceField(entry, "input"));
     const outputs = program.signatures.output.map((entry) => interfaceField(entry, "output"));
-    if (!inputs.length || !outputs.length) throw new Error("WGSL fragment body slice requires live input and output signatures");
+    if (!outputs.length) throw new Error("WGSL fragment body slice requires output signatures");
     inputs.forEach((input) => validateInterpolation(program, input));
-    const bindings = lowerBindingLayout(program);
+    const bindings = lowerBindingLayout(program, options.bindingPlan);
     const plans = buildSelectionPlans(program);
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));
+    const readValueIds = new Set([
+        ...program.instructions.flatMap((instruction) =>
+            instruction.dataflow.reads.flatMap((read) => read.refs.map((ref) => ref.valueId))),
+        ...program.values.flatMap((value) => (value.incoming || []).map((incoming) => incoming.valueId))
+    ]);
 
     function lowerRange(start, end, rangeWritten)
     {
@@ -652,7 +866,9 @@ export function lowerFragmentProgram(program)
                 {
                     throw new Error(`WGSL fragment has an unmatched endif at instruction ${index}`);
                 }
-                statements.push(lowerInstruction(program, program.instructions[index], inputs, outputs, bindings, rangeWritten));
+                const lowered = lowerInstruction(
+                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds);
+                statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
                 continue;
             }
             const ifInstruction = program.instructions[index];
@@ -660,6 +876,18 @@ export function lowerFragmentProgram(program)
             if (ifInstruction.opcodeName !== "if" || endInstruction.opcodeName !== "endif")
             {
                 throw new Error("WGSL fragment selection boundaries are malformed");
+            }
+            if (ifInstruction.preciseMask)
+            {
+                throw new Error(`WGSL fragment instruction ${ifInstruction.index} uses precise controls ${ifInstruction.preciseMask}`);
+            }
+            validateRegisterBitcasts(program, ifInstruction);
+            const conditionOperand = ifInstruction.operands[0];
+            const conditionRead = sourceRead(ifInstruction, 0);
+            if (ifInstruction.saturate || (conditionOperand?.modifierName || "none") !== "none"
+                || !COMPONENTS.includes(conditionOperand?.selected) || conditionRead?.refs.length !== 1)
+            {
+                throw new Error(`WGSL fragment if instruction ${ifInstruction.index} requires one unmodified scalar condition`);
             }
             for (const merge of plan.merges)
             {

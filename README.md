@@ -4,20 +4,33 @@ CarbonEngineJS-facing reader/builder for `.cewgpu` WebGPU package data, plus
 an offline effect-analysis helper built on `@carbonenginejs/format-hlsl` and
 `@carbonenginejs/format-dxbc`.
 
-Phase 1 implements:
+The current phase-1 slice implements:
 
 - CEWGPU package `Read`, `Inspect`, and `Build`
 - an offline `AnalyzeEffect(...)` path for compiled `.sm_*` effect payloads
-- normalized binding + stage + DXBC analysis JSON suitable for future WGSL work
+- normalized binding, stage, and DXBC analysis JSON consumed by current WGSL
+  lowering and retained as package provenance
 - validated front-end shader IR with declarations, explicit binding ranges,
   DXBC source offsets, executable instructions, structured CFG edges, and
   deterministic basic blocks
 - component-granular register versions, masked-write reconstruction,
   cross-block SSA merges, signature/opcode/resource-driven scalar types, and
   explicit typeless-register reinterpret records
-- deterministic `BuildWgsl(...)` emission for the strict mov-only vertex slice
-  and the bounded SM5.0 copyblit fragment slice, including typed statements,
-  canonical resource layouts, and DXBC-offset source maps
+- deterministic `BuildWgsl(...)` emission for bounded straight-line SM5.0 and
+  SM5.1 vertex programs, including packed `sincos -> lt -> and -> movc` math,
+  signed `iadd`, and raw `ld_structured` reads from read-only storage buffers
+- a bounded fragment slice with exact integer/reinterpretation flow through
+  `iadd -> itof`, conditional `discard`, dot products, texture sampling,
+  rounding, typed statements, canonical resource layouts, and DXBC-offset
+  source maps
+- parameterless fragment entry points when declared pixel inputs are not live;
+  dead input signatures are omitted while output signatures remain mandatory
+- component-wise fragment `frc` and `round_ni`, emitted as WGSL `fract` and
+  round-toward-negative-infinity `floor` respectively
+- pass-global `BuildWgslBindingPlan(...)` allocation so separately emitted
+  vertex and pixel modules retain one collision-free canonical layout
+- strict complete-pass selection in `package:effect`, allowing a supported
+  pass to be packaged while full-effect ANLS provenance is retained
 
 General control flow and general vertex WGSL emission remain later passes. A
 bounded SM5.1 fragment path supports nested no-else selections with scalar
@@ -62,8 +75,11 @@ const analysis = reader.AnalyzeEffect(effectBytes, {
   permutation: [ { name: "QUALITY", value: "HIGH" } ],
   decodeInstructions: false
 });
-const vertexShader = reader.BuildWgsl(vertexDxbcBytes);
-const fragmentShader = reader.BuildWgsl(dx11FragmentDxbcBytes);
+const vertexIr = reader.BuildShaderIr(vertexDxbcBytes);
+const fragmentIr = reader.BuildShaderIr(dx11FragmentDxbcBytes);
+const bindingPlan = reader.BuildWgslBindingPlan([ vertexIr, fragmentIr ]);
+const vertexShader = reader.BuildWgsl(vertexIr, { bindingPlan });
+const fragmentShader = reader.BuildWgsl(fragmentIr, { bindingPlan });
 const wgslSet = reader.BuildWgslSet([
   { key: "Main.pass0.vertex", shader: vertexShader },
   { key: "Main.pass0.pixel", shader: fragmentShader }
@@ -71,9 +87,21 @@ const wgslSet = reader.BuildWgslSet([
 const built = reader.Build([
   [ "INFO", { format: "CEWGPU", formatVersion: 1 } ],
   [ "META", { effectName: "quadv5" } ],
-  [ "ANLS", analysis ]
+  [ "ANLS", analysis ],
+  [ "WGSL", wgslSet ]
 ]);
 const text = JSON.stringify(reader.ToJSON(pkg));
+```
+
+A D3D `(resource class, register space, register index)` tuple is stage-local
+unless pass metadata confirms it names one shared resource. The planner fails
+closed when the same tuple appears in multiple stages. `CjsLibrary` or another
+policy owner may confirm a known shared resource explicitly:
+
+```js
+const bindingPlan = reader.BuildWgslBindingPlan([ vertexIr, fragmentIr ], {
+  sharedIdentities: [ "uniform-buffer:0:0" ]
+});
 ```
 
 Named import is also available:
@@ -91,6 +119,7 @@ CjsFormatWebgpu.inspect(packageBytes);      // package summary
 CjsFormatWebgpu.build(chunks);              // package bytes
 CjsFormatWebgpu.analyzeEffect(effectBytes); // normalized effect analysis JSON
 CjsFormatWebgpu.buildShaderIr(dxbcBytes);   // frozen front-end shader IR
+CjsFormatWebgpu.buildWgslBindingPlan(irs);  // pass-global canonical slots
 CjsFormatWebgpu.buildWgsl(dxbcBytes);       // typed WGSL descriptor (supported slices)
 CjsFormatWebgpu.buildWgslSet(entries);      // portable shaders + pass layouts
 ```
@@ -114,10 +143,13 @@ simple package rules:
 - frozen front-end shader IR per decoded stage when instruction decoding is
   enabled
 
-`WGSL` may hold raw WGSL or JSON stage/shader sets. Current emission covers the
-copyblit mov-only vertex plus bounded SM5.0 and SM5.1 fragment paths. The SM5.1
-slice lowers nested no-else scalar float phis to typed function variables and
-true-edge assignments; this is not general control-flow lowering.
+`WGSL` may hold raw WGSL or JSON stage/shader sets. Current emission covers a
+bounded straight-line arithmetic/resource-using vertex path plus bounded
+SM5.0 and SM5.1 fragment paths. The SM5.1 fragment slice lowers nested no-else
+scalar float phis to typed function variables and true-edge assignments; this
+is not general control-flow lowering. A fragment whose executable program reads
+no input register emits no empty input structure and uses `fn main() ->
+FragmentOutput`; declared-but-dead inputs do not block emission.
 JSON `CJS_WGSL_SET` records may also include optional pass-level `layouts`.
 Those records carry canonical numeric bind groups and the exact buffer,
 texture, and sampler layout used by emitted WGSL; they are exposed separately
@@ -131,9 +163,10 @@ its `@group` and `@binding` attributes.
 
 - Instance methods are PascalCase to avoid collisions with CarbonClass data.
 - Static one-shot methods are camelCase and live on `CjsFormatWebgpu`.
-- Use `reader.SetClass(type, Class)`, `reader.SetClasses(classes)`, or
-  `classes` in the options object for class hydration.
-- Accepted class keys are exposed as `CjsFormatWebgpu.CLASS_KEYS`.
+- `reader.SetClass(type, Class)`, `reader.SetClasses(classes)`, and the
+  `classes` option currently validate/store registrations only; `Read` returns
+  plain package data and does not instantiate those classes yet.
+- Accepted registration keys are exposed as `CjsFormatWebgpu.CLASS_KEYS`.
 - `Read` / static `read` parse `.cewgpu` package bytes.
 - `AnalyzeEffect` / static `analyzeEffect` consume compiled `.sm_*` effect
   bytes, not `.cewgpu` package bytes.
@@ -147,16 +180,45 @@ npm test
 npm run lint
 ```
 
-To package an effect whose selected stages are all inside the currently
-supported WGSL slice:
+The packaging and qualification commands below are repository-only development
+gates. They are not included in the published package tarball while they depend
+on corrected sibling decoder source.
+
+To package a complete pass whose stages are inside the currently supported
+WGSL slice:
 
 ```powershell
-npm.cmd run package:effect -- E:\path\copyblit.sm_hi E:\path\copyblit.cewgpu
+npm.cmd run package:effect -- `
+  E:\path\quadv5.sm_lo `
+  E:\path\quadv5-main.cewgpu `
+  --permutation BINDLESS_RENDERING=BINDLESS_RENDERING_DISABLED `
+  --permutation SPACE_OBJECT_CLIPPING=SOC_DISABLED `
+  --permutation SPACE_OBJECT_PPT_ENABLED=SOPPT_ENABLED `
+  --permutation SPACE_OBJECT_TRANSPARENCY=SOT_OPAQUE `
+  --permutation V5_DEBUG=OFF `
+  --permutation SPACE_OBJECT_INSTANCED_ATTACHMENT=SOIA_DISABLED `
+  --permutation BLEND_MODE=BLEND_MODE_OVERLAY `
+  --technique Main --pass 0 --stage vertex --stage pixel
 ```
 
-The plain-JavaScript command retains `ANLS` stage metadata and adds the
-generated `CJS_WGSL_SET` plus canonical pass layouts. It fails explicitly when
-any selected stage is not yet supported by the WGSL compiler.
+The exact, case-sensitive stage list asserts that the selected pass is
+complete. The command retains every `ANLS` pass/stage record, emits WGSL only
+for the selected pass, records the selection in `META.wgslSelection`, and
+builds one pass-global binding plan before emitting either stage. It fails
+explicitly for a missing/incomplete selection, an unknown or unresolved
+`--permutation NAME=VALUE` assertion, or an unsupported selected stage.
+Assert every axis when the output must be reproducible independently of
+effect defaults or registered global options.
+With no selector flags, the legacy all-stage behavior remains in effect.
+
+The monorepo packaging/qualification scripts currently decode through the
+sibling `format-dxbc` 0.1.2 source. The published 0.1.1 dependency predates a
+required SM5.1 constant-buffer correction, so standalone DX12 byte-input use
+must wait for that decoder release rather than copying its implementation.
+The consumer update is prepared but deliberately unapplied: after 0.1.2 is
+published, update the dependency and lockfile from the registry and switch all
+three development scripts back to `@carbonenginejs/format-dxbc` in one change.
+Do not commit a `file:`, `link:`, workspace, or local-tarball substitute.
 
 To qualify a paired DX11/DX12 corpus without treating expected WGSL emitter
 boundaries as front-end failures:
@@ -165,7 +227,45 @@ boundaries as front-end failures:
 npm.cmd run qualify:effects -- E:\path\effect.dx11 E:\path\effect.dx12
 ```
 
-The command recursively pairs `.sm_lo`, `.sm_hi`, and `.sm_depth` files by
+The corpus qualifier resolves the default permutation of each paired file. To
+exercise every mixed-radix permutation body, every declared technique, and
+every active pass in one exact DX11/DX12 pair, use the pass-global matrix gate:
+
+```powershell
+npm.cmd run qualify:matrix -- --summary --output E:\path\matrix.json E:\path\dx11\effect.sm_lo E:\path\dx12\effect.sm_lo
+```
+
+The matrix runner parses each effect once, compares permutation axes and active
+pass topology by body index, caches identical DXBC programs, then runs binding
+planning, WGSL emission, and `BuildWgslSet` per distinct pass program. The full
+report records every body-to-variant mapping, empty techniques, independently
+emitted shader modules, pass-ready variants, and occurrence-weighted unsupported
+boundaries. It never guesses that a repeated D3D identity is shared; ambiguous
+identity reuse remains a reported policy boundary for `CjsLibrary` or the
+calling test preset to resolve explicitly.
+
+The 2026-07-18 exact `spaceobject/unpacked_quadv5.sm_lo` 480-body matrix
+qualifies all 8,960 stage occurrences through the front end. The complete
+`iadd -> itof -> conditional-discard` family now emits, so DX11 emits all
+4,480 stages and prepares all 2,240 passes. DX12 emits 4,120 stages and
+prepares 1,880 passes; its remaining 360 occurrences are only the explicit
+bindless sampled-resource range boundary. The required browser gate compiled
+47 unique modules and prepared 76 unique pipelines, covering 8,600 emitted
+stage occurrences and 4,120 ready pass occurrences with zero WGSL warnings.
+
+The packed `spaceobject/quadv5.sm_lo` 480-body pair reaches the same exact
+counts and browser gate after adding paired `sincos` writes and the complete
+mask-selection chain. The strict 240-body
+`spaceobject/unpackedskinned_quadv5.sm_lo` pair proves raw structured bone
+loads as `array<u32>` read-only storage: DX11 emits 1,600/2,240 stages and
+DX12 emits 1,420/2,240, with 480/1,120 ready passes per backend. Its browser
+gate compiled 33 modules and prepared 8 pipelines, covering 3,020 emitted
+stages and 960 ready passes with zero warnings. Remaining skinned boundaries
+are unsupported DXBC `precise` controls, incompatible cross-stage `t0`
+declarations (structured vertex buffer versus pixel texture), and the DX12
+bindless range. There is no relaxed-precision escape hatch.
+
+The `qualify:effects` command recursively pairs `.sm_lo`, `.sm_hi`, and `.sm_depth` files by
 relative path, decodes every selected stage through the current sibling
 `format-dxbc` source, and records IR/CFG/type metrics plus the first WGSL
 emitter result as JSON. Missing pairs, stage-key drift, decode failures, and IR
