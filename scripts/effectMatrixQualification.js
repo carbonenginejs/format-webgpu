@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import CjsFormatHlsl from "../../format-hlsl/src/index.js";
-import CjsFormatDxbc from "../../format-dxbc/src/index.js";
+import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
 import CjsFormatWebgpu from "../src/index.js";
 import {
     enumerateEffectPermutations,

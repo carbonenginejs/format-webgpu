@@ -2,7 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 
 import { readEffectAnalysis } from "../src/core/effectAnalysis.js";
-import CjsFormatDxbc from "../../format-dxbc/src/index.js";
+import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
 import CjsFormatWebgpu from "../src/index.js";
 
 const summaryOnly = process.argv.includes("--summary");

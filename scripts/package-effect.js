@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { readEffectAnalysis } from "../src/core/effectAnalysis.js";
-import CjsFormatDxbc from "../../format-dxbc/src/index.js";
+import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
 import CjsFormatWebgpu from "../src/index.js";
 import {
     buildWgslSelectionMetadata,

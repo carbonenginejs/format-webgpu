@@ -226,14 +226,10 @@ Assert every axis when the output must be reproducible independently of
 effect defaults or registered global options.
 With no selector flags, the legacy all-stage behavior remains in effect.
 
-The monorepo packaging/qualification scripts currently decode through the
-sibling `format-dxbc` 0.1.2 source. The published 0.1.1 dependency predates a
-required SM5.1 constant-buffer correction, so standalone DX12 byte-input use
-must wait for that decoder release rather than copying its implementation.
-The consumer update is prepared but deliberately unapplied: after 0.1.2 is
-published, update the dependency and lockfile from the registry and switch all
-three development scripts back to `@carbonenginejs/format-dxbc` in one change.
-Do not commit a `file:`, `link:`, workspace, or local-tarball substitute.
+The packaging and qualification scripts decode through the published
+`@carbonenginejs/format-dxbc` dependency. Version 0.1.2 is the minimum because
+it contains the required SM5.1 constant-buffer correction for standalone DX12
+byte-input use.
 
 To qualify a paired DX11/DX12 corpus without treating expected WGSL emitter
 boundaries as front-end failures:
