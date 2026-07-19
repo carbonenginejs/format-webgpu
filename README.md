@@ -127,6 +127,31 @@ comparison belong to a format-webgpu Node qualifier; tools-core may coordinate
 that format-owned qualifier for a target that requires it but must not own the
 executable or comparison implementation.
 
+### Indexed corpus builds
+
+Do not use the format-local command to acquire or rebuild an indexed EVE or
+Frontier corpus. Agents producing packages for an engine, harness, build report,
+or persistent resource overlay must run the canonical tools-core builder from
+`E:\carbonenginejs-org\tools-core`:
+
+```powershell
+npm.cmd run build:shader:webgpu -- --shader-target eve-webgpu --build latest --out <output>
+```
+
+Add `--diagnostic` to retain unsupported/failed entries for compiler audit, or
+`--force --no-reuse` to transactionally replace and rebuild an existing output.
+The command writes `build-report.json`, durable JSONL progress, and a structured
+failure report. EVE WebGPU currently uses structural qualification and records
+native comparison as `pending-audit`. No Frontier WebGPU target is registered;
+a future target must require this package's Node-owned `native-hlslcc` qualifier.
+
+The dependency direction is deliberately tools-core -> format-webgpu.
+tools-core imports only this package's public root `CjsFormatWebgpu` class; its
+transitive HLSL/DXBC imports are format-webgpu's concern. Do not add tools-core
+as a format or browser dependency. Direct `buildEffect` use remains correct for
+browser conversion, library tests, paired compiler qualification, and explicit
+one-file diagnostics.
+
 A D3D `(resource class, register space, register index)` tuple is stage-local
 unless pass metadata confirms it names one shared resource. The version-2
 binding plan retains that tuple as `identity` and carries a separate
