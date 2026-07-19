@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import CjsFormatWebgpu, { CjsFormatWebgpu as NamedCjsFormatWebgpu } from "../src/index.js";
-import { buildCewgpuPackage } from "./synthetic.js";
+import { buildCewgpuPackage, buildMinimalStagedEffectBytes } from "./synthetic.js";
 
 class Package {}
 class Resource {}
@@ -36,6 +36,7 @@ test("reader exposes the expected public profile API", () =>
 {
     assert.deepEqual(Object.getOwnPropertyNames(CjsFormatWebgpu.prototype).sort(), [
         "AnalyzeEffect",
+        "BuildEffect",
         "BuildShaderIr",
         "BuildWgsl",
         "BuildWgslBindingPlan",
@@ -146,4 +147,32 @@ test("toJSON converts typed arrays and nested structures", () =>
         nested: [ { mask: new Uint8Array([ 3 ]) } ]
     });
     assert.deepEqual(converted, { tokens: [ 1, 2 ], nested: [ { mask: [ 3 ] } ] });
+});
+
+test("buildEffect exposes browser-safe whole-effect CEWGPU packaging", () =>
+{
+    const source = buildMinimalStagedEffectBytes();
+    const result = CjsFormatWebgpu.buildEffect(source, {
+        source: "res:/graphics/effect.dx11/synthetic.sm_hi",
+        sourceIdentity: {
+            logicalPath: "res:/graphics/effect.dx11/synthetic.sm_hi",
+            game: "Eve",
+            build: "3430261",
+            md5: "00000000000000000000000000000000"
+        }
+    });
+
+    assert.equal(CjsFormatWebgpu.isCewgpu(result.bytes), true);
+    assert.equal(result.info.sourceIdentity.build, "3430261");
+    assert.equal(result.qualification.ok, true);
+    assert.equal(result.qualification.level, "structural");
+    assert.equal(result.qualification.nativeComparison, false);
+    assert.equal(result.info.selectedStageCount, 1);
+    assert.equal(result.analysis.stages[0].key, "Main.pass0.vertex");
+    assert.equal(result.wgsl.shaders.length, 1);
+    assert.equal(result.inspection.shaderCount, 1);
+    assert.deepEqual(
+        CjsFormatWebgpu.read(result.bytes).info.sourceIdentity,
+        result.info.sourceIdentity
+    );
 });

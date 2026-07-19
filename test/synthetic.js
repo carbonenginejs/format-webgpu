@@ -24,6 +24,13 @@ class ByteWriter
         return this._push(Uint8Array.of(value & 0xff));
     }
 
+    u16(value)
+    {
+        const bytes = new Uint8Array(2);
+        new DataView(bytes.buffer).setUint16(0, value & 0xffff, true);
+        return this._push(bytes);
+    }
+
     u32(value)
     {
         const bytes = new Uint8Array(4);
@@ -274,6 +281,73 @@ export function buildEffectBytes(options = {})
         const size = records[index].size;
         writer.raw(body.bytes || new Uint8Array(size));
     }
+
+    return writer.toBytes();
+}
+
+/**
+ * Builds one complete synthetic effect with a minimal vertex DXBC stage.
+ *
+ * @returns {Uint8Array} Synthetic compiled effect bytes.
+ */
+export function buildMinimalStagedEffectBytes()
+{
+    const DCL_GLOBAL_FLAGS = 106;
+    const DCL_TEMPS = 104;
+    const RET = 62;
+    const tokens = new Uint32Array([
+        versionToken(1, 5, 0),
+        6,
+        opcodeToken(DCL_GLOBAL_FLAGS, 1) | (1 << 11),
+        opcodeToken(DCL_TEMPS, 2),
+        1,
+        opcodeToken(RET, 1)
+    ]);
+    const dxbc = buildDxbcContainer([ {
+        fourCC: "SHEX",
+        payload: new Uint8Array(tokens.buffer.slice(0))
+    } ]);
+    const table = new ByteWriter();
+    const mainOffset = table.length;
+    table.raw(textEncoder.encode("Main"));
+    table.u8(0);
+    const dxbcOffset = table.length;
+    table.raw(dxbc);
+
+    const body = new ByteWriter();
+    body.u8(1);
+    body.u32(mainOffset);
+    body.u8(1);
+    body.u8(1);
+    body.u8(0);
+    body.u8(0);
+    body.u32(dxbc.length);
+    body.u32(dxbcOffset);
+    body.u32(0);
+    body.u32(0);
+    body.u32(1);
+    body.u32(1);
+    body.u32(1);
+    body.u32(0);
+    body.u32(0);
+    body.u32(0);
+    body.u8(0);
+    body.u8(0);
+    body.u8(0);
+    body.u8(0);
+    body.u8(0);
+    body.u16(0);
+
+    const writer = new ByteWriter();
+    writer.u32(8);
+    writer.u32(table.length);
+    writer.raw(table.toBytes());
+    writer.u8(0);
+    writer.u32(1);
+    writer.u32(0);
+    writer.u32(writer.length + 8);
+    writer.u32(body.length);
+    writer.raw(body.toBytes());
 
     return writer.toBytes();
 }

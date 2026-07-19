@@ -3,6 +3,7 @@ import { lowerDxbcToIr } from "./core/ir/lowerDxbcToIr.js";
 import { buildWgsl } from "./core/wgsl/emitWgsl.js";
 import { buildWgslBindingPlan } from "./core/wgsl/buildWgslBindingPlan.js";
 import { buildWgslSet } from "./core/wgsl/buildWgslSet.js";
+import { buildEffectPackage } from "./core/packageEffect.js";
 import {
     CEWGPU_ANALYSIS_FORMAT,
     CEWGPU_FORMAT,
@@ -189,6 +190,18 @@ export class CjsFormatWebgpu
     }
 
     /**
+     * Builds a complete CEWGPU package from compiled Tr2 effect bytes.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
+     * @param {object} [options] Source, permutation, and stage-selection policy.
+     * @returns {object} Package bytes plus inspection and provenance documents.
+     */
+    BuildEffect(input, options = {})
+    {
+        return buildEffectPackage(input, options);
+    }
+
+    /**
      * Lowers DXBC bytes or decoded instructions into the front-end shader IR.
      *
      * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC input.
@@ -308,6 +321,18 @@ export class CjsFormatWebgpu
     }
 
     /**
+     * Static whole-effect CEWGPU builder.
+     *
+     * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
+     * @param {object} [options] Source, permutation, and stage-selection policy.
+     * @returns {object} Package bytes plus inspection and provenance documents.
+     */
+    static buildEffect(input, options = {})
+    {
+        return buildEffectPackage(input, options);
+    }
+
+    /**
      * Static DXBC-to-front-end-IR helper.
      *
      * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC input.
@@ -379,6 +404,7 @@ export class CjsFormatWebgpu
     static implementationStatus = "partial";
     static format = CEWGPU_FORMAT;
     static analysisFormat = CEWGPU_ANALYSIS_FORMAT;
+    static packageVersion = "0.2.0";
 }
 
 export default CjsFormatWebgpu;

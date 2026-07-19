@@ -1,12 +1,14 @@
 # @carbonenginejs/format-webgpu
 
-CarbonEngineJS-facing reader/builder for `.cewgpu` WebGPU package data, plus
-an offline effect-analysis helper built on `@carbonenginejs/format-hlsl` and
-`@carbonenginejs/format-dxbc`.
+CarbonEngineJS-facing reader/builder for `.cewgpu` WebGPU package data, plus a
+browser-safe compiled-effect to WGSL package pipeline built on
+`@carbonenginejs/format-hlsl` and `@carbonenginejs/format-dxbc`.
 
 The current phase-1 slice implements:
 
 - CEWGPU package `Read`, `Inspect`, and `Build`
+- complete byte-in/byte-out `BuildEffect(...)` conversion for the currently
+  supported WGSL slice
 - an offline `AnalyzeEffect(...)` path for compiled `.sm_*` effect payloads
 - normalized binding, stage, and DXBC analysis JSON consumed by current WGSL
   lowering and retained as package provenance
@@ -75,6 +77,15 @@ const analysis = reader.AnalyzeEffect(effectBytes, {
   permutation: [ { name: "QUALITY", value: "HIGH" } ],
   decodeInstructions: false
 });
+const packaged = reader.BuildEffect(effectBytes, {
+  source: "res:/graphics/effect.dx11/managed/space/quadv5.sm_hi",
+  permutation: [ { name: "QUALITY", value: "HIGH" } ],
+  selection: {
+    techniqueName: "Main",
+    passIndex: 0,
+    stageNames: [ "vertex", "pixel" ]
+  }
+});
 const vertexIr = reader.BuildShaderIr(vertexDxbcBytes);
 const fragmentIr = reader.BuildShaderIr(dx11FragmentDxbcBytes);
 const bindingPlan = reader.BuildWgslBindingPlan([ vertexIr, fragmentIr ]);
@@ -92,6 +103,29 @@ const built = reader.Build([
 ]);
 const text = JSON.stringify(reader.ToJSON(pkg));
 ```
+
+### `BuildEffect(effectBytes, options)` / `buildEffect(effectBytes, options)`
+
+Converts one compiled `.sm_*` effect entirely from caller-supplied bytes. It
+performs exact permutation validation, complete-pass selection, DXBC-to-IR and
+WGSL lowering, pass-global binding allocation, CEWGPU assembly, and package
+inspection. The result contains `{ bytes, info, metadata, analysis, wgsl,
+inspection, qualification }`. Successful conversion is structurally qualified
+by the browser pipeline. Native comparison, when a target requires it, is a
+separate Node qualification layer and does not change browser correctness.
+
+The implementation under `src/core` has no filesystem, path, process, or
+native-executable dependency, so browsers can fetch or select `.sm_*` bytes and
+convert them directly. Unsupported shader semantics throw instead of silently
+publishing a partial package.
+
+`npm run package:effect -- <input.sm_*> <output.cewgpu>` is only a Node file
+adapter over that same API. It refuses an existing output unless
+`--overwrite` or `--force` is supplied and never overwrites its input. Native
+HLSLcc comparison is not part of `BuildEffect`. Executable discovery and output
+comparison belong to a format-webgpu Node qualifier; tools-core may coordinate
+that format-owned qualifier for a target that requires it but must not own the
+executable or comparison implementation.
 
 A D3D `(resource class, register space, register index)` tuple is stage-local
 unless pass metadata confirms it names one shared resource. The version-2
@@ -126,6 +160,7 @@ CjsFormatWebgpu.read(packageBytes);         // package JSON
 CjsFormatWebgpu.inspect(packageBytes);      // package summary
 CjsFormatWebgpu.build(chunks);              // package bytes
 CjsFormatWebgpu.analyzeEffect(effectBytes); // normalized effect analysis JSON
+CjsFormatWebgpu.buildEffect(effectBytes);   // complete browser-safe CEWGPU package
 CjsFormatWebgpu.buildShaderIr(dxbcBytes);   // frozen front-end shader IR
 CjsFormatWebgpu.buildWgslBindingPlan(irs);  // pass-global canonical slots
 CjsFormatWebgpu.buildWgsl(dxbcBytes);       // typed WGSL descriptor (supported slices)

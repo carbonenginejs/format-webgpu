@@ -23,8 +23,19 @@ test("package-effect keeps legacy all-stage selection when no flags are present"
 
     assert.deepEqual(parsed.permutation, []);
     assert.equal(parsed.selection, null);
+    assert.equal(parsed.overwrite, false);
     assert.deepEqual(selectPackageEffectStages(STAGES, parsed.selection), STAGES);
     assert.equal(buildWgslSelectionMetadata(parsed.selection, STAGES), null);
+});
+
+test("package-effect requires an explicit overwrite alias for existing output", () =>
+{
+    assert.equal(parsePackageEffectArguments([
+        "input.sm_lo", "output.cewgpu", "--overwrite"
+    ]).overwrite, true);
+    assert.equal(parsePackageEffectArguments([
+        "input.sm_lo", "output.cewgpu", "--force"
+    ]).overwrite, true);
 });
 
 test("package-effect parses exact repeatable permutation assertions", () =>
