@@ -77,6 +77,20 @@ DXBC reads the front-face flag as a 0xFFFFFFFF/0 mask; WGSL's builtin is
 `bool`. Consumers receive `select(0u, 0xffffffffu, front_facing)` (or the
 signed variant).
 
+### Selection arms may write outputs alongside a live merge
+
+A vertex `if`/`else` whose arms write shader outputs (typically `SV_Position`
+in a Picking/stretch pass — one arm computes the real transform, the other
+writes a constant/off-screen position) AND also carry a scalar phi merge
+(e.g. a `TEXCOORD` lane read after the join) used to be rejected outright.
+Output writes inside a branch compose correctly with the merge machinery: the
+merge `var` is pre-declared before the `if` and assigned at each arm's end,
+while output completeness is enforced by the post-branch component
+intersection and the reachable-`ret` coverage check. The guard is therefore
+removed for selections; the genuine "terminates before merge assignments"
+(return inside an arm ahead of the appended merge write) guard stays.
+Browser-validated on `banner` (Main + Picking, DX11 and DX12, zero warnings).
+
 ### Dead untyped temp writes → skipped
 
 Compiler-emitted dead stores whose values nothing reads (and whose types are
@@ -173,6 +187,25 @@ handler-only `ult`/`uge` to both stage support sets.
 - **Selection merges** — scalar phis; two-armed regions identify arm tails by
   edge kind; guaranteed-output tracking intersects arms.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
+
+## Known browser-level gaps (package-qualify cannot see)
+
+WGSL forbids screen-space derivatives — the `dpdx*`/`dpdy*` family and the
+implicit-LOD samples that derive internally (`textureSample`,
+`textureSampleBias`) — inside **non-uniform** control flow. The package layer
+currently emits these inside `if`/`switch`/`loop` arms unconditionally; the
+browser gate (Tint uniformity analysis) rejects the ones whose branch
+condition is non-uniform (`'dpdxCoarse' must only be called from uniform
+control flow`). So a shader with a derivative under a varying-derived branch
+**package-qualifies but fails the browser gate**. The EVE `stretch` specialfx
+family (`artillery`, `blast`, `laser`, `projectile`) is the known corpus
+instance: their vertex stages now lower (selection-merge fix above), exposing
+this pre-existing fragment incompatibility. The proper fix is a value-provenance
+uniformity analysis that fails these closed at package level (uniform =
+constant-buffer/immediate-derived; non-uniform = interpolated-input/derivative/
+sample-derived). That analysis will also require reworking the sample-in-branch
+unit-test fixtures, which currently encode the permissive behavior. Until then,
+these four are counted package-qualified but are NOT browser-valid.
 
 ## Verification contract
 

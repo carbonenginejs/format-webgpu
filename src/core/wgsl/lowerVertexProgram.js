@@ -1059,10 +1059,6 @@ export function lowerVertexProgram(program, options = {})
             const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
             const trueWritten = cloneWritten(rangeWritten);
             const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop);
-            if (plan.merges.length && containsOutputAssignment(trueStatements))
-            {
-                throw new Error(`WGSL vertex selection at ${index} writes output before a live merge`);
-            }
             if (trueStatements.at(-1)?.kind === "return" && plan.merges.length)
             {
                 throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
@@ -1083,10 +1079,6 @@ export function lowerVertexProgram(program, options = {})
             {
                 falseWritten = cloneWritten(rangeWritten);
                 falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop);
-                if (plan.merges.length && containsOutputAssignment(falseStatements))
-                {
-                    throw new Error(`WGSL vertex selection at ${index} writes output before a live merge`);
-                }
                 if (falseStatements.at(-1)?.kind === "return" && plan.merges.length)
                 {
                     throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
