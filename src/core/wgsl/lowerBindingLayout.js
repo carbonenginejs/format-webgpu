@@ -68,7 +68,7 @@ function uniformLayout(program, binding)
     {
         throw new Error(`WGSL uniform ${binding.id} has no positive vec4 size`);
     }
-    if (binding.accessPattern !== "immediate_indexed")
+    if (binding.accessPattern !== "immediate_indexed" && binding.accessPattern !== "dynamic_indexed")
     {
         throw new Error(`WGSL uniform ${binding.id} requires unsupported ${binding.accessPattern || "unknown"} indexing`);
     }
@@ -83,9 +83,17 @@ function uniformLayout(program, binding)
     };
 }
 
+const TEXTURE_DIMENSIONS = Object.freeze({
+    texture2d: { type: "texture_2d<f32>", viewDimension: "2d" },
+    texturecube: { type: "texture_cube<f32>", viewDimension: "cube" },
+    texture3d: { type: "texture_3d<f32>", viewDimension: "3d" },
+    texture2darray: { type: "texture_2d_array<f32>", viewDimension: "2d-array" }
+});
+
 function textureLayout(binding)
 {
-    if (binding.resourceDimension !== "texture2d")
+    const dimension = TEXTURE_DIMENSIONS[binding.resourceDimension];
+    if (!dimension)
     {
         throw new Error(`WGSL sampled resource ${binding.id} has unsupported dimension ${binding.resourceDimension}`);
     }
@@ -96,10 +104,10 @@ function textureLayout(binding)
     }
     return {
         declaration: "var",
-        type: "texture_2d<f32>",
+        type: dimension.type,
         texture: {
             sampleType: "float",
-            viewDimension: "2d",
+            viewDimension: dimension.viewDimension,
             multisampled: false
         }
     };

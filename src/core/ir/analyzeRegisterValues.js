@@ -141,7 +141,7 @@ function analyzeBlock(program, block, values)
             const components = operandComponents(
                 operand,
                 false,
-                fixedSourceLanes(instruction, operandIndex) || activeSourceComponents);
+                fixedSourceLanes(instruction, operandIndex, program) || activeSourceComponents);
             const refs = components.map((component) => ensureComponent(state, values, register, component, block.id));
             for (const ref of refs)
             {
@@ -149,6 +149,28 @@ function analyzeBlock(program, block, values)
                 if (value?.origin === "block-input") inputIds.add(value.id);
             }
             reads.push({ kind: "register-read", operandIndex, register, components, refs });
+        }
+
+        for (let operandIndex = 0; operandIndex < roles.length; operandIndex += 1)
+        {
+            const { operand } = roles[operandIndex];
+            const indices = operand.indices || [];
+            for (let dimension = 0; dimension < indices.length; dimension += 1)
+            {
+                const relative = indices[dimension].relative;
+                if (!relative) continue;
+                const register = registerKey(relative);
+                if (!register) throw new Error("Shader IR relative index uses an unsupported register file");
+                const components = operandComponents(relative, false);
+                if (components.length !== 1) throw new Error("Shader IR relative index requires one scalar component");
+                const refs = components.map((component) => ensureComponent(state, values, register, component, block.id));
+                for (const ref of refs)
+                {
+                    const value = values.find((entry) => entry.id === ref.valueId);
+                    if (value?.origin === "block-input") inputIds.add(value.id);
+                }
+                reads.push({ kind: "index-read", operandIndex, dimension, register, components, refs });
+            }
         }
 
         for (let operandIndex = 0; operandIndex < roles.length; operandIndex += 1)

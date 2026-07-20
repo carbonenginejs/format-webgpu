@@ -18,26 +18,33 @@ The current phase-1 slice implements:
 - component-granular register versions, masked-write reconstruction,
   cross-block SSA merges, signature/opcode/resource-driven scalar types, and
   explicit typeless-register reinterpret records
-- deterministic `BuildWgsl(...)` emission for bounded straight-line SM5.0 and
-  SM5.1 vertex programs, including packed `sincos -> lt -> and -> movc` math,
-  signed `iadd`, and raw `ld_structured` reads from read-only storage buffers
-- a bounded fragment slice with exact integer/reinterpretation flow through
-  `iadd -> itof`, conditional `discard`, dot products, texture sampling,
-  rounding, typed statements, canonical resource layouts, and DXBC-offset
-  source maps
-- parameterless fragment entry points when declared pixel inputs are not live;
-  dead input signatures are omitted while output signatures remain mandatory
-- component-wise fragment `frc` and `round_ni`, emitted as WGSL `fract` and
-  round-toward-negative-infinity `floor` respectively
+- deterministic `BuildWgsl(...)` emission for bounded SM5.0 and SM5.1 vertex
+  and fragment programs, including packed `sincos -> lt -> and -> movc` math,
+  signed `iadd`, raw `ld_structured` reads from read-only storage buffers,
+  numeric conversions (`itof`/`utof`/`ftoi`/`ftou`), dynamic constant-buffer
+  indexing (`cbN[base + i32(index)]`, including pure-relative indices), and
+  broad float/comparison/bitwise ALU coverage in both stages
+- a fragment slice with exact integer/reinterpretation flow through
+  `iadd -> itof`, conditional `discard`, dot products, sampling of 2D, cube,
+  3D, and 2D-array textures with dimension-derived coordinates,
+  `sample_l`/`sample_b`, screen-space derivatives, rounding, typed statements,
+  canonical resource layouts, and DXBC-offset source maps
+- system-value builtins: vertex `SV_VertexID`/`SV_InstanceID` and fragment
+  `SV_IsFrontFace` (front-facing mask projection); parameterless fragment
+  entry points when declared pixel inputs are not live
+- structured control flow in BOTH stages: nested `if`/`if-else` selections and
+  break-terminated `switch`/`case`/`default` regions with scalar component
+  merges of any resolved scalar type, plus an escape-hoisting pass that keeps
+  SSA-legal cross-arm value reads lexically valid in WGSL
 - pass-global `BuildWgslBindingPlan(...)` allocation so separately emitted
   vertex and pixel modules retain one collision-free canonical layout
 - strict complete-pass selection in `package:effect`, allowing a supported
   pass to be packaged while full-effect ANLS provenance is retained
 
-General control flow and general vertex WGSL emission remain later passes. A
-bounded SM5.1 fragment path supports nested no-else selections with scalar
-float component merges; loops, switches, else arms, mixed merge types, and
-observable undefined merge inputs remain rejected.
+Loop emission (`loop`/`endloop`) remains a later pass, exact `precise`
+floating-point operations remain a deliberate portability boundary, and DX12
+bindless sampled-resource ranges remain comparison-only limitations; DX11
+SM5.0 effects are the translation target.
 
 ## Provenance
 

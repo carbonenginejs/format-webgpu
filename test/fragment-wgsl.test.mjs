@@ -790,7 +790,7 @@ test("SM5.1 scalar merge lowering emits one mutable phi without synthetic source
 
 const mergeCorruptions = [
     [ "cycles", (ir, merge) => { merge.incoming[0].valueId = merge.id; }, /merge graph contains a cycle/i ],
-    [ "non-float types", (ir, merge) => { merge.componentTypes[merge.writeMask] = "uint32"; }, /not a scalar float predecessor phi/i ],
+    [ "unresolved types", (ir, merge) => { merge.componentTypes[merge.writeMask] = "unknown"; }, /not a scalar float predecessor phi/i ],
     [ "unknown predecessor edges", (ir, merge) => { merge.incoming[0].blockId = "block999"; }, /unsupported incoming edges/i ],
     [ "false-edge dominance violations", (ir, merge) => { merge.incoming[0].valueId = merge.incoming[1].valueId; }, /false input does not dominate/i ],
     [ "observable undefined carriers", (ir, merge) => {
@@ -828,4 +828,304 @@ test("SM5.1 undefined carriers require a correlated complementary overwrite", ()
         () => CjsFormatWebgpu.buildWgsl(undefinedMergeChainFixture("nonzero")),
         /observable undefined path/i
     );
+});
+
+test("fragment lowering emits a dynamic constant-buffer index", () =>
+{
+    const uintIndex = {
+        semanticName: "TEXCOORD", semanticIndex: 0, systemValueType: 0,
+        componentType: 1, componentTypeName: "uint32", registerIndex: 1,
+        mask: 1, readWriteMask: 1, stream: 0, minPrecision: 0
+    };
+    const cbOperand = register("constant_buffer", 3, { swizzle: "xyzw" });
+    cbOperand.indices = [
+        { values: [ 3 ], relative: null },
+        { values: [ 35 ], relative: register("input", 1, { selected: "x" }) }
+    ];
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ uintIndex ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_constant_buffer", isDeclaration: true,
+                declaration: { registerIndex: 3, accessPattern: "dynamic_indexed", sizeInVec4: 64 },
+                operands: [ register("constant_buffer", 3) ]
+            },
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(9, "mov", [ register("output", 0, { mask: "xyzw" }), cbOperand ]),
+            instruction(13, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-dynamic-cb" });
+    assert.match(shader.code, /cb3\[35 \+ i32\(input\.input1\)\]\.x/u);
+});
+
+test("fragment lowering emits both sincos destinations and min", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 1) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(4, "sincos", [
+                register("temp", 2, { mask: "x" }),
+                register("temp", 3, { mask: "x" }),
+                register("input", 1, { selected: "x" })
+            ]),
+            instruction(8, "min", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 2, { swizzle: "xxxx" }),
+                register("temp", 3, { swizzle: "xxxx" })
+            ]),
+            instruction(12, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-sincos" });
+    assert.match(shader.code, /sin\(/u);
+    assert.match(shader.code, /cos\(/u);
+    assert.match(shader.code, /min\(/u);
+});
+
+test("fragment lowering samples a cube texture with a three-component coordinate", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 7) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_sampler", "sampler", { samplerModeName: "default" }),
+            declaration(4, "dcl_resource", "resource", {
+                resourceDimensionName: "texturecube",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(9, "sample", [
+                register("temp", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xyzx" }),
+                register("resource", 0, { swizzle: "xyzw" }),
+                register("sampler", 0)
+            ]),
+            instruction(14, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xyzw" }) ]),
+            instruction(18, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-cube-sample" });
+    const cube = shader.program.bindings.find((entry) => entry.resourceKind === "sampled-resource");
+    assert.equal(cube.type, "texture_cube<f32>");
+    assert.match(shader.code, /textureSample\([^,]+, [^,]+, vec3<f32>\(/u);
+});
+
+test("fragment lowering samples a 2d-array texture with a split coordinate and array index", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 7) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_sampler", "sampler", { samplerModeName: "default" }),
+            declaration(4, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2darray",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(9, "sample", [
+                register("temp", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xyzx" }),
+                register("resource", 0, { swizzle: "xyzw" }),
+                register("sampler", 0)
+            ]),
+            instruction(14, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xyzw" }) ]),
+            instruction(18, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-2d-array-sample" });
+    const array = shader.program.bindings.find((entry) => entry.resourceKind === "sampled-resource");
+    assert.equal(array.type, "texture_2d_array<f32>");
+    assert.match(shader.code, /textureSample\(.*\.xy, i32\(.*\.z\)\)/u);
+});
+
+test("fragment lowering emits an if/else selection with a scalar float merge", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 3) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(5, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 1, { selected: "x" }),
+                register("input", 1, { selected: "y" })
+            ]),
+            { ...instruction(9, "if", [ register("temp", 0, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(11, "add", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 1, { selected: "x" }),
+                register("input", 1, { selected: "x" })
+            ]),
+            instruction(15, "else", []),
+            instruction(16, "mul", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 1, { selected: "y" }),
+                register("input", 1, { selected: "y" })
+            ]),
+            instruction(20, "endif", []),
+            instruction(21, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 1, { swizzle: "xxxx" }) ]),
+            instruction(25, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-else" });
+    assert.match(shader.code, /var value\d+: f32 = 0\.0;/u);
+    assert.match(shader.code, /\}\n    else\n    \{/u);
+    assert.match(shader.code, /let (value\d+): f32 = \(input\.input1\.x \+ input\.input1\.x\);\n        value(\d+) = value\d+;/u);
+    const assignments = shader.code.match(/value(\d+) = value\d+;/gu) || [];
+    assert.equal(assignments.length, 2);
+    assert.equal(assignments[0].split(" ")[0], assignments[1].split(" ")[0]);
+});
+
+test("fragment lowering emits resinfo and texel loads for 2d textures", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            { ...instruction(4, "resinfo", [
+                register("temp", 0, { mask: "xy" }),
+                immediate([ 0 ]),
+                register("resource", 0, { swizzle: "xyzw" })
+            ]), resinfoReturnTypeName: "uint" },
+            instruction(8, "mov", [ register("temp", 1, { mask: "zw" }), immediate([ 0, 0, 0, 0 ]) ]),
+            instruction(12, "mov", [ register("temp", 1, { mask: "xy" }), register("temp", 0, { swizzle: "xyxx" }) ]),
+            instruction(16, "ld", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 1, { swizzle: "xyzw" }),
+                register("resource", 0, { swizzle: "xyzw" })
+            ]),
+            instruction(21, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-ld" });
+    assert.match(shader.code, /textureDimensions\(t0, 0\)/u);
+    assert.match(shader.code, /textureLoad\(t0, .*\.xy, .*\.z\)/u);
+});
+
+test("fragment lowering emits a counted loop with carried phis and a conditional break", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "mov", [ register("temp", 0, { mask: "x" }), immediate([ 0 ]) ]),
+            instruction(6, "mov", [ register("temp", 1, { mask: "x" }), immediate([ 0 ]) ]),
+            instruction(10, "loop", []),
+            instruction(11, "ige", [
+                register("temp", 2, { mask: "x" }),
+                register("temp", 0, { selected: "x" }),
+                immediate([ 4 ])
+            ]),
+            { ...instruction(15, "breakc", [ register("temp", 2, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(17, "iadd", [
+                register("temp", 1, { mask: "x" }),
+                register("temp", 1, { selected: "x" }),
+                register("temp", 0, { selected: "x" })
+            ]),
+            instruction(21, "iadd", [
+                register("temp", 0, { mask: "x" }),
+                register("temp", 0, { selected: "x" }),
+                immediate([ 1 ])
+            ]),
+            instruction(25, "endloop", []),
+            instruction(26, "itof", [ register("temp", 3, { mask: "x" }), register("temp", 1, { selected: "x" }) ]),
+            instruction(30, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 3, { swizzle: "xxxx" }) ]),
+            instruction(34, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-loop" });
+    assert.match(shader.code, /loop\n    \{/u);
+    assert.match(shader.code, /break;/u);
+    const varCount = (shader.code.match(/var value\d+: i32 =/gu) || []).length;
+    assert.equal(varCount, 2);
+    const assignments = shader.code.match(/value\d+ = value\d+;/gu) || [];
+    assert.ok(assignments.length >= 2);
+});
+
+test("fragment lowering splits a mixed-lane movc into per-component selects", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 3) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(5, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 1, { selected: "x" }),
+                register("input", 1, { selected: "y" })
+            ]),
+            instruction(9, "lt", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 1, { selected: "y" }),
+                register("input", 1, { selected: "x" })
+            ]),
+            instruction(13, "add", [
+                register("temp", 1, { mask: "y" }),
+                register("input", 1, { selected: "x" }),
+                register("input", 1, { selected: "y" })
+            ]),
+            instruction(17, "movc", [
+                register("temp", 2, { mask: "xy" }),
+                register("temp", 0, { swizzle: "xxxx" }),
+                register("temp", 1, { swizzle: "xyxx" }),
+                register("temp", 1, { swizzle: "xyxx" })
+            ]),
+            instruction(22, "and", [
+                register("temp", 3, { mask: "x" }),
+                register("temp", 2, { selected: "x" }),
+                register("temp", 1, { selected: "x" })
+            ]),
+            instruction(26, "utof", [ register("temp", 4, { mask: "x" }), register("temp", 3, { selected: "x" }) ]),
+            instruction(30, "add", [
+                register("temp", 5, { mask: "x" }),
+                register("temp", 4, { selected: "x" }),
+                register("temp", 2, { selected: "y" })
+            ]),
+            instruction(34, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 5, { swizzle: "xxxx" }) ]),
+            instruction(38, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-mixed-movc" });
+    assert.match(shader.code, /let value\d+_x: u32 = select\(/u);
+    assert.match(shader.code, /let value\d+_y: f32 = select\(/u);
 });

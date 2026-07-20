@@ -627,16 +627,274 @@ test("vertex lowering materializes output writes that are read later", () =>
     assert.match(shader.code, new RegExp(`let ${materialized.name}: vec2<f32>`, "u"));
 });
 
-test("vertex lowering rejects relative cbuffer indexing and inconsistent reinterpretation metadata", () =>
+test("vertex lowering rejects a malformed relative cbuffer index and inconsistent reinterpretation metadata", () =>
 {
     const relative = arithmeticVertex();
     relative.instructions.find((entry) => entry.opcodeName === "dp4").operands[2].indices[1].relative = {
         typeName: "temp",
         registerIndex: 9
     };
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(relative), /relative cbuffer indexing/u);
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(relative), /relative index requires one scalar component/u);
 
     const ir = structuredClone(CjsFormatWebgpu.buildShaderIr(arithmeticVertex()));
     ir.instructions.find((entry) => entry.opcodeName === "mov").typeInfo.bitcasts.push({ kind: "read-bitcast" });
     assert.throws(() => CjsFormatWebgpu.buildWgsl(ir), /inconsistent register bitcast metadata/u);
+});
+
+function dynamicCbufferDeclaration(offset, registerIndex, sizeInVec4)
+{
+    const declaration = cbufferDeclaration(offset, registerIndex, sizeInVec4);
+    declaration.declaration.accessPattern = "dynamic_indexed";
+    return declaration;
+}
+
+function dynamicCbuffer(registerIndex, base, swizzle, relative)
+{
+    const operand = register("constant_buffer", registerIndex, { swizzle });
+    operand.indices = [
+        { values: [ registerIndex ], relative: null },
+        { values: [ base ], relative }
+    ];
+    return operand;
+}
+
+function dynamicIndexVertex()
+{
+    return {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("BLENDINDICES", 0, 1, 1, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            dynamicCbufferDeclaration(2, 3, 64),
+            instruction(6, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                dynamicCbuffer(3, 35, "xyzw", register("input", 1, { selected: "x" }))
+            ]),
+            instruction(10, "ret", [])
+        ]
+    };
+}
+
+test("vertex lowering emits a dynamic constant-buffer index and accepts the dynamic_indexed layout", () =>
+{
+    const shader = CjsFormatWebgpu.buildWgsl(dynamicIndexVertex(), { source: "synthetic-dynamic-cb" });
+    assert.match(shader.code, /cb3\[35 \+ i32\(input\.input1\)\]\.x/u);
+    const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "cb3");
+    assert.equal(binding.type, "array<vec4<f32>, 64>");
+    assert.equal(binding.buffer.type, "uniform");
+});
+
+test("vertex lowering rejects dynamic constant-buffer register selection", () =>
+{
+    const program = dynamicIndexVertex();
+    const operand = program.instructions.find((entry) => entry.opcodeName === "mov").operands[1];
+    operand.indices[0].relative = register("input", 1, { selected: "x" });
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program), /dynamic cbuffer register selection/u);
+});
+
+test("vertex lowering emits unsigned and signed integer-to-float conversions", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("BLENDINDICES", 0, 1, 1, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "utof", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 1, { selected: "x" })
+            ]),
+            instruction(6, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 0, { swizzle: "xxxx" })
+            ]),
+            instruction(10, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-utof" });
+    assert.match(shader.code, /f32\(input\.input1\)/u);
+});
+
+test("vertex lowering emits max, min, sqrt, and div", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 15) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "mov", [ register("temp", 0, { mask: "xyzw" }), register("input", 0, { swizzle: "xyzw" }) ]),
+            instruction(6, "max", [ register("temp", 1, { mask: "x" }), register("temp", 0, { selected: "x" }), register("temp", 0, { selected: "y" }) ]),
+            instruction(10, "min", [ register("temp", 1, { mask: "y" }), register("temp", 0, { selected: "z" }), register("temp", 0, { selected: "w" }) ]),
+            instruction(14, "sqrt", [ register("temp", 1, { mask: "z" }), register("temp", 0, { selected: "x" }) ]),
+            instruction(18, "div", [ register("temp", 1, { mask: "w" }), register("temp", 0, { selected: "x" }), register("temp", 0, { selected: "y" }) ]),
+            instruction(22, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 1, { swizzle: "xyzw" }) ]),
+            instruction(26, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-alu" });
+    assert.match(shader.code, /max\(/u);
+    assert.match(shader.code, /min\(/u);
+    assert.match(shader.code, /sqrt\(/u);
+    assert.match(shader.code, /\/ /u);
+});
+
+test("vertex lowering exposes SV_VertexID as the vertex_index builtin", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("SV_VertexID", 0, 0, 1, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(6, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xxxx" }) ]),
+            instruction(10, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertexid" });
+    assert.match(shader.code, /@builtin\(vertex_index\)/u);
+    assert.match(shader.code, /f32\(input\.vertex_index\)/u);
+});
+
+test("vertex lowering handles a pure-relative constant-buffer index (implicit base 0)", () =>
+{
+    const cb = register("constant_buffer", 3, { swizzle: "xyzw" });
+    cb.indices = [
+        { values: [ 3 ], relative: null },
+        { values: [], relative: register("input", 1, { selected: "x" }) }
+    ];
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("BLENDINDICES", 0, 1, 1, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            dynamicCbufferDeclaration(2, 3, 64),
+            instruction(6, "mov", [ register("output", 0, { mask: "xyzw" }), cb ]),
+            instruction(10, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-pure-relative-cb" });
+    assert.match(shader.code, /cb3\[i32\(input\.input1\)\]\.x/u);
+});
+
+test("vertex lowering emits an if/else selection with a scalar float merge", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(6, "if", [ register("temp", 0, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(8, "add", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "x" })
+            ]),
+            instruction(12, "else", []),
+            instruction(13, "mul", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 0, { selected: "y" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            instruction(17, "endif", []),
+            instruction(18, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 1, { swizzle: "xxxx" }) ]),
+            instruction(22, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-else" });
+    assert.match(shader.code, /var value\d+: f32 = 0\.0;/u);
+    assert.match(shader.code, /\}\n    else\n    \{/u);
+    const assignments = shader.code.match(/value(\d+) = value\d+;/gu) || [];
+    assert.equal(assignments.length, 2);
+    assert.equal(assignments[0].split(" ")[0], assignments[1].split(" ")[0]);
+});
+
+test("vertex lowering emits a switch with grouped selectors and an N-way merge", () =>
+{
+    const selector = (value) => ({
+        ...register("immediate32", null, {}),
+        immediateValues: [ { uint32: value, float32: 0 } ]
+    });
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "switch", [ register("input", 0, { selected: "x" }) ]),
+            instruction(4, "case", [ selector(0) ]),
+            instruction(6, "case", [ selector(3) ]),
+            instruction(8, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(12, "break", []),
+            instruction(13, "default", []),
+            instruction(15, "utof", [ register("temp", 1, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(19, "add", [ register("temp", 0, { mask: "x" }), register("temp", 1, { selected: "x" }), register("temp", 1, { selected: "x" }) ]),
+            instruction(23, "break", []),
+            instruction(24, "endswitch", []),
+            instruction(25, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xxxx" }) ]),
+            instruction(29, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-switch" });
+    assert.match(shader.code, /switch \(input\.input0\.x\)/u);
+    assert.match(shader.code, /case 0u, 3u:/u);
+    assert.match(shader.code, /default:/u);
+    assert.match(shader.code, /var value\d+: f32 = 0\.0;/u);
+    const assignments = shader.code.match(/value(\d+) = value\d+(?:\.[xyzw])?;/gu) || [];
+    assert.equal(assignments.length, 2);
+});
+
+test("vertex switch merges accept a pass-through incoming for clauses that keep the prior value", () =>
+{
+    const selector = (value) => ({
+        ...register("immediate32", null, {}),
+        immediateValues: [ { uint32: value, float32: 0 } ]
+    });
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(6, "switch", [ register("input", 0, { selected: "x" }) ]),
+            instruction(8, "case", [ selector(1) ]),
+            instruction(10, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(14, "break", []),
+            instruction(15, "default", []),
+            instruction(17, "break", []),
+            instruction(18, "endswitch", []),
+            instruction(19, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xxxx" }) ]),
+            instruction(23, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-switch-passthrough" });
+    assert.match(shader.code, /switch \(input\.input0\.x\)/u);
+    const assignments = shader.code.match(/value\d+ = value\d+;/gu) || [];
+    assert.equal(assignments.length, 2);
 });

@@ -93,7 +93,9 @@ export function buildWgsl(input, options = {})
         }
         else if (statement.kind === "var")
         {
-            lines.push(`${indent}var ${statement.name}: ${statement.type} = ${statement.expression.code};`);
+            lines.push(statement.expression
+                ? `${indent}var ${statement.name}: ${statement.type} = ${statement.expression.code};`
+                : `${indent}var ${statement.name}: ${statement.type};`);
         }
         else if (statement.kind === "value-assignment")
         {
@@ -112,6 +114,44 @@ export function buildWgsl(input, options = {})
             lines.push(`${indent}if (${statement.condition.code})`, `${indent}{`);
             sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
             for (const child of statement.statements) emitStatement(child, depth + 1);
+            lines.push(`${indent}}`);
+            if (statement.elseStatements?.length)
+            {
+                lines.push(`${indent}else`, `${indent}{`);
+                for (const child of statement.elseStatements) emitStatement(child, depth + 1);
+                lines.push(`${indent}}`);
+            }
+            return;
+        }
+        else if (statement.kind === "break")
+        {
+            lines.push(`${indent}break;`);
+        }
+        else if (statement.kind === "loop")
+        {
+            lines.push(`${indent}loop`, `${indent}{`);
+            sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
+            for (const child of statement.statements) emitStatement(child, depth + 1);
+            lines.push(`${indent}}`);
+            return;
+        }
+        else if (statement.kind === "switch")
+        {
+            lines.push(`${indent}switch (${statement.selector.code})`, `${indent}{`);
+            sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
+            for (const clause of statement.clauses)
+            {
+                const selectors = clause.selectors.map((value) => `${value}u`);
+                if (clause.isDefault) selectors.push("default");
+                const label = selectors.length === 1 && clause.isDefault ? "default" : `case ${selectors.join(", ")}`;
+                lines.push(`${indent}    ${label}:`, `${indent}    {`);
+                for (const child of clause.statements) emitStatement(child, depth + 2);
+                lines.push(`${indent}    }`);
+            }
+            if (!statement.clauses.some((clause) => clause.isDefault))
+            {
+                lines.push(`${indent}    default:`, `${indent}    {`, `${indent}    }`);
+            }
             lines.push(`${indent}}`);
             return;
         }

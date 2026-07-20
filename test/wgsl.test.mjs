@@ -149,14 +149,13 @@ test("BuildWgsl rejects unsupported reachable vertex operations", () =>
     decoded.instructions[index] = {
         ...decoded.instructions[index],
         opcode: 0,
-        opcodeName: "div",
+        opcodeName: "deriv_rtx",
         operands: [
             register("output", 0, "xyzw"),
-            register("input", 0, "", "xyzw"),
             register("input", 0, "", "xyzw")
         ]
     };
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /opcode div.*not supported/i);
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /opcode deriv_rtx.*not supported/i);
 });
 
 test("generated WGSL descriptors round-trip through a CEWGPU WGSL chunk", () =>

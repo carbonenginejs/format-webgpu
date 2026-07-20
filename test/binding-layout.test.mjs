@@ -173,12 +173,26 @@ test("binding symbols preserve register-space identity without changing space-ze
     assert.deepEqual(layout.map((entry) => entry.registerSpace), [ 1, 1, 1 ]);
 });
 
-test("binding lowering rejects unsupported resource layouts explicitly", () =>
+test("binding lowering supports cube and 3d sampled dimensions and rejects unknown ones", () =>
 {
-    const decoded = copyblitPixelBindings(0);
-    decoded.instructions[1].declaration.resourceDimensionName = "texture3d";
-    const ir = CjsFormatWebgpu.buildShaderIr(decoded);
-    assert.throws(() => lowerBindingLayout(ir), /unsupported dimension texture3d/i);
+    const cube = copyblitPixelBindings(0);
+    cube.instructions[1].declaration.resourceDimensionName = "texturecube";
+    const cubeBinding = lowerBindingLayout(CjsFormatWebgpu.buildShaderIr(cube))
+        .find((entry) => entry.resourceKind === "sampled-resource");
+    assert.equal(cubeBinding.type, "texture_cube<f32>");
+    assert.equal(cubeBinding.texture.viewDimension, "cube");
+
+    const tex3d = copyblitPixelBindings(0);
+    tex3d.instructions[1].declaration.resourceDimensionName = "texture3d";
+    const tex3dBinding = lowerBindingLayout(CjsFormatWebgpu.buildShaderIr(tex3d))
+        .find((entry) => entry.resourceKind === "sampled-resource");
+    assert.equal(tex3dBinding.type, "texture_3d<f32>");
+    assert.equal(tex3dBinding.texture.viewDimension, "3d");
+
+    const unknown = copyblitPixelBindings(0);
+    unknown.instructions[1].declaration.resourceDimensionName = "texturecubearray";
+    assert.throws(() => lowerBindingLayout(CjsFormatWebgpu.buildShaderIr(unknown)),
+        /unsupported dimension texturecubearray/i);
 });
 
 test("structured SRV lowering preserves the t-register identity as a read-only storage buffer", () =>

@@ -134,6 +134,9 @@ function buildInstruction(instruction, index)
         testBoolean: instruction.testBoolean || null,
         saturate: !!instruction.saturate,
         preciseMask: instruction.preciseMask || "",
+        ...(instruction.opcodeName === "resinfo"
+            ? { resinfoReturnTypeName: instruction.resinfoReturnTypeName || "float" }
+            : {}),
         operands: clonePlain(instruction.operands || [])
     };
 }

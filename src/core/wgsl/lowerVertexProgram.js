@@ -1,15 +1,40 @@
 import { fixedSourceLanes } from "../ir/sourceLanes.js";
+import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
+import { buildSelectionPlans, cloneWritten } from "./selectionPlans.js";
+
+function containsOutputAssignment(statements)
+{
+    return statements.some((statement) => statement.kind === "assignment"
+        || (statement.kind === "if" && (containsOutputAssignment(statement.statements)
+            || (statement.elseStatements ? containsOutputAssignment(statement.elseStatements) : false)))
+        || (statement.kind === "switch" && statement.clauses.some((clause) => containsOutputAssignment(clause.statements)))
+        || (statement.kind === "loop" && containsOutputAssignment(statement.statements)));
+}
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SYSTEM_BUILTINS = Object.freeze({
     SV_POSITION: "position"
 });
+const INPUT_BUILTINS = Object.freeze({
+    SV_VERTEXID: { name: "vertex_index", scalarType: "uint32" },
+    SV_INSTANCEID: { name: "instance_index", scalarType: "uint32" }
+});
 const SUPPORTED_OPCODES = new Set([
-    "add", "and", "dp3", "dp4", "exp", "iadd", "ld_structured", "log", "lt",
-    "mad", "mov", "movc", "mul", "rsq", "sincos", "ret"
+    "add", "and", "div", "dp2", "dp3", "dp4", "eq", "exp", "f16tof32",
+    "f32tof16", "frc", "ftoi", "ftou",
+    "ge", "iadd", "ieq", "ige", "ilt", "imad", "imul", "ine", "itof", "ld_structured", "log",
+    "lt", "mad", "max", "min",
+    "mov", "movc", "mul", "ne", "or", "round_ni", "round_z", "rsq", "sincos",
+    "sqrt", "ushr", "utof", "xor", "ret"
 ]);
+const NUMERIC_CONVERSIONS = Object.freeze({
+    itof: [ "int32", "float32" ],
+    utof: [ "uint32", "float32" ],
+    ftoi: [ "float32", "int32" ],
+    ftou: [ "float32", "uint32" ]
+});
 
 function componentsFromMask(mask)
 {
@@ -39,11 +64,14 @@ function interfaceFields(program, direction)
             throw new Error(`WGSL ${direction} signature register ${signature.registerIndex} has a non-prefix mask`);
         }
         const semantic = String(signature.semanticName || "").toUpperCase();
-        const builtin = direction === "output" ? SYSTEM_BUILTINS[semantic] || null : null;
-        if (semantic.startsWith("SV_") && !builtin)
+        const outputBuiltin = direction === "output" ? SYSTEM_BUILTINS[semantic] || null : null;
+        const inputBuiltin = direction === "input" ? INPUT_BUILTINS[semantic] || null : null;
+        const builtinName = outputBuiltin || inputBuiltin?.name || null;
+        if (semantic.startsWith("SV_") && !builtinName)
         {
             throw new Error(`WGSL vertex ${direction} system semantic ${semantic} is not supported`);
         }
+        const scalarType = inputBuiltin?.scalarType || signature.componentTypeName;
         return {
             kind: "interface-field",
             id: `${direction}:r${signature.registerIndex}`,
@@ -52,11 +80,11 @@ function interfaceFields(program, direction)
             semanticName: signature.semanticName,
             semanticIndex: signature.semanticIndex,
             components,
-            scalarType: signature.componentTypeName,
-            type: fieldType(signature.componentTypeName, components.length),
-            name: builtin || `${direction}${signature.registerIndex}`,
-            attribute: builtin
-                ? { kind: "builtin", name: builtin }
+            scalarType,
+            type: inputBuiltin?.scalarType ? scalarTypeName(scalarType) : fieldType(signature.componentTypeName, components.length),
+            name: builtinName || `${direction}${signature.registerIndex}`,
+            attribute: builtinName
+                ? { kind: "builtin", name: builtinName }
                 : { kind: "location", index: signature.registerIndex }
         };
     });
@@ -83,6 +111,24 @@ function valueType(program, write)
         wgslType: fieldType(scalarType, types.length)
     };
 }
+
+function isDeadUntypedWrite(program, instruction, write, readValueIds)
+{
+    const destination = instruction.operands[write.operandIndex];
+    if (destination?.typeName !== "temp" || readValueIds.has(write.valueId)) return false;
+    const value = program.values.find((entry) => entry.id === write.valueId);
+    return Array.from(write.mask).some((component) => !scalarTypeName(value?.componentTypes?.[component]));
+}
+
+function mixedImmediateTypes(program, write)
+{
+    const value = program.values.find((entry) => entry.id === write.valueId);
+    if (!value || write.mask.length < 2) return null;
+    const types = Array.from(write.mask).map((component) => value.componentTypes?.[component]);
+    if (types.some((type) => !scalarTypeName(type)) || new Set(types).size === 1) return null;
+    return types;
+}
+
 
 function liveInputRegisters(program)
 {
@@ -111,7 +157,8 @@ function liveInputRegisters(program)
 
 function sourceRead(instruction, operandIndex)
 {
-    return instruction.dataflow.reads.find((entry) => entry.operandIndex === operandIndex) || null;
+    return instruction.dataflow.reads.find((entry) =>
+        entry.kind !== "index-read" && entry.operandIndex === operandIndex) || null;
 }
 
 function vectorCode(parts, scalarType)
@@ -146,6 +193,11 @@ function valueReference(program, ref, inputs)
         const packed = packedComponent(field.components.join(""), ref.component);
         const code = field.components.length === 1 ? `input.${field.name}` : `input.${field.name}.${packed}`;
         return reinterpretCode(code, field.scalarType, value.componentTypes?.[ref.component], 1, `${value.register}.${ref.component}`);
+    }
+    if (value.origin === "instruction-write" && value.writeMask.length > 1)
+    {
+        const componentTypes = Array.from(value.writeMask).map((component) => value.componentTypes?.[component]);
+        if (new Set(componentTypes).size > 1) return `${value.id}_${ref.component}`;
     }
     const packed = packedComponent(value.writeMask, ref.component);
     return value.writeMask.length === 1 ? value.id : `${value.id}.${packed}`;
@@ -191,13 +243,33 @@ function bindingForOperand(bindings, resourceKind, operand)
         entry.resourceKind === resourceKind && entry.registerIndex === operand.registerIndex) || null;
 }
 
-function cbufferParts(operand, destinationMask, count, bindings, expectedScalarType, activeComponents = null)
+function cbufferVectorIndex(program, instruction, operandIndex, operand, inputs)
+{
+    const indices = operand.indices || [];
+    for (let dimension = 0; dimension < indices.length - 1; dimension += 1)
+    {
+        if (indices[dimension].relative) throw new Error("WGSL vertex does not support dynamic cbuffer register selection");
+    }
+    const last = indices.at(-1);
+    const base = last?.values?.length ? last.values[0] : (last?.relative ? 0 : undefined);
+    if (!Number.isInteger(base) || base < 0) throw new Error("WGSL vertex cbuffer operand has no immediate vector index");
+    if (!last.relative) return `${base}`;
+    const read = instruction.dataflow.reads.find((entry) => entry.kind === "index-read"
+        && entry.operandIndex === operandIndex && entry.dimension === indices.length - 1);
+    if (!read || read.refs.length !== 1) throw new Error("WGSL vertex dynamic cbuffer index has no resolved register");
+    const ref = read.refs[0];
+    const storage = valueStorageType(program, ref);
+    let indexCode = valueReference(program, ref, inputs);
+    if (storage === "uint32" || storage === "bitpattern32") indexCode = `i32(${indexCode})`;
+    else if (storage !== "int32") throw new Error(`WGSL vertex dynamic cbuffer index has unsupported type ${storage}`);
+    return base === 0 ? indexCode : `${base} + ${indexCode}`;
+}
+
+function cbufferParts(program, instruction, operandIndex, operand, destinationMask, count, bindings, expectedScalarType, inputs, activeComponents = null)
 {
     const binding = bindingForOperand(bindings, "uniform-buffer", operand);
     if (!binding) throw new Error(`WGSL vertex cannot resolve cb${operand.registerIndex}`);
-    if (operand.indices?.some((entry) => entry.relative)) throw new Error("WGSL vertex does not support relative cbuffer indexing");
-    const vectorIndex = operand.indices?.at(-1)?.values?.[0];
-    if (!Number.isInteger(vectorIndex)) throw new Error("WGSL vertex cbuffer operand has no immediate vector index");
+    const vectorIndex = cbufferVectorIndex(program, instruction, operandIndex, operand, inputs);
     const parts = sourceComponents(operand, destinationMask, count, activeComponents)
         .map((component) => `${binding.generatedSymbol}[${vectorIndex}].${component}`);
     if (expectedScalarType === "float32") return parts;
@@ -245,6 +317,7 @@ function validateRegisterBitcasts(program, instruction)
     const required = [];
     for (const read of instruction.dataflow.reads)
     {
+        if (read.kind === "index-read") continue;
         const expected = expectedType(instruction, read.operandIndex);
         if (expected === "unknown") continue;
         read.refs.forEach((ref, componentIndex) =>
@@ -308,7 +381,7 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     }
     const type = expectedType(instruction, operandIndex);
     const read = sourceRead(instruction, operandIndex);
-    const activeComponents = fixedSourceLanes(instruction, operandIndex);
+    const activeComponents = fixedSourceLanes(instruction, operandIndex, program);
     let parts;
     if (read)
     {
@@ -340,7 +413,7 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     }
     else if (operand.typeName === "constant_buffer")
     {
-        parts = cbufferParts(operand, destinationMask, count, bindings, type, activeComponents);
+        parts = cbufferParts(program, instruction, operandIndex, operand, destinationMask, count, bindings, type, inputs, activeComponents);
     }
     else
     {
@@ -431,19 +504,49 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     const source = (index, forcedCount = count) =>
         operandExpression(program, instruction, index, mask, forcedCount, inputs, bindings);
     const op = instruction.opcodeName;
-    if ([ "add", "iadd", "mul" ].includes(op))
+    if ([ "add", "iadd", "mul", "div" ].includes(op))
     {
-        const operator = op === "mul" ? "*" : "+";
+        const operator = { add: "+", iadd: "+", mul: "*", div: "/" }[op];
         return `(${source(1)} ${operator} ${source(2)})`;
     }
-    if (op === "mad") return `((${source(1)} * ${source(2)}) + ${source(3)})`;
+    if (op === "mad" || op === "imad" || op === "umad") return `((${source(1)} * ${source(2)}) + ${source(3)})`;
+    if (op === "f16tof32" || op === "f32tof16")
+    {
+        const src = source(1);
+        const lane = (index) => (count === 1 ? `(${src})` : `(${src})[${index}]`);
+        const parts = Array.from({ length: count }, (_, index) => (op === "f16tof32"
+            ? `unpack2x16float(${lane(index)}).x`
+            : `(pack2x16float(vec2<f32>(${lane(index)}, 0.0)) & 0xffffu)`));
+        return vectorCode(parts, op === "f16tof32" ? "float32" : "uint32");
+    }
+    if (op === "imul" || op === "umul")
+    {
+        if (write.operandIndex !== 1)
+        {
+            throw new Error(`WGSL vertex instruction ${instruction.index} does not support the ${op} high result`);
+        }
+        return `(${source(2)} * ${source(3)})`;
+    }
     if (op === "and") return `(${source(1)} & ${source(2)})`;
-    if (op === "lt") return `select(${zeroMask(count)}, ${fullMask(count)}, ${source(1)} < ${source(2)})`;
+    if (op === "or") return `(${source(1)} | ${source(2)})`;
+    if (op === "xor") return `(${source(1)} ^ ${source(2)})`;
+    if (op === "ushr") return `(${source(1)} >> ${source(2)})`;
+    if ([ "lt", "ge", "eq", "ne", "ilt", "ige", "ieq", "ine", "ult", "uge" ].includes(op))
+    {
+        const operator = { lt: "<", ge: ">=", eq: "==", ne: "!=", ilt: "<", ige: ">=", ieq: "==", ine: "!=", ult: "<", uge: ">=" }[op];
+        return `select(${zeroMask(count)}, ${fullMask(count)}, ${source(1)} ${operator} ${source(2)})`;
+    }
     if (op === "mov") return source(1);
     if (op === "movc") return `select(${source(3)}, ${source(2)}, ${source(1)} != ${zeroMask(count)})`;
     if (op === "exp") return `exp2(${source(1)})`;
     if (op === "log") return `log2(${source(1)})`;
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
+    if (op === "sqrt") return `sqrt(${source(1)})`;
+    if (op === "max") return `max(${source(1)}, ${source(2)})`;
+    if (op === "min") return `min(${source(1)}, ${source(2)})`;
+    if (op === "frc") return `fract(${source(1)})`;
+    if (op === "round_ni") return `floor(${source(1)})`;
+    if (op === "round_z") return `trunc(${source(1)})`;
     if (op === "sincos")
     {
         const fn = write.operandIndex === 0 ? "sin" : write.operandIndex === 1 ? "cos" : null;
@@ -451,8 +554,19 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
         return `${fn}(${source(2)})`;
     }
     if (op === "ld_structured") return structuredLoadExpression(program, instruction, write, type, inputs, bindings);
+    if (op === "dp2") return splatScalar(`dot(${source(1, 2)}, ${source(2, 2)})`, count);
     if (op === "dp3") return splatScalar(`dot(${source(1, 3)}, ${source(2, 3)})`, count);
     if (op === "dp4") return splatScalar(`dot(${source(1, 4)}, ${source(2, 4)})`, count);
+    if (NUMERIC_CONVERSIONS[op])
+    {
+        const conversion = instruction.typeInfo.conversion;
+        const [ from, to ] = NUMERIC_CONVERSIONS[op];
+        if (conversion?.from !== from || conversion?.to !== to)
+        {
+            throw new Error(`WGSL vertex instruction ${instruction.index} has invalid ${op} conversion metadata`);
+        }
+        return `${fieldType(to, count)}(${source(1)})`;
+    }
     throw new Error(`WGSL vertex opcode ${op} at instruction ${instruction.index} is not supported`);
 }
 
@@ -520,7 +634,29 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
 
     function lowerWrite(write)
     {
+        if (isDeadUntypedWrite(program, instruction, write, readValueIds)) return [];
         const destination = instruction.operands[write.operandIndex];
+        const mixedTypes = mixedImmediateTypes(program, write);
+        if (mixedTypes)
+        {
+            const immediateSource = instruction.operands[1];
+            if (instruction.opcodeName !== "mov" || instruction.saturate
+                || destination?.typeName !== "temp" || immediateSource?.typeName !== "immediate32")
+            {
+                throw new Error(`WGSL vertex value ${write.valueId} has an unresolved or mixed result type`);
+            }
+            return Array.from(write.mask).map((component, laneIndex) => ({
+                kind: "let",
+                instructionIndex: instruction.index,
+                dxbcOffset: instruction.dxbcOffset,
+                name: `${write.valueId}_${component}`,
+                type: scalarTypeName(mixedTypes[laneIndex]),
+                expression: {
+                    code: immediateParts(immediateSource, component, 1, mixedTypes[laneIndex])[0],
+                    type: scalarTypeName(mixedTypes[laneIndex])
+                }
+            }));
+        }
         const type = valueType(program, write);
         let expression = expressionFor(program, instruction, write, type, inputs, bindings);
         if (instruction.saturate)
@@ -623,27 +759,268 @@ export function lowerVertexProgram(program, options = {})
     {
         throw new Error("WGSL vertex body slice supports only uniform and read-only structured-buffer bindings");
     }
-    const reachable = new Set(program.controlFlow.reachableBlockIds);
-    const reachableBlocks = program.blocks.filter((block) => reachable.has(block.id));
-    if (reachableBlocks.length !== 1) throw new Error("WGSL vertex body slice requires one reachable basic block");
-    const reachableInstructions = reachableBlocks
-        .flatMap((block) => block.instructionIndices)
-        .sort((a, b) => a - b)
-        .map((index) => program.instructions[index]);
-    const readValueIds = new Set(reachableInstructions.flatMap((instruction) =>
-        instruction.dataflow.reads.flatMap((read) => read.refs.map((ref) => ref.valueId))));
-    const statements = [];
+    const plans = buildSelectionPlans(program, "vertex");
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));
-    let returned = false;
+    const reachableInstructions = new Set(program.blocks
+        .filter((block) => block.reachable !== false)
+        .flatMap((block) => block.instructionIndices));
+    const readValueIds = new Set([
+        ...program.instructions.flatMap((instruction) => (reachableInstructions.has(instruction.index)
+            ? instruction.dataflow.reads.flatMap((read) => read.refs.map((ref) => ref.valueId))
+            : [])),
+        ...program.values.flatMap((value) => (value.incoming || []).map((incoming) => incoming.valueId))
+    ]);
 
-    for (const instruction of reachableInstructions)
+    function lowerRange(start, end, rangeWritten, inLoop = false)
     {
-        if (returned) throw new Error(`WGSL vertex has reachable instructions after return at ${instruction.index}`);
-        const lowered = lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds);
-        statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
-        if (instruction.opcodeName === "ret") returned = true;
+        const statements = [];
+        for (let index = start; index < end; index += 1)
+        {
+            if (!reachableInstructions.has(index)) continue;
+            const plan = plans.get(index);
+            if (!plan)
+            {
+                const marker = program.instructions[index].opcodeName;
+                if (marker === "break" || marker === "breakc")
+                {
+                    if (!inLoop) throw new Error(`WGSL vertex has an unmatched ${marker} at instruction ${index}`);
+                    const breakInstruction = program.instructions[index];
+                    if (marker === "break")
+                    {
+                        statements.push({ kind: "break", instructionIndex: breakInstruction.index, dxbcOffset: breakInstruction.dxbcOffset });
+                        continue;
+                    }
+                    validatePreciseInstruction(breakInstruction, "vertex");
+                    validateRegisterBitcasts(program, breakInstruction);
+                    const conditionOperand = breakInstruction.operands[0];
+                    const conditionRead = sourceRead(breakInstruction, 0);
+                    if (breakInstruction.saturate || (conditionOperand?.modifierName || "none") !== "none"
+                        || !COMPONENTS.includes(conditionOperand?.selected) || conditionRead?.refs.length !== 1
+                        || ![ "zero", "nonzero" ].includes(breakInstruction.testBoolean))
+                    {
+                        throw new Error(`WGSL vertex breakc instruction ${breakInstruction.index} requires one unmodified scalar condition`);
+                    }
+                    const condition = operandExpression(program, breakInstruction, 0, "x", 1, inputs, bindings);
+                    statements.push({
+                        kind: "if",
+                        instructionIndex: breakInstruction.index,
+                        dxbcOffset: breakInstruction.dxbcOffset,
+                        condition: { code: `${condition} ${breakInstruction.testBoolean === "zero" ? "==" : "!="} 0u`, type: "bool" },
+                        statements: [ { kind: "break" } ]
+                    });
+                    continue;
+                }
+                if ([ "endif", "else", "case", "default", "endswitch", "endloop" ].includes(marker))
+                {
+                    throw new Error(`WGSL vertex has an unmatched ${marker} at instruction ${index}`);
+                }
+                const lowered = lowerInstruction(
+                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds);
+                statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
+                continue;
+            }
+            if (plan.kind === "loop")
+            {
+                const loopInstruction = program.instructions[index];
+                if (loopInstruction.opcodeName !== "loop"
+                    || program.instructions[plan.region.endInstruction].opcodeName !== "endloop")
+                {
+                    throw new Error("WGSL vertex loop boundaries are malformed");
+                }
+                for (const merge of plan.merges)
+                {
+                    statements.push({ kind: "var", name: merge.id, type: merge.type,
+                        expression: { code: valueReference(program, merge.entryIncoming, inputs), type: merge.type } });
+                }
+                const bodyWritten = cloneWritten(rangeWritten);
+                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true);
+                if (body.at(-1)?.kind === "return")
+                {
+                    throw new Error(`WGSL vertex loop at ${index} terminates before latch assignments`);
+                }
+                for (const merge of plan.merges)
+                {
+                    body.push({ kind: "value-assignment", name: merge.id, type: merge.type,
+                        expression: { code: valueReference(program, merge.backedgeIncoming, inputs), type: merge.type } });
+                }
+                statements.push({ kind: "loop", instructionIndex: loopInstruction.index, dxbcOffset: loopInstruction.dxbcOffset, statements: body });
+                index = plan.region.endInstruction;
+                continue;
+            }
+            if (plan.kind === "switch")
+            {
+                const switchInstruction = program.instructions[index];
+                if (switchInstruction.opcodeName !== "switch"
+                    || program.instructions[plan.region.endInstruction].opcodeName !== "endswitch")
+                {
+                    throw new Error("WGSL vertex switch boundaries are malformed");
+                }
+                validatePreciseInstruction(switchInstruction, "vertex");
+                validateRegisterBitcasts(program, switchInstruction);
+                const selectorOperand = switchInstruction.operands[0];
+                const selectorRead = sourceRead(switchInstruction, 0);
+                if (switchInstruction.saturate || (selectorOperand?.modifierName || "none") !== "none"
+                    || !COMPONENTS.includes(selectorOperand?.selected) || selectorRead?.refs.length !== 1)
+                {
+                    throw new Error(`WGSL vertex switch instruction ${switchInstruction.index} requires one unmodified scalar selector`);
+                }
+                for (const merge of plan.merges)
+                {
+                    statements.push({ kind: "var", name: merge.id, type: merge.type, expression: { code: merge.zeroCode, type: merge.type } });
+                }
+                const selector = operandExpression(program, switchInstruction, 0, "x", 1, inputs, bindings);
+                const clauses = [];
+                const clauseResults = [];
+                for (let clauseIndex = 0; clauseIndex < plan.clauses.length; clauseIndex += 1)
+                {
+                    const clause = plan.clauses[clauseIndex];
+                    const clauseWritten = cloneWritten(rangeWritten);
+                    const body = lowerRange(clause.bodyStart, clause.bodyEnd, clauseWritten);
+                    if ((plan.merges.length || plan.outerMerges?.length) && containsOutputAssignment(body))
+                    {
+                        throw new Error(`WGSL vertex switch at ${index} writes output before a live merge`);
+                    }
+                    if (body.at(-1)?.kind === "return" && (plan.merges.length || plan.outerMerges?.length))
+                    {
+                        throw new Error(`WGSL vertex switch at ${index} terminates before merge assignments`);
+                    }
+                    for (const merge of [ ...plan.merges, ...(plan.outerMerges || []) ])
+                    {
+                        body.push({
+                            kind: "value-assignment",
+                            name: merge.id,
+                            type: merge.type,
+                            expression: { code: valueReference(program, merge.perClause[clauseIndex], inputs), type: merge.type }
+                        });
+                    }
+                    clauses.push({ selectors: clause.selectors, isDefault: clause.isDefault, statements: body });
+                    clauseResults.push({ clauseWritten, returns: body.at(-1)?.kind === "return" });
+                }
+                statements.push({
+                    kind: "switch",
+                    instructionIndex: switchInstruction.index,
+                    dxbcOffset: switchInstruction.dxbcOffset,
+                    selector: { code: selector, type: "u32" },
+                    clauses
+                });
+                if (plan.region.defaultInstruction !== null)
+                {
+                    const continuing = clauseResults.filter((entry) => !entry.returns);
+                    for (const [ fieldId, target ] of rangeWritten)
+                    {
+                        if (!continuing.length) break;
+                        const sets = continuing.map((entry) => entry.clauseWritten.get(fieldId) || new Set());
+                        for (const component of sets[0])
+                        {
+                            if (sets.every((set) => set.has(component))) target.add(component);
+                        }
+                    }
+                }
+                index = plan.region.endInstruction;
+                continue;
+            }
+            const ifInstruction = program.instructions[index];
+            const endInstruction = program.instructions[plan.region.endInstruction];
+            if (ifInstruction.opcodeName !== "if" || endInstruction.opcodeName !== "endif"
+                || (plan.hasElse && program.instructions[plan.region.elseInstruction].opcodeName !== "else"))
+            {
+                throw new Error("WGSL vertex selection boundaries are malformed");
+            }
+            validatePreciseInstruction(ifInstruction, "vertex");
+            validateRegisterBitcasts(program, ifInstruction);
+            const conditionOperand = ifInstruction.operands[0];
+            const conditionRead = sourceRead(ifInstruction, 0);
+            if (ifInstruction.saturate || (conditionOperand?.modifierName || "none") !== "none"
+                || !COMPONENTS.includes(conditionOperand?.selected) || conditionRead?.refs.length !== 1)
+            {
+                throw new Error(`WGSL vertex if instruction ${ifInstruction.index} requires one unmodified scalar condition`);
+            }
+            for (const merge of plan.merges)
+            {
+                const expression = plan.hasElse
+                    ? merge.zeroCode
+                    : (merge.falseCode || valueReference(program, merge.falseIncoming, inputs));
+                statements.push({ kind: "var", name: merge.id, type: merge.type, expression: { code: expression, type: merge.type } });
+            }
+            const condition = operandExpression(program, ifInstruction, 0, "x", 1, inputs, bindings);
+            const comparison = ifInstruction.testBoolean === "zero" ? "==" : "!=";
+            const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
+            const trueWritten = cloneWritten(rangeWritten);
+            const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop);
+            if (plan.merges.length && containsOutputAssignment(trueStatements))
+            {
+                throw new Error(`WGSL vertex selection at ${index} writes output before a live merge`);
+            }
+            if (trueStatements.at(-1)?.kind === "return" && plan.merges.length)
+            {
+                throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
+            }
+            for (const merge of plan.merges)
+            {
+                if (merge.viaSwitch) continue;
+                trueStatements.push({
+                    kind: "value-assignment",
+                    name: merge.id,
+                    type: merge.type,
+                    expression: { code: valueReference(program, merge.trueIncoming, inputs), type: merge.type }
+                });
+            }
+            let falseStatements = null;
+            let falseWritten = null;
+            if (plan.hasElse)
+            {
+                falseWritten = cloneWritten(rangeWritten);
+                falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop);
+                if (plan.merges.length && containsOutputAssignment(falseStatements))
+                {
+                    throw new Error(`WGSL vertex selection at ${index} writes output before a live merge`);
+                }
+                if (falseStatements.at(-1)?.kind === "return" && plan.merges.length)
+                {
+                    throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
+                }
+                for (const merge of plan.merges)
+                {
+                    falseStatements.push({
+                        kind: "value-assignment",
+                        name: merge.id,
+                        type: merge.type,
+                        expression: { code: merge.falseCode || valueReference(program, merge.falseIncoming, inputs), type: merge.type }
+                    });
+                }
+            }
+            statements.push({
+                kind: "if",
+                instructionIndex: ifInstruction.index,
+                dxbcOffset: ifInstruction.dxbcOffset,
+                condition: { code: `${condition} ${comparison} 0u`, type: "bool" },
+                statements: trueStatements,
+                ...(falseStatements ? { elseStatements: falseStatements } : {})
+            });
+            if (plan.hasElse)
+            {
+                const trueReturns = trueStatements.at(-1)?.kind === "return";
+                const falseReturns = falseStatements.at(-1)?.kind === "return";
+                for (const [ fieldId, target ] of rangeWritten)
+                {
+                    const fromTrue = trueWritten.get(fieldId) || new Set();
+                    const fromFalse = falseWritten.get(fieldId) || new Set();
+                    if (trueReturns && !falseReturns) for (const component of fromFalse) target.add(component);
+                    else if (falseReturns && !trueReturns) for (const component of fromTrue) target.add(component);
+                    else if (!trueReturns && !falseReturns)
+                    {
+                        for (const component of fromTrue) if (fromFalse.has(component)) target.add(component);
+                    }
+                }
+            }
+            index = plan.region.endInstruction;
+        }
+        return statements;
     }
-    if (!returned) throw new Error("WGSL vertex has no reachable return");
+
+    const lowered = lowerRange(0, program.instructions.length, written);
+    if (lowered.at(-1)?.kind !== "return") throw new Error("WGSL vertex path must end in return");
+    const statements = hoistEscapingValues(lowered);
 
     return deepFreeze({
         kind: "typed-shader-program",

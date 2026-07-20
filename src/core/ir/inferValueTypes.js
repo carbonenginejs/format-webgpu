@@ -62,6 +62,23 @@ function ruleFor(opcodeName, program, instruction)
         if (opcodeName === "sample_d") Object.assign(sourceByOperand, { 4: "float32", 5: "float32" });
         return { name: "sample-resource", destination: sampleResultType(program, instruction), sourceByOperand };
     }
+    if (opcodeName === "resinfo")
+    {
+        return {
+            name: "resource-info",
+            destination: instruction?.resinfoReturnTypeName === "uint" ? "uint32" : "float32"
+        };
+    }
+    if (opcodeName === "f16tof32") return { name: "half-unpack", destination: "float32", sourceByOperand: { 1: "uint32" } };
+    if (opcodeName === "f32tof16") return { name: "half-pack", destination: "uint32", sourceByOperand: { 1: "float32" } };
+    if (opcodeName === "ld")
+    {
+        return {
+            name: "texture-load",
+            destination: sampleResultType(program, instruction),
+            sourceByOperand: { 1: "uint32" }
+        };
+    }
     if (opcodeName === "ld_structured")
     {
         return {
@@ -179,7 +196,7 @@ export function inferValueTypes(program)
         const writes = instruction.dataflow.writes;
         for (const sourceOperandIndex of rule.equalitySources || [])
         {
-            const read = instruction.dataflow.reads.find((entry) => entry.operandIndex === sourceOperandIndex);
+            const read = instruction.dataflow.reads.find((entry) => entry.operandIndex === sourceOperandIndex && entry.kind !== "index-read");
             if (!read) continue;
             for (const write of writes)
             {
@@ -212,6 +229,7 @@ export function inferValueTypes(program)
         }
         for (const read of instruction.dataflow.reads)
         {
+            if (read.kind === "index-read") continue;
             const expected = rule.sourceByOperand?.[read.operandIndex] ?? rule.sources ?? null;
             for (const ref of read.refs) constrain(ref, expected);
         }
@@ -261,6 +279,7 @@ export function inferValueTypes(program)
         const bitcasts = [];
         for (const read of instruction.dataflow.reads)
         {
+            if (read.kind === "index-read") continue;
             let expected = rule.sourceByOperand?.[read.operandIndex] ?? rule.sources ?? null;
             if (!expected && (rule.equalitySources || []).includes(read.operandIndex)) expected = moveType;
             if (!expected || expected === "unknown") continue;
