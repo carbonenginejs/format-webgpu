@@ -890,3 +890,39 @@ test("vertex switch merges accept a pass-through incoming for clauses that keep 
     const assignments = shader.code.match(/value\d+ = value\d+;/gu) || [];
     assert.equal(assignments.length, 2);
 });
+
+test("vertex lowering samples a texture with an explicit level of detail", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 0, 7) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_sampler", isDeclaration: true,
+                declaration: { registerIndex: 0, samplerModeName: "default" },
+                operands: [ register("sampler", 0) ]
+            },
+            {
+                offset: 4, opcode: 0, opcodeName: "dcl_resource", isDeclaration: true,
+                declaration: { registerIndex: 0, resourceDimensionName: "texture2d", returnType: { returnTypeNames: [ "float", "float", "float", "float" ] } },
+                operands: [ register("resource", 0) ]
+            },
+            instruction(6, "sample_l", [
+                register("temp", 0, { mask: "xyzw" }),
+                register("input", 0, { swizzle: "xyxx" }),
+                register("resource", 0, { swizzle: "xyzw" }),
+                register("sampler", 0),
+                register("input", 0, { selected: "z" })
+            ]),
+            instruction(11, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xyzw" }) ]),
+            instruction(15, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-sample-l" });
+    assert.match(shader.code, /textureSampleLevel\(t0, s0, vec2<f32>\([^)]+\), [^)]+\)/u);
+    assert.match(shader.code, /@group\(0\) @binding\(\d+\) var t0: texture_2d<f32>;/u);
+});

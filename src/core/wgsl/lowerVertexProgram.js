@@ -27,8 +27,8 @@ const SUPPORTED_OPCODES = new Set([
     "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul", "ine",
     "ishl", "ishr", "itof", "ld_structured", "log", "lt", "mad", "max", "min",
     "mov", "movc", "mul", "ne", "or", "round_ni", "round_pi", "round_z", "rsq",
-    "sincos", "uge", "ult", "umax", "umin",
-    "sqrt", "ushr", "utof", "xor", "ret"
+    "sample_d", "sample_l", "sincos", "sqrt", "uge", "ult", "umax", "umin",
+    "ushr", "utof", "xor", "ret"
 ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
     itof: [ "int32", "float32" ],
@@ -581,6 +581,34 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
         return `${fn}(${source(2)})`;
     }
     if (op === "ld_structured") return structuredLoadExpression(program, instruction, write, type, inputs, bindings);
+    if (op === "sample_l" || op === "sample_d")
+    {
+        const resource = instruction.operands[2];
+        const sampler = instruction.operands[3];
+        const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
+        const samplerBinding = bindingForOperand(bindings, "sampler", sampler);
+        if (!textureBinding || !samplerBinding) throw new Error(`WGSL vertex instruction ${instruction.index} has unresolved sample bindings`);
+        const viewDimension = textureBinding.texture?.viewDimension;
+        const coordComponents = viewDimension === "2d" ? 2 : 3;
+        let coord;
+        let arrayArg = "";
+        if (viewDimension === "2d-array")
+        {
+            const coord3 = source(1, 3);
+            coord = `${coord3}.xy`;
+            arrayArg = `, i32(${coord3}.z)`;
+        }
+        else
+        {
+            coord = source(1, coordComponents);
+        }
+        const tex = `${textureBinding.generatedSymbol}, ${samplerBinding.generatedSymbol}`;
+        const sampled = op === "sample_l"
+            ? `textureSampleLevel(${tex}, ${coord}${arrayArg}, ${source(4, 1)})`
+            : `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, coordComponents)}, ${source(5, coordComponents)})`;
+        const components = sourceComponents(resource, write.mask, count);
+        return count === 4 && components.join("") === "xyzw" ? sampled : `${sampled}.${components.join("")}`;
+    }
     if (op === "dp2") return splatScalar(`dot(${source(1, 2)}, ${source(2, 2)})`, count);
     if (op === "dp3") return splatScalar(`dot(${source(1, 3)}, ${source(2, 3)})`, count);
     if (op === "dp4") return splatScalar(`dot(${source(1, 4)}, ${source(2, 4)})`, count);
@@ -823,10 +851,9 @@ export function lowerVertexProgram(program, options = {})
         }
     }
     const bindings = lowerBindingLayout(program, options.bindingPlan);
-    if (bindings.some((binding) => binding.resourceKind !== "uniform-buffer"
-        && !(binding.resourceKind === "sampled-resource" && binding.buffer?.type === "read-only-storage")))
+    if (bindings.some((binding) => ![ "uniform-buffer", "sampled-resource", "sampler" ].includes(binding.resourceKind)))
     {
-        throw new Error("WGSL vertex body slice supports only uniform and read-only structured-buffer bindings");
+        throw new Error("WGSL vertex body slice supports only uniform, texture, sampler, and read-only structured-buffer bindings");
     }
     const plans = buildSelectionPlans(program, "vertex");
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));

@@ -99,6 +99,13 @@ lane a round-tripping f32 decimal literal (non-finite lanes fall back to
 (pure-relative and base+relative indices both supported), with int/uint
 consumers bitcast exactly like uniform cbuffers.
 
+### Vertex-stage texture sampling → explicit LOD/gradient only
+
+The vertex binding restriction now admits texture and sampler bindings, and the
+vertex stage lowers `sample_l` (`textureSampleLevel`) and `sample_d`
+(`textureSampleGrad`). Implicit-LOD `sample`/`sample_b` stay fragment-only —
+WGSL forbids implicit derivatives in a vertex entry point.
+
 ## Not supported (fail closed)
 
 - **Globally non-refactorable shaders** (`dcl_global_flags` without
