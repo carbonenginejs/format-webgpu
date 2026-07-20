@@ -130,6 +130,34 @@ function definitionDominates(value, targetBlockId, targetInstruction, dominators
         || value.instructionIndex < targetInstruction;
 }
 
+/**
+ * The value a register+component actually holds at the exit of a block, found by
+ * walking the dominator chain from that block to the nearest dominating block
+ * whose `outputValues` define the register. A break predecessor frequently only
+ * INHERITS the register (never redefines it on that path), so it is absent from
+ * both its own `outputValues` and the exit phi's `incoming` — the latter records
+ * the register's *definition* block, which need not be the CFG edge predecessor.
+ *
+ * @returns {{valueId: string, component: string}|null} The reaching ref, or null.
+ */
+function reachingRef(program, blockId, register, component, dominators)
+{
+    const domSet = dominators.get(blockId);
+    if (!domSet) return null;
+    let best = null;
+    for (const block of program.blocks)
+    {
+        if (!domSet.has(block.id)) continue;
+        const output = (block.outputValues || []).find((entry) =>
+            entry.register === register && entry.component === component);
+        if (output && (!best || block.startInstruction > best.block.startInstruction))
+        {
+            best = { block, ref: output.ref };
+        }
+    }
+    return best ? { valueId: best.ref.valueId, component: best.ref.component } : null;
+}
+
 function extendUndefinedPaths(paths, conditionId, nonzero)
 {
     const extended = [];
@@ -347,24 +375,35 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
             throw new Error(`WGSL ${stage} merge ${id} is not a scalar loop phi`);
         }
         const entryIncoming = value.incoming.find((incoming) => incoming.blockId === preheaderBlockId);
-        const backedgeIncoming = value.incoming.find((incoming) => incoming.blockId === backedgeBlock.id);
-        if (!entryIncoming || !backedgeIncoming)
+        if (!entryIncoming)
         {
             throw new Error(`WGSL ${stage} merge ${id} has unsupported loop incoming edges`);
         }
         const entryValue = values.get(entryIncoming.valueId);
-        const backedgeValue = values.get(backedgeIncoming.valueId);
         if (entryValue?.origin === "undefined-register"
             || !definitionDominates(entryValue, preheaderBlockId,
                 program.blocks.find((block) => block.id === preheaderBlockId).endInstruction + 1, dominators))
         {
             throw new Error(`WGSL ${stage} merge ${id} entry input does not dominate the loop`);
         }
-        if (backedgeValue?.origin === "undefined-register"
-            || (backedgeValue?.id !== id
-                && !definitionDominates(backedgeValue, backedgeBlock.id, region.endInstruction + 1, dominators)))
+        // Backedge (latch) value: the register's TRUE reaching definition at the
+        // latch block's exit, resolved by dominator walk (see reachingRef). The
+        // phi's own recorded backedge incoming frequently names a redundant nested
+        // join phi (its *definition* site), not the value that actually flows back;
+        // emitting that phi id yields an undeclared name because such a phi is not
+        // live and no plan declares it. The resolved value is one of: an emittable
+        // definition dominating the latch; this loop's own header phi (a no-op self
+        // latch); or a live merge some enclosing plan declares (hoisted into scope).
+        const backedgeIncoming = reachingRef(program, backedgeBlock.id, value.register, value.writeMask, dominators);
+        const backedgeValue = backedgeIncoming && values.get(backedgeIncoming.valueId);
+        const backedgeIsHeaderPhi = backedgeIncoming && mergeIds.includes(backedgeIncoming.valueId);
+        const backedgeIsLiveMerge = backedgeValue?.origin === "control-flow-merge" && live.has(backedgeIncoming.valueId);
+        if (!backedgeIncoming || !backedgeValue || backedgeValue.origin === "undefined-register"
+            || (backedgeValue.id !== id && !backedgeIsHeaderPhi && !backedgeIsLiveMerge
+                && (backedgeValue.origin === "control-flow-merge"
+                    || !definitionDominates(backedgeValue, backedgeBlock.id, region.endInstruction + 1, dominators))))
         {
-            throw new Error(`WGSL ${stage} merge ${id} backedge input does not dominate the loop latch`);
+            throw new Error(`WGSL ${stage} merge ${id} has an unsupported loop backedge input`);
         }
         return { id, type: wgslType, zeroCode: zeroForType(type), entryIncoming, backedgeIncoming };
     });
@@ -407,20 +446,28 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
             const block = program.blocks.find((entry) => entry.id === edge.blockId);
             const assignments = perMerge.map((merge) =>
             {
-                const ref = (block.outputValues || []).find((output) =>
-                    output.register === merge.register && output.component === merge.component)?.ref;
+                // Per-edge reaching value: walk the dominator chain from the break
+                // predecessor to the nearest block that truly defines the register
+                // (the break block usually inherits it — see reachingRef).
+                const ref = reachingRef(program, edge.blockId, merge.register, merge.component, dominators);
                 const incomingValue = ref && values.get(ref.valueId);
-                // The value must be in scope where the assignment is injected
-                // before the break. Safe shapes: (a) a directly-emittable source
-                // (instruction result / program input) that dominates the break
-                // edge; or (b) this loop's own header phi, declared as a `var`
-                // before the loop and so in scope at every break. Any other phi is
-                // only declared if some other plan owns it — fail closed.
+                // The value must be emitted as a declaration that is in scope where
+                // the assignment is injected before the break. Safe shapes:
+                //   (a) an emittable source (instruction result / program input)
+                //       whose definition dominates the break edge;
+                //   (b) this loop's own header phi — a `var` declared before the
+                //       loop, in scope at every break; or
+                //   (c) any other LIVE merge phi: some enclosing selection/switch/
+                //       loop plan emits it as a `var`, and hoistEscapingValues lifts
+                //       that declaration to function scope, so the cross-plan read
+                //       resolves. A non-live phi is never declared → fail closed.
                 const isLoopHeaderPhi = ref && mergeIds.includes(ref.valueId);
+                const isLiveMerge = incomingValue?.origin === "control-flow-merge" && live.has(ref.valueId);
                 if (!ref || !incomingValue || exitMergeIds.includes(ref.valueId)
                     || incomingValue.origin === "undefined-register"
-                    || (!isLoopHeaderPhi && (incomingValue.origin === "control-flow-merge"
-                        || !definitionDominates(incomingValue, edge.blockId, block.endInstruction + 1, dominators))))
+                    || (!isLoopHeaderPhi && !isLiveMerge
+                        && (incomingValue.origin === "control-flow-merge"
+                            || !definitionDominates(incomingValue, edge.blockId, block.endInstruction + 1, dominators))))
                 {
                     throw new Error(`WGSL ${stage} merge ${merge.id} has an unsupported loop-exit input`);
                 }

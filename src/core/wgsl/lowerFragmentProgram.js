@@ -1011,6 +1011,47 @@ function containsOutputAssignment(statements)
 }
 
 /**
+ * Whether a loop can be exited through NON-UNIFORM control flow: a `breakc`/
+ * `continuec` with a varying condition, or an unconditional `break`/`continue`
+ * lexically guarded by a varying `if`/`switch`. Per the WGSL uniformity rules a
+ * `break` reached from non-uniform control flow taints the loop body AND the code
+ * after the loop (the break edges carry non-uniformity to the merge). Nested
+ * loops are skipped — their breaks belong to the inner loop, not this one.
+ *
+ * @param {object} program Frozen CJS shader IR.
+ * @param {object} region Loop control-flow region.
+ * @param {Set<string>} varying Varying value ids from computeVaryingValues.
+ * @returns {boolean} True when at least one exit is non-uniform.
+ */
+function loopHasNonUniformExit(program, region, varying)
+{
+    const regions = program.controlFlow.regions;
+    const insideNestedLoop = (index) => regions.some((candidate) =>
+        candidate.kind === "loop" && candidate !== region
+        && candidate.startInstruction > region.startInstruction
+        && candidate.endInstruction < region.endInstruction
+        && index >= candidate.startInstruction && index <= candidate.endInstruction);
+    for (let index = region.startInstruction; index <= region.endInstruction; index += 1)
+    {
+        const instruction = program.instructions[index];
+        if (!instruction || insideNestedLoop(index)) continue;
+        const op = instruction.opcodeName;
+        if ((op === "breakc" || op === "continuec") && !conditionIsUniform(instruction, varying)) return true;
+        if (op === "break" || op === "continue")
+        {
+            const varyingGuard = regions.some((candidate) =>
+                (candidate.kind === "selection" || candidate.kind === "switch")
+                && candidate.startInstruction >= region.startInstruction
+                && candidate.endInstruction <= region.endInstruction
+                && candidate.startInstruction < index && index <= candidate.endInstruction
+                && !conditionIsUniform(program.instructions[candidate.startInstruction], varying));
+            if (varyingGuard) return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Lowers the bounded copyblit-style fragment slice with structured no-else
  * selections and scalar component merges.
  *
@@ -1056,6 +1097,10 @@ export function lowerFragmentProgram(program, options = {})
     function lowerRange(start, end, rangeWritten, inLoop = false, nonUniform = false, loopExit = null)
     {
         const statements = [];
+        // Non-uniformity accumulates within a range: once a loop with a non-uniform
+        // exit is lowered, every subsequent statement in this range is non-uniform
+        // (WGSL propagates the break-edge non-uniformity past the loop merge).
+        let flowNonUniform = nonUniform;
         for (let index = start; index < end; index += 1)
         {
             const plan = plans.get(index);
@@ -1126,7 +1171,7 @@ export function lowerFragmentProgram(program, options = {})
                     throw new Error(`WGSL fragment has an unmatched ${marker} at instruction ${index}`);
                 }
                 const lowered = lowerInstruction(
-                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds, nonUniform, context);
+                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds, flowNonUniform, context);
                 statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
                 continue;
             }
@@ -1149,11 +1194,18 @@ export function lowerFragmentProgram(program, options = {})
                         expression: { code: merge.zeroCode, type: merge.type } });
                 }
                 const bodyWritten = cloneWritten(rangeWritten);
-                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true, nonUniform, plan.exitEdges);
+                // A non-uniform loop exit makes both the body and everything after
+                // the loop non-uniform. Fold that into the running flow flag so a
+                // requires-uniform op (sample/derivative) below picks up the
+                // derivative-uniformity opt-out (D3D11-permissive; see the ledger).
+                const loopNonUniform = loopHasNonUniformExit(program, plan.region, varying);
+                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true,
+                    flowNonUniform || loopNonUniform, plan.exitEdges);
                 if (body.at(-1)?.kind === "return")
                 {
                     throw new Error(`WGSL fragment loop at ${index} terminates before latch assignments`);
                 }
+                if (loopNonUniform) flowNonUniform = true;
                 // Latch phi updates go in a `continuing` block so they run on both
                 // fall-through and `continue` paths (a body `continue` would skip
                 // updates appended to the body).
@@ -1186,7 +1238,7 @@ export function lowerFragmentProgram(program, options = {})
                     statements.push({ kind: "var", name: merge.id, type: merge.type, expression: { code: merge.zeroCode, type: merge.type } });
                 }
                 const selector = operandExpression(program, switchInstruction, 0, "x", 1, "uint32", inputs, bindings);
-                const clauseNonUniform = nonUniform || !conditionIsUniform(switchInstruction, varying);
+                const clauseNonUniform = flowNonUniform || !conditionIsUniform(switchInstruction, varying);
                 const clauses = [];
                 const clauseResults = [];
                 for (let clauseIndex = 0; clauseIndex < plan.clauses.length; clauseIndex += 1)
@@ -1266,7 +1318,7 @@ export function lowerFragmentProgram(program, options = {})
             }
             const condition = operandExpression(program, ifInstruction, 0, "x", 1, "uint32", inputs, bindings);
             const comparison = ifInstruction.testBoolean === "zero" ? "==" : "!=";
-            const branchNonUniform = nonUniform || !conditionIsUniform(ifInstruction, varying);
+            const branchNonUniform = flowNonUniform || !conditionIsUniform(ifInstruction, varying);
             const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
             const trueWritten = cloneWritten(rangeWritten);
             const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop, branchNonUniform, loopExit);

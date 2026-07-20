@@ -199,17 +199,23 @@ handler-only `ult`/`uge` to both stage support sets.
 - **Loop merges** — scalar phis with exactly one entry and one backedge
   incoming; multi-exit loops (several `break` sites feeding distinct post-loop
   merges) are untested beyond the single-breakc corpus shape.
-- **Loop-exit (break-join) merges** — a DXBC loop exited only through `break`
-  edges yields phis at the after-`endloop` join for registers holding different
-  values along different break paths. Each scalar phi becomes a `var` declared
-  before the loop and assigned before every `break` with that break block's true
-  reaching value (from `block.outputValues`, NOT `incoming.blockId`). Supported
-  inputs (fail closed otherwise): an instruction result / program input that
-  dominates the break edge, or this loop's own header phi. NOT yet supported: an
-  input that is a *nested* phi (e.g. a selection merge inside the loop body) —
-  it is declared by another plan, but proving that here needs cross-plan
-  declaration tracking. `ui/ubershader(3d)`, `system/shadowdepth`, and
-  `specialfx/raymarcher` hit the nested-phi case and fail closed pending that.
+- **Loop-exit (break-join) and header-backedge merges — cross-plan reaching
+  values.** A loop exited only through `break` edges yields phis at the after-
+  `endloop` join; a header phi likewise takes a value back along the latch edge.
+  In both cases the per-edge value is resolved by `reachingRef` — a walk up the
+  dominator chain from the edge's predecessor to the nearest block whose
+  `outputValues` actually define the register. This is necessary because a break
+  predecessor (or latch block) commonly only *inherits* the register: it appears
+  in neither its own `outputValues` nor the phi's recorded `incoming` (which
+  names the register's *definition* block, not the CFG edge). The resolved value
+  is accepted when it is (a) an instruction result / program input that dominates
+  the edge; (b) this loop's own header phi (a `var` before the loop / a no-op
+  self-latch); or (c) any other **live** merge phi — an enclosing selection/
+  switch/loop plan declares it as a `var` and `hoistEscapingValues` lifts that
+  declaration to function scope, so the cross-plan read resolves. A non-live phi
+  is never declared and fails closed. This qualifies `ui/ubershader(3d)` (all
+  permutations) and `system/shadowdepth`; `specialfx/raymarcher` still fails
+  closed on a separate `udiv` gap.
 - **Switch merges** — break-terminated clauses; at most ONE pass-through
   incoming (a clause that keeps the prior value); a shared-join planner exists
   for `if { switch } endif` joins (fail-closed, currently unexercised by the
@@ -250,8 +256,18 @@ values, so the only varying SEEDS are interpolated fragment inputs (`input[N]`,
 incl. `SV_Position`) and per-pixel producers (texture sampling/loading,
 derivatives). A value is varying only if it genuinely derives from one of those
 — **no false positives**, so the directive is added only where truly needed.
-Loops are treated with their enclosing uniformity (a varying `breakc` mid-loop
-is not yet modelled; the browser gate remains the backstop for that rare shape).
+
+Loop-exit uniformity **is** modelled: `loopHasNonUniformExit` flags a loop whose
+exit is non-uniform — a `breakc`/`continuec` with a varying condition, or an
+unconditional `break`/`continue` guarded by a varying `if`/`switch` (nested loops
+skipped, as their breaks belong to the inner loop). Per the WGSL uniformity rules
+such a break taints both the loop body **and every statement after the loop** (the
+break edges carry non-uniformity to the merge), so the lowerer folds it into a
+running per-range flow flag: a requires-uniform op inside or below such a loop
+picks up the opt-out directive. This is what qualifies `system/shadowdepth`,
+whose top-level `textureSample` follows a loop with a varying-guarded `break` —
+top-level in the emitted WGSL, but non-uniform per the spec, and rejected by Dawn
+without the directive.
 
 Corpus: recovers 10 EVE `sm_hi` shaders that WGSL would otherwise reject — the
 `stretch` specialfx family (`artillery`, `atomic`, `blast`, `laser`,
