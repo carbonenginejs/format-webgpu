@@ -4,11 +4,11 @@ import { lowerVertexProgram } from "./lowerVertexProgram.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 
-function attribute(field)
+function attribute(field, invariantPosition = false)
 {
-    return field.attribute.kind === "builtin"
-        ? `@builtin(${field.attribute.name})`
-        : `@location(${field.attribute.index})`;
+    if (field.attribute.kind !== "builtin") return `@location(${field.attribute.index})`;
+    const invariant = invariantPosition && field.attribute.name === "position" ? "@invariant " : "";
+    return `${invariant}@builtin(${field.attribute.name})`;
 }
 
 function access(base, field, components)
@@ -21,12 +21,12 @@ function access(base, field, components)
     return `${base}.${field.name}${suffix}`;
 }
 
-function emitStruct(lines, name, fields)
+function emitStruct(lines, name, fields, invariantPosition = false)
 {
     lines.push(`struct ${name}`, "{");
     for (const field of fields)
     {
-        lines.push(`    ${attribute(field)} ${field.name}: ${field.type},`);
+        lines.push(`    ${attribute(field, invariantPosition)} ${field.name}: ${field.type},`);
     }
     lines.push("};", "");
 }
@@ -58,7 +58,7 @@ export function buildWgsl(input, options = {})
     const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
     const hasInputs = program.interface.inputs.length > 0;
     if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
-    emitStruct(lines, `${prefix}Output`, program.interface.outputs);
+    emitStruct(lines, `${prefix}Output`, program.interface.outputs, program.stage === "vertex");
     for (const binding of program.bindings || [])
     {
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);

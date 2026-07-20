@@ -41,10 +41,16 @@ The current phase-1 slice implements:
 - strict complete-pass selection in `package:effect`, allowing a supported
   pass to be packaged while full-effect ANLS provenance is retained
 
-Loop emission (`loop`/`endloop`) remains a later pass, exact `precise`
-floating-point operations remain a deliberate portability boundary, and DX12
-bindless sampled-resource ranges remain comparison-only limitations; DX11
-SM5.0 effects are the translation target.
+Structured loops (`loop`/`endloop`/`breakc`) lower with entry/backedge phi
+variables, and DXBC `precise` operations are ADAPTED rather than rejected:
+they lower as ordinary float math while every vertex position output is
+emitted `@invariant`, preserving the multi-pass position invariance the
+marker exists for (bit-exact parity with native D3D11 arithmetic is not
+promised). DX12 bindless sampled-resource ranges remain comparison-only
+limitations; DX11 SM5.0 effects are the translation target. Every deliberate
+divergence, fail-closed boundary, and bounded-support decision is catalogued
+in [COMPATIBILITY-LEDGER.md](COMPATIBILITY-LEDGER.md) — consult and update it
+whenever compiler behavior changes.
 
 ## Provenance
 

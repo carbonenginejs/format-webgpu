@@ -34,9 +34,14 @@ export function requireRefactoringAllowed(program, stage)
 }
 
 /**
- * Accepts precise only where the restriction is provably vacuous for the
- * emitted WGSL. Floating arithmetic remains unsupported because WGSL permits
- * fusion and reassociation.
+ * Validates precise-mask metadata only. ADAPTED CONTRACT (requester decision,
+ * 2026-07-20): DXBC `precise` operations are accepted and lowered as ordinary
+ * IEEE float math, and the vertex position output is emitted `@invariant`.
+ * WGSL has no general no-contraction control, so bit-exact parity with native
+ * D3D11 arithmetic is NOT promised; `@invariant` instead guarantees identical
+ * position results across the pipelines built from the same emitted WGSL,
+ * which is the multi-pass invariance `precise` protects in these shaders.
+ * See COMPATIBILITY-LEDGER.md ("precise" entry) before changing this.
  *
  * @param {object} instruction Typed CJS shader IR instruction.
  * @param {string} stage Diagnostic stage label.
@@ -50,28 +55,9 @@ export function validatePreciseInstruction(instruction, stage)
     }
     if (!mask) return;
     const writes = instruction.dataflow?.writes || [];
-    if (writes.length !== 1 || writes[0].operandIndex !== 0
-        || Array.from(mask).some((component) => !writes[0].mask.includes(component)))
+    if (!writes.length
+        || Array.from(mask).some((component) => !writes.some((write) => write.mask.includes(component))))
     {
-        fail(stage, instruction, `mask ${mask} requires one destination write containing every precise lane`);
-    }
-    if (instruction.saturate || instruction.operands.some((operand) => (operand.modifierName || "none") !== "none"))
-    {
-        fail(stage, instruction, `mask ${mask} requires unsaturated, unmodified operands`);
-    }
-
-    const typeInfo = instruction.typeInfo;
-    const exactRule = { iadd: "signed-integer", ld_structured: "structured-load", mov: "move" }[
-        instruction.opcodeName
-    ];
-    const expectedOperandCount = { iadd: 3, ld_structured: 4, mov: 2 }[instruction.opcodeName];
-    const signedIntegerOperands = instruction.opcodeName !== "iadd"
-        || (typeInfo?.resultType === "int32" && Array.isArray(typeInfo.operandTypes)
-            && typeInfo.operandTypes.length === 3
-            && typeInfo.operandTypes.every((entry) => entry.expectedType === "int32"));
-    if (!exactRule || instruction.operands.length !== expectedOperandCount
-        || typeInfo?.rule !== exactRule || typeInfo.conversion || !signedIntegerOperands)
-    {
-        fail(stage, instruction, `mask ${mask} requires no-refactoring controls unavailable in WGSL`);
+        fail(stage, instruction, `mask ${mask} requires a destination write containing every precise lane`);
     }
 }

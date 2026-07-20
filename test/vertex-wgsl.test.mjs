@@ -461,7 +461,7 @@ test("structured skinning requires complete vector result reinterpretation metad
     assert.throws(() => CjsFormatWebgpu.buildWgsl(missing), /inconsistent register bitcast metadata/u);
 });
 
-test("structured skinning accepts only vacuous precise integer and bit-transport operations", () =>
+test("structured skinning lowers precise transport operations and rejects precisionPolicy", () =>
 {
     const decoded = structuredSkinningVertex(0, { precise: true });
     const shader = CjsFormatWebgpu.buildWgsl(decoded);
@@ -478,17 +478,16 @@ test("structured skinning accepts only vacuous precise integer and bit-transport
     );
 });
 
-test("precise floating arithmetic remains a strict WGSL portability boundary", () =>
+test("precise floating arithmetic lowers as ordinary math with an invariant position", () =>
 {
     const decoded = arithmeticVertex();
     decoded.instructions.find((entry) => entry.opcodeName === "dp4").preciseMask = "x";
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(decoded),
-        /precise dp4 mask x requires no-refactoring controls unavailable in WGSL/u
-    );
+    const shader = CjsFormatWebgpu.buildWgsl(decoded);
+    assert.match(shader.code, /@invariant @builtin\(position\)/u);
+    assert.match(shader.code, /dot\(/u);
 });
 
-test("precise metadata rejects malformed masks, unrelated lanes, and arithmetic modifiers", () =>
+test("precise metadata rejects malformed masks and unrelated lanes", () =>
 {
     const malformed = structuredSkinningVertex(0, { precise: true });
     malformed.instructions.find((entry) => entry.opcodeName === "iadd").preciseMask = "zx";
@@ -498,14 +497,7 @@ test("precise metadata rejects malformed masks, unrelated lanes, and arithmetic 
     unrelated.instructions.find((entry) => entry.opcodeName === "iadd").preciseMask = "y";
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(unrelated),
-        /requires one destination write containing every precise lane/u
-    );
-
-    const modified = structuredSkinningVertex(0, { precise: true });
-    modified.instructions.find((entry) => entry.opcodeName === "mov").operands[1].modifierName = "neg";
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(modified),
-        /requires unsaturated, unmodified operands/u
+        /requires a destination write containing every precise lane/u
     );
 
     const direct = structuredClone(CjsFormatWebgpu.buildShaderIr(structuredSkinningVertex()));

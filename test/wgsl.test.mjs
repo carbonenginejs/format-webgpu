@@ -93,7 +93,7 @@ const EXPECTED_WGSL = `struct VertexInput
 
 struct VertexOutput
 {
-    @builtin(position) position: vec4<f32>,
+    @invariant @builtin(position) position: vec4<f32>,
     @location(1) output1: vec2<f32>,
 };
 
