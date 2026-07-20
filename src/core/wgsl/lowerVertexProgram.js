@@ -56,37 +56,49 @@ function fieldType(scalarType, count)
 
 function interfaceFields(program, direction)
 {
-    return (program.signatures?.[direction] || []).map((signature, index) =>
+    const groups = new Map();
+    for (const signature of program.signatures?.[direction] || [])
     {
-        const components = componentsFromMask(signature.mask);
-        if (!components.length) throw new Error(`WGSL ${direction} signature ${index} has an empty mask`);
-        if (!components.every((component, componentIndex) => component === COMPONENTS[componentIndex]))
+        if (!groups.has(signature.registerIndex)) groups.set(signature.registerIndex, []);
+        groups.get(signature.registerIndex).push(signature);
+    }
+    return Array.from(groups.values()).map((rows) =>
+    {
+        const registerIndex = rows[0].registerIndex;
+        const mask = rows.reduce((accumulator, signature) => accumulator | signature.mask, 0);
+        const components = componentsFromMask(mask);
+        if (!components.length || !components.every((component, componentIndex) => component === COMPONENTS[componentIndex]))
         {
-            throw new Error(`WGSL ${direction} signature register ${signature.registerIndex} has a non-prefix mask`);
+            throw new Error(`WGSL vertex ${direction} signature register ${registerIndex} has a non-prefix mask`);
         }
-        const semantic = String(signature.semanticName || "").toUpperCase();
+        const semantic = String(rows[0].semanticName || "").toUpperCase();
         const outputBuiltin = direction === "output" ? SYSTEM_BUILTINS[semantic] || null : null;
         const inputBuiltin = direction === "input" ? INPUT_BUILTINS[semantic] || null : null;
         const builtinName = outputBuiltin || inputBuiltin?.name || null;
-        if (semantic.startsWith("SV_") && !builtinName)
+        if (rows.some((signature) => String(signature.semanticName || "").toUpperCase().startsWith("SV_")) && !builtinName)
         {
             throw new Error(`WGSL vertex ${direction} system semantic ${semantic} is not supported`);
         }
-        const scalarType = inputBuiltin?.scalarType || signature.componentTypeName;
+        const componentTypeName = rows[0].componentTypeName;
+        if (rows.some((signature) => signature.componentTypeName !== componentTypeName))
+        {
+            throw new Error(`WGSL vertex ${direction} register ${registerIndex} packs mixed component types`);
+        }
+        const scalarType = inputBuiltin?.scalarType || componentTypeName;
         return {
             kind: "interface-field",
-            id: `${direction}:r${signature.registerIndex}`,
+            id: `${direction}:r${registerIndex}`,
             direction,
-            registerIndex: signature.registerIndex,
-            semanticName: signature.semanticName,
-            semanticIndex: signature.semanticIndex,
+            registerIndex,
+            semanticName: rows[0].semanticName,
+            semanticIndex: rows[0].semanticIndex,
             components,
             scalarType,
-            type: inputBuiltin?.scalarType ? scalarTypeName(scalarType) : fieldType(signature.componentTypeName, components.length),
-            name: builtinName || `${direction}${signature.registerIndex}`,
+            type: inputBuiltin?.scalarType ? scalarTypeName(scalarType) : fieldType(componentTypeName, components.length),
+            name: builtinName || `${direction}${registerIndex}`,
             attribute: builtinName
                 ? { kind: "builtin", name: builtinName }
-                : { kind: "location", index: signature.registerIndex }
+                : { kind: "location", index: registerIndex }
         };
     });
 }

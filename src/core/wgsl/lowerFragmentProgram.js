@@ -90,39 +90,57 @@ function packedComponent(mask, component)
     return COMPONENTS[index];
 }
 
-function interfaceField(signature, direction)
+function interfaceField(rows, direction)
 {
-    const components = componentsFromMask(signature.mask);
+    const registerIndex = rows[0].registerIndex;
+    const mask = rows.reduce((accumulator, signature) => accumulator | signature.mask, 0);
+    const components = componentsFromMask(mask);
     if (!components.length || !components.every((component, index) => component === COMPONENTS[index]))
     {
-        throw new Error(`WGSL fragment ${direction} register ${signature.registerIndex} requires a prefix signature mask`);
+        throw new Error(`WGSL fragment ${direction} register ${registerIndex} requires a prefix signature mask`);
     }
-    const semantic = String(signature.semanticName || "").toUpperCase();
+    const semantic = String(rows[0].semanticName || "").toUpperCase();
     if (direction === "output" && semantic !== "SV_TARGET")
     {
         throw new Error(`WGSL fragment output semantic ${semantic} is not supported`);
     }
     const builtin = direction === "input" ? INPUT_BUILTINS[semantic] || null : null;
-    if (direction === "input" && semantic.startsWith("SV_") && !builtin)
+    if (direction === "input" && rows.some((signature) => String(signature.semanticName || "").toUpperCase().startsWith("SV_")) && !builtin)
     {
         throw new Error(`WGSL fragment live system input ${semantic} is not supported`);
     }
-    const scalarType = builtin?.scalarType || signature.componentTypeName;
+    const componentTypeName = rows[0].componentTypeName;
+    if (rows.some((signature) => signature.componentTypeName !== componentTypeName))
+    {
+        throw new Error(`WGSL fragment ${direction} register ${registerIndex} packs mixed component types`);
+    }
+    const scalarType = builtin?.scalarType || componentTypeName;
     return {
         kind: "interface-field",
-        id: `${direction}:r${signature.registerIndex}`,
+        id: `${direction}:r${registerIndex}`,
         direction,
-        registerIndex: signature.registerIndex,
-        semanticName: signature.semanticName,
-        semanticIndex: signature.semanticIndex,
+        registerIndex,
+        semanticName: rows[0].semanticName,
+        semanticIndex: rows[0].semanticIndex,
         components,
         scalarType,
-        type: builtin?.scalarType ? builtin.scalarType : fieldType(signature.componentTypeName, components.length),
-        name: builtin?.name || `${direction}${signature.registerIndex}`,
+        type: builtin?.scalarType ? builtin.scalarType : fieldType(componentTypeName, components.length),
+        name: builtin?.name || `${direction}${registerIndex}`,
         attribute: builtin
             ? { kind: "builtin", name: builtin.name }
-            : { kind: "location", index: direction === "output" ? signature.semanticIndex : signature.registerIndex }
+            : { kind: "location", index: direction === "output" ? rows[0].semanticIndex : registerIndex }
     };
+}
+
+function groupSignaturesByRegister(signatures)
+{
+    const groups = new Map();
+    for (const signature of signatures)
+    {
+        if (!groups.has(signature.registerIndex)) groups.set(signature.registerIndex, []);
+        groups.get(signature.registerIndex).push(signature);
+    }
+    return Array.from(groups.values());
 }
 
 function liveInputRegisters(program)
@@ -986,10 +1004,10 @@ export function lowerFragmentProgram(program, options = {})
     }
     requireRefactoringAllowed(program, "fragment");
     const liveRegisters = liveInputRegisters(program);
-    const inputs = program.signatures.input
-        .filter((entry) => liveRegisters.has(entry.registerIndex))
-        .map((entry) => interfaceField(entry, "input"));
-    const outputs = program.signatures.output.map((entry) => interfaceField(entry, "output"));
+    const inputs = groupSignaturesByRegister(
+        program.signatures.input.filter((entry) => liveRegisters.has(entry.registerIndex)))
+        .map((rows) => interfaceField(rows, "input"));
+    const outputs = program.signatures.output.map((entry) => interfaceField([ entry ], "output"));
     if (!outputs.length) throw new Error("WGSL fragment body slice requires output signatures");
     inputs.forEach((input) => validateInterpolation(program, input));
     const bindings = lowerBindingLayout(program, options.bindingPlan);

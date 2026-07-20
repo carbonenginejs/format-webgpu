@@ -99,6 +99,18 @@ lane a round-tripping f32 decimal literal (non-finite lanes fall back to
 (pure-relative and base+relative indices both supported), with int/uint
 consumers bitcast exactly like uniform cbuffers.
 
+### Component-packed varyings → one merged interface field per register
+
+DXBC signature tables can emit several rows for a single interpolant register
+when distinct semantics occupy different lanes (e.g. three `TEXCOORD`s packed
+into `x`/`y`/`z` of output register 2, as in `starsprites`). Each row carries a
+non-prefix mask (`y`-only, `z`-only) that would individually be rejected as a
+gap in the WGSL location layout. Both stages now group signature rows by
+`registerIndex`, union their masks, and emit ONE interface field per register
+(validated prefix, single component type across the group). This is a
+faithfulness fix, not a divergence — the merged field reproduces the register's
+true lane occupancy.
+
 ### Vertex-stage texture sampling → explicit LOD/gradient only
 
 The vertex binding restriction now admits texture and sampler bindings, and the
