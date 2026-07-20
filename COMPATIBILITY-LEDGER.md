@@ -110,8 +110,6 @@ consumers bitcast exactly like uniform cbuffers.
   audited design if it ever becomes target work.
 - **`imul`/`umul` high-half results** — WGSL has no 32×32→64 multiply
   builtin; only the low-half destination is supported.
-- **`ishl`/`ishr` signed shifts** — WGSL shift counts are `u32`; deferred
-  until a validated count-cast pattern is needed by a real shader.
 - **`continue`/`continuec` in loops** — the loop phi-update placement assumes
   fall-through to the latch; `continuing {}`-based support is designable when
   a shader needs it.
@@ -127,6 +125,14 @@ consumers bitcast exactly like uniform cbuffers.
   interpolation, minimum-precision operands, and vertex system semantics
   outside `SV_Position`/`SV_VertexID`/`SV_InstanceID` (fragment:
   `SV_Position`/`SV_IsFrontFace`, output `SV_Target`).
+
+### sample_d gradient sampling + integer/rounding opcode fill-out
+
+`sample_d` lowers to `textureSampleGrad(t, s, coord, ddx, ddy)` (2/3-component
+gradients by dimension). Added `imax/imin/umax/umin` (WGSL overloaded
+`max`/`min`), `ishl`/`ishr` (`<< u32(...)` / `>> u32(...)` — DXBC shift counts
+cast to the WGSL-required u32), `round_pi` (`ceil`), and the previously
+handler-only `ult`/`uge` to both stage support sets.
 
 ## Bounded / temporary
 
@@ -147,8 +153,7 @@ consumers bitcast exactly like uniform cbuffers.
   corpus).
 - **Selection merges** — scalar phis; two-armed regions identify arm tails by
   edge kind; guaranteed-output tracking intersects arms.
-- **`sample_d` gradients and `gather4`** — front-end lanes reserved, WGSL
-  emission not yet built (no corpus shader requires them).
+- **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
 ## Verification contract
 

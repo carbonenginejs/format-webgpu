@@ -9,11 +9,12 @@ const SUPPORTED_OPCODES = new Set([
     "add", "and", "deriv_rtx", "deriv_rty", "deriv_rtx_coarse",
     "deriv_rty_coarse", "deriv_rtx_fine", "deriv_rty_fine", "discard", "div",
     "dp2", "dp3", "dp4", "eq", "exp", "f16tof32", "f32tof16", "frc", "ftoi",
-    "ftou", "ge", "iadd",
-    "ieq", "ige", "ilt", "imad", "imul", "ine", "if",
-    "itof", "ld", "ld_structured", "log", "lt", "mad", "max", "min", "mov", "movc", "mul", "ne",
-    "or", "resinfo", "round_ni", "round_z", "rsq", "sample", "sample_b",
-    "sample_l", "sincos", "sqrt", "ushr", "utof", "xor", "endif", "ret"
+    "ftou", "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul",
+    "ine", "ishl", "ishr", "if", "itof", "ld", "ld_structured", "log", "lt",
+    "mad", "max", "min", "mov", "movc", "mul", "ne", "or", "resinfo",
+    "round_ni", "round_pi", "round_z", "rsq", "sample", "sample_b", "sample_d",
+    "sample_l", "sincos", "sqrt", "uge", "ult", "umax", "umin", "ushr", "utof",
+    "xor", "endif", "ret"
 ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
     itof: [ "int32", "float32" ],
@@ -581,8 +582,10 @@ function expressionFor(program, instruction, write, inputs, bindings)
         }
         return `(${source(2)} * ${source(3)})`;
     }
-    if (op === "max") return `max(${source(1)}, ${source(2)})`;
-    if (op === "min") return `min(${source(1)}, ${source(2)})`;
+    if ([ "max", "imax", "umax" ].includes(op)) return `max(${source(1)}, ${source(2)})`;
+    if ([ "min", "imin", "umin" ].includes(op)) return `min(${source(1)}, ${source(2)})`;
+    if (op === "ishl") return `(${source(1)} << u32(${source(2)}))`;
+    if (op === "ishr") return `(${source(1)} >> u32(${source(2)}))`;
     if (op === "and") return `(${source(1)} & ${source(2)})`;
     if (op === "or") return `(${source(1)} | ${source(2)})`;
     if (op === "xor") return `(${source(1)} ^ ${source(2)})`;
@@ -598,6 +601,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
     if (op === "frc") return `fract(${source(1)})`;
     if (op === "log") return `log2(${source(1)})`;
     if (op === "round_ni") return `floor(${source(1)})`;
+    if (op === "round_pi") return `ceil(${source(1)})`;
     if (op === "round_z") return `trunc(${source(1)})`;
     if (DERIVATIVES[op]) return `${DERIVATIVES[op]}(${source(1)})`;
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
@@ -665,7 +669,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
         const components = rawSelectedComponents(resource, mask, count);
         return count === 4 && components.join("") === "xyzw" ? loaded : `${loaded}.${components.join("")}`;
     }
-    if (op === "sample" || op === "sample_b" || op === "sample_l")
+    if (op === "sample" || op === "sample_b" || op === "sample_l" || op === "sample_d")
     {
         const resource = instruction.operands[2];
         const sampler = instruction.operands[3];
@@ -673,6 +677,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
         const samplerBinding = bindingForOperand(bindings, "sampler", sampler);
         if (!textureBinding || !samplerBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has unresolved sample bindings`);
         const viewDimension = textureBinding.texture?.viewDimension;
+        const coordComponents = viewDimension === "2d" ? 2 : 3;
         let coord;
         let arrayArg = "";
         if (viewDimension === "2d-array")
@@ -683,14 +688,16 @@ function expressionFor(program, instruction, write, inputs, bindings)
         }
         else
         {
-            coord = source(1, viewDimension === "2d" ? 2 : 3);
+            coord = source(1, coordComponents);
         }
         const tex = `${textureBinding.generatedSymbol}, ${samplerBinding.generatedSymbol}`;
         const sampled = op === "sample_b"
             ? `textureSampleBias(${tex}, ${coord}${arrayArg}, ${source(4, 1)})`
             : op === "sample_l"
                 ? `textureSampleLevel(${tex}, ${coord}${arrayArg}, ${source(4, 1)})`
-                : `textureSample(${tex}, ${coord}${arrayArg})`;
+                : op === "sample_d"
+                    ? `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, coordComponents)}, ${source(5, coordComponents)})`
+                    : `textureSample(${tex}, ${coord}${arrayArg})`;
         const components = rawSelectedComponents(resource, mask, count);
         return count === 4 && components.join("") === "xyzw" ? sampled : `${sampled}.${components.join("")}`;
     }

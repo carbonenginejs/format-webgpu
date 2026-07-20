@@ -24,9 +24,10 @@ const INPUT_BUILTINS = Object.freeze({
 const SUPPORTED_OPCODES = new Set([
     "add", "and", "div", "dp2", "dp3", "dp4", "eq", "exp", "f16tof32",
     "f32tof16", "frc", "ftoi", "ftou",
-    "ge", "iadd", "ieq", "ige", "ilt", "imad", "imul", "ine", "itof", "ld_structured", "log",
-    "lt", "mad", "max", "min",
-    "mov", "movc", "mul", "ne", "or", "round_ni", "round_z", "rsq", "sincos",
+    "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul", "ine",
+    "ishl", "ishr", "itof", "ld_structured", "log", "lt", "mad", "max", "min",
+    "mov", "movc", "mul", "ne", "or", "round_ni", "round_pi", "round_z", "rsq",
+    "sincos", "uge", "ult", "umax", "umin",
     "sqrt", "ushr", "utof", "xor", "ret"
 ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
@@ -564,10 +565,13 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     if (op === "log") return `log2(${source(1)})`;
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
     if (op === "sqrt") return `sqrt(${source(1)})`;
-    if (op === "max") return `max(${source(1)}, ${source(2)})`;
-    if (op === "min") return `min(${source(1)}, ${source(2)})`;
+    if ([ "max", "imax", "umax" ].includes(op)) return `max(${source(1)}, ${source(2)})`;
+    if ([ "min", "imin", "umin" ].includes(op)) return `min(${source(1)}, ${source(2)})`;
+    if (op === "ishl") return `(${source(1)} << u32(${source(2)}))`;
+    if (op === "ishr") return `(${source(1)} >> u32(${source(2)}))`;
     if (op === "frc") return `fract(${source(1)})`;
     if (op === "round_ni") return `floor(${source(1)})`;
+    if (op === "round_pi") return `ceil(${source(1)})`;
     if (op === "round_z") return `trunc(${source(1)})`;
     if (op === "sincos")
     {

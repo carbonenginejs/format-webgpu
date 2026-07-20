@@ -1196,3 +1196,44 @@ test("fragment lowering reads a dynamically indexed immediate constant buffer", 
     assert.match(shader.code, /const icb = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, 0\.0, 0\.0, 0\.0\), vec4<f32>\(0\.0, 2\.0, 0\.0, 0\.0\)\);/u);
     assert.match(shader.code, /icb\[[^\]]+\]\.x/u);
 });
+
+test("fragment lowering emits gradient sampling, ceil, shifts, and integer min/max", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 15) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_sampler", "sampler", { samplerModeName: "default" }),
+            declaration(4, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(9, "sample_d", [
+                register("temp", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xyxx" }),
+                register("resource", 0, { swizzle: "xyzw" }),
+                register("sampler", 0),
+                register("input", 1, { swizzle: "zwzz" }),
+                register("input", 1, { swizzle: "zwzz" })
+            ]),
+            instruction(15, "round_pi", [ register("temp", 1, { mask: "x" }), register("temp", 0, { selected: "x" }) ]),
+            instruction(19, "ftou", [ register("temp", 2, { mask: "xy" }), register("input", 1, { swizzle: "xyxx" }) ]),
+            instruction(23, "ishl", [ register("temp", 2, { mask: "z" }), register("temp", 2, { selected: "x" }), register("temp", 2, { selected: "y" }) ]),
+            instruction(27, "imax", [ register("temp", 2, { mask: "w" }), register("temp", 2, { selected: "z" }), register("temp", 2, { selected: "x" }) ]),
+            instruction(31, "utof", [ register("temp", 3, { mask: "x" }), register("temp", 2, { selected: "w" }) ]),
+            instruction(35, "add", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xyzw" }), register("temp", 3, { swizzle: "xxxx" }) ]),
+            instruction(39, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-sampled" });
+    assert.match(shader.code, /textureSampleGrad\(t0, s0, vec2<f32>\([^)]+\), vec2<f32>\([^)]+\), vec2<f32>\([^)]+\)\)/u);
+    assert.match(shader.code, /ceil\(/u);
+    assert.match(shader.code, /<< u32\(/u);
+    assert.match(shader.code, /max\(/u);
+});
