@@ -333,14 +333,6 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
         throw new Error(`WGSL ${stage} loop at ${region.startInstruction} has unsupported header predecessors`);
     }
     const preheaderBlockId = preheaderPredecessors[0].blockId;
-    for (let index = region.startInstruction + 1; index < region.endInstruction; index += 1)
-    {
-        const opcode = program.instructions[index].opcodeName;
-        if (opcode === "continue" || opcode === "continuec")
-        {
-            throw new Error(`WGSL ${stage} loop at ${region.startInstruction} does not support ${opcode}`);
-        }
-    }
     const mergeIds = (header.mergeSite?.valueIds || []).filter((id) => live.has(id));
     const merges = mergeIds.map((id) =>
     {

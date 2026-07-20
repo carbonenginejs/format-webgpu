@@ -134,11 +134,21 @@ test("DX11 and DX12 copyblit vertex descriptions emit identical WGSL", () =>
     );
 });
 
-test("BuildWgsl requires every signature-declared output lane", () =>
+test("BuildWgsl zero-fills unwritten location outputs but still requires builtin outputs", () =>
 {
+    // A location varying left unwritten is allowed: WGSL zero-initializes the
+    // output struct, matching D3D's undefined-but-safe-as-zero semantics.
+    const shader = CjsFormatWebgpu.buildWgsl(copyblitVertex(0, false));
+    assert.equal(shader.stage, "vertex");
+    assert.match(shader.code, /@location\(1\) output1: vec2<f32>/u);
+    assert.doesNotMatch(shader.code, /output\.output1 =/u);
+
+    // A builtin output (SV_Position) left unwritten still fails closed.
+    const noPosition = copyblitVertex(0, false);
+    noPosition.instructions.splice(1, 1);
     assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(copyblitVertex(0, false)),
-        /output TEXCOORD0 leaves xy unwritten/i
+        () => CjsFormatWebgpu.buildWgsl(noPosition),
+        /output SV_Position0 leaves .*unwritten/i
     );
 });
 

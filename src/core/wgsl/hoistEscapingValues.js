@@ -52,6 +52,7 @@ export function hoistEscapingValues(statements)
             if (statement.kind === "loop")
             {
                 walk(statement.statements, scopes);
+                if (statement.continuing) walk(statement.continuing, scopes);
             }
         }
         scopes.pop();

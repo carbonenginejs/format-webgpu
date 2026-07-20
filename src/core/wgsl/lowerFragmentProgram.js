@@ -1074,6 +1074,35 @@ export function lowerFragmentProgram(program, options = {})
                     });
                     continue;
                 }
+                if (marker === "continue" || marker === "continuec")
+                {
+                    if (!inLoop) throw new Error(`WGSL fragment has an unmatched ${marker} at instruction ${index}`);
+                    const continueInstruction = program.instructions[index];
+                    if (marker === "continue")
+                    {
+                        statements.push({ kind: "continue", instructionIndex: continueInstruction.index, dxbcOffset: continueInstruction.dxbcOffset });
+                        continue;
+                    }
+                    validatePreciseInstruction(continueInstruction, "fragment");
+                    validateRegisterBitcasts(program, continueInstruction);
+                    const conditionOperand = continueInstruction.operands[0];
+                    const conditionRead = sourceRead(continueInstruction, 0);
+                    if (continueInstruction.saturate || (conditionOperand?.modifierName || "none") !== "none"
+                        || !COMPONENTS.includes(conditionOperand?.selected) || conditionRead?.refs.length !== 1
+                        || ![ "zero", "nonzero" ].includes(continueInstruction.testBoolean))
+                    {
+                        throw new Error(`WGSL fragment continuec instruction ${continueInstruction.index} requires one unmodified scalar condition`);
+                    }
+                    const condition = operandExpression(program, continueInstruction, 0, "x", 1, "uint32", inputs, bindings);
+                    statements.push({
+                        kind: "if",
+                        instructionIndex: continueInstruction.index,
+                        dxbcOffset: continueInstruction.dxbcOffset,
+                        condition: { code: `${condition} ${continueInstruction.testBoolean === "zero" ? "==" : "!="} 0u`, type: "bool" },
+                        statements: [ { kind: "continue" } ]
+                    });
+                    continue;
+                }
                 if ([ "endif", "else", "case", "default", "endswitch", "endloop" ].includes(marker))
                 {
                     throw new Error(`WGSL fragment has an unmatched ${marker} at instruction ${index}`);
@@ -1102,12 +1131,13 @@ export function lowerFragmentProgram(program, options = {})
                 {
                     throw new Error(`WGSL fragment loop at ${index} terminates before latch assignments`);
                 }
-                for (const merge of plan.merges)
-                {
-                    body.push({ kind: "value-assignment", name: merge.id, type: merge.type,
-                        expression: { code: valueReference(program, merge.backedgeIncoming, inputs), type: merge.type } });
-                }
-                statements.push({ kind: "loop", instructionIndex: loopInstruction.index, dxbcOffset: loopInstruction.dxbcOffset, statements: body });
+                // Latch phi updates go in a `continuing` block so they run on both
+                // fall-through and `continue` paths (a body `continue` would skip
+                // updates appended to the body).
+                const latch = plan.merges.map((merge) => ({ kind: "value-assignment", name: merge.id, type: merge.type,
+                    expression: { code: valueReference(program, merge.backedgeIncoming, inputs), type: merge.type } }));
+                statements.push({ kind: "loop", instructionIndex: loopInstruction.index, dxbcOffset: loopInstruction.dxbcOffset,
+                    statements: body, continuing: latch });
                 index = plan.region.endInstruction;
                 continue;
             }

@@ -91,6 +91,25 @@ removed for selections; the genuine "terminates before merge assignments"
 (return inside an arm ahead of the appended merge write) guard stays.
 Browser-validated on `banner` (Main + Picking, DX11 and DX12, zero warnings).
 
+### `continue`/`continuec` in loops → WGSL `continuing {}` latch
+
+Loop phi-latch updates are emitted in a WGSL `continuing {}` block (which runs
+on both fall-through and `continue` paths) instead of being appended to the loop
+body. `continue` lowers to `continue;` and `continuec` to `if (cond) { continue;
+}`. Behavior is unchanged for loops without `continue` (the continuing block
+still runs the latch each iteration); it simply makes body `continue` correct
+rather than skipping the latch. Both stages.
+
+### Declared-but-unwritten location outputs → zero-filled
+
+A vertex/fragment output signature may declare a `location` varying
+(COLOR/TEXCOORD) that a given permutation never writes (e.g. `ui/ubershader3d`
+declares COLOR1/TEXCOORD4 but the default permutation writes neither). D3D
+leaves such lanes undefined; WGSL zero-initializes `var output`, so the
+unwritten lanes read as 0 — a safe, valid choice. Completeness is still enforced
+for **builtin** outputs (`SV_Position` must be fully written; zero is not a
+meaningful position).
+
 ### Dead untyped temp writes → skipped
 
 Compiler-emitted dead stores whose values nothing reads (and whose types are
@@ -143,9 +162,6 @@ WGSL forbids implicit derivatives in a vertex entry point.
   audited design if it ever becomes target work.
 - **`imul`/`umul` high-half results** — WGSL has no 32×32→64 multiply
   builtin; only the low-half destination is supported.
-- **`continue`/`continuec` in loops** — the loop phi-update placement assumes
-  fall-through to the latch; `continuing {}`-based support is designable when
-  a shader needs it.
 - **Dynamic constant-buffer register selection** (`cbX[dynamic][…]` selecting
   the *buffer*) — only the vector index may be dynamic.
 - **Non-immediate mip levels in `resinfo`/`ld`**, and both are bounded to 2D

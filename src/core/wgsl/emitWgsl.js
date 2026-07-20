@@ -152,11 +152,21 @@ export function buildWgsl(input, options = {})
         {
             lines.push(`${indent}break;`);
         }
+        else if (statement.kind === "continue")
+        {
+            lines.push(`${indent}continue;`);
+        }
         else if (statement.kind === "loop")
         {
             lines.push(`${indent}loop`, `${indent}{`);
             sourceMap.push({ line, instructionIndex: statement.instructionIndex, dxbcOffset: statement.dxbcOffset });
             for (const child of statement.statements) emitStatement(child, depth + 1);
+            if (statement.continuing?.length)
+            {
+                lines.push(`${indent}    continuing`, `${indent}    {`);
+                for (const child of statement.continuing) emitStatement(child, depth + 2);
+                lines.push(`${indent}    }`);
+            }
             lines.push(`${indent}}`);
             return;
         }
