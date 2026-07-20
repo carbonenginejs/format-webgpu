@@ -746,31 +746,41 @@ test("fragment lowering checks output coverage on each return path", () =>
     assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /leaves w unwritten before return/i);
 });
 
-test("fragment lowering rejects implicit-LOD sampling under a non-uniform branch", () =>
+test("fragment lowering emits the derivative-uniformity opt-out for implicit-LOD sampling under a non-uniform branch", () =>
 {
     // Gating the branch on an interpolated input makes the control flow
-    // non-uniform, where WGSL forbids implicit-LOD sampling.
-    const decoded = fragmentFixture();
-    decoded.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 1, { selected: "x" });
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /sample at instruction \d+ needs uniform control flow/i);
+    // non-uniform, where WGSL forbids implicit-LOD sampling by default. The
+    // module reproduces D3D11's permissive behavior with the standard opt-out.
+    const uniform = fragmentFixture();
+    assert.doesNotMatch(CjsFormatWebgpu.buildWgsl(uniform).code, /diagnostic\(off, derivative_uniformity\)/);
+
+    const nonUniform = fragmentFixture();
+    nonUniform.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 1, { selected: "x" });
+    const code = CjsFormatWebgpu.buildWgsl(nonUniform).code;
+    assert.match(code, /^diagnostic\(off, derivative_uniformity\);/m);
+    assert.match(code, /textureSample\(/);
 });
 
-test("fragment lowering rejects derivatives under a non-uniform branch but allows them under a uniform one", () =>
+test("fragment lowering opts out for derivatives under a non-uniform branch but keeps them clean under a uniform one", () =>
 {
-    // Uniform (immediate-gated) branch: a derivative inside is legal.
+    // Uniform (immediate-gated) branch: a derivative inside is legal, no opt-out.
     const uniform = fragmentFixture();
     const uniformSample = uniform.instructions.find((entry) => entry.offset === 18);
     uniformSample.opcodeName = "deriv_rtx";
     uniformSample.operands = [ register("temp", 1, { mask: "yz" }), register("input", 1, { swizzle: "xyxx" }) ];
-    assert.match(CjsFormatWebgpu.buildWgsl(uniform).code, /dpdx\(/);
+    const uniformCode = CjsFormatWebgpu.buildWgsl(uniform).code;
+    assert.match(uniformCode, /dpdx\(/);
+    assert.doesNotMatch(uniformCode, /diagnostic\(off, derivative_uniformity\)/);
 
-    // Non-uniform (input-gated) branch: the same derivative is rejected.
+    // Non-uniform (input-gated) branch: the same derivative triggers the opt-out.
     const nonUniform = fragmentFixture();
     nonUniform.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 1, { selected: "x" });
     const nonUniformSample = nonUniform.instructions.find((entry) => entry.offset === 18);
     nonUniformSample.opcodeName = "deriv_rtx";
     nonUniformSample.operands = [ register("temp", 1, { mask: "yz" }), register("input", 1, { swizzle: "xyxx" }) ];
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(nonUniform), /deriv_rtx at instruction \d+ needs uniform control flow/i);
+    const code = CjsFormatWebgpu.buildWgsl(nonUniform).code;
+    assert.match(code, /^diagnostic\(off, derivative_uniformity\);/m);
+    assert.match(code, /dpdx\(/);
 });
 
 test("fragment lowering rejects live undefined reads and accepts bounded SM5.1 control metadata", () =>

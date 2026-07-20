@@ -70,6 +70,16 @@ export function buildWgsl(input, options = {})
     const lines = [];
     const sourceMap = [];
     const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
+    if (program.requiresDerivativeUniformityOptOut)
+    {
+        // This shader computes a screen-space derivative / implicit-LOD sample
+        // inside non-uniform control flow, which WGSL forbids by default. The
+        // DXBC source relied on D3D11's permissive behavior; this module-level
+        // filter reproduces it (a standard WGSL opt-out) rather than rejecting
+        // the shader. Neighbor lanes that skip the branch yield undefined
+        // derivatives there, exactly as under D3D11.
+        lines.push("diagnostic(off, derivative_uniformity);", "");
+    }
     const hasInputs = program.interface.inputs.length > 0;
     if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
     emitStruct(lines, `${prefix}Output`, program.interface.outputs, program.stage === "vertex");

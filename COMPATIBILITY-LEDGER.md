@@ -188,43 +188,47 @@ handler-only `ult`/`uge` to both stage support sets.
   edge kind; guaranteed-output tracking intersects arms.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
-## Not supported (fail closed) — uniformity
+## Adapted — uniformity
 
-### Derivatives / implicit-LOD samples in non-uniform control flow
+### Derivatives / implicit-LOD samples in non-uniform control flow → `diagnostic(off, derivative_uniformity)`
 
 WGSL forbids screen-space derivatives — the `dpdx*`/`dpdy*` family and the
 implicit-LOD samples that derive internally (`textureSample` /
 `textureSampleBias`) — inside **non-uniform** control flow (a branch whose
 condition can differ between the pixels of a 2x2 quad), because the derivative
 compares neighbor pixels that may not all be present. `src/core/wgsl/
-uniformity.js` tags each SSA value uniform or varying and the fragment lowerer
-fails these operations closed (`WGSL fragment <op> at instruction N needs
-uniform control flow`) when an enclosing branch condition is varying, rather
-than emitting WGSL the browser's Tint uniformity analysis rejects.
+uniformity.js` tags each SSA value uniform or varying; when the fragment lowerer
+finds one of these operations under a varying-conditioned branch it records
+`requiresDerivativeUniformityOptOut` on the program, and `emitWgsl` prepends the
+module-level filter `diagnostic(off, derivative_uniformity);` (a standard WGSL
+opt-out that Dawn/Tint and Naga both honor — browser-gate confirmed) rather than
+rejecting the shader.
 
-Soundness: constant-buffer and immediate operands are not SSA values, so the
-only varying SEEDS are interpolated fragment inputs (`input[N]`, incl.
-`SV_Position`) and per-pixel producers (texture sampling/loading, derivatives).
-A value is varying only if it genuinely derives from one of those — there are
-**no false positives**, so a rejected branch is non-uniform in fact. Loops are
-treated with their enclosing uniformity (a varying `breakc` mid-loop is not yet
-modelled; the browser gate remains the backstop for that rare shape).
+Why the directive and not gradient hoisting: the DXBC came from HLSL that relied
+on **D3D11's permissive divergent-derivative behavior** (non-participating quad
+lanes yield undefined derivatives). The directive reproduces exactly that — the
+hardware still computes the implicit derivative in place, so there is no gradient
+recomputation. Converting to `textureSampleGrad` with a gradient computed in
+uniform control flow (hoisting) would substitute a *different* gradient than the
+one D3D11 used, i.e. be less faithful. The directive is emitted only when the
+analysis actually detects a non-uniform derivative/sample, and it is visible in
+the WGSL (with an explanatory comment) plus flagged on the typed program, so the
+reliance on the opt-out is never silent.
 
-Corpus impact: this fails closed 10 EVE `sm_hi` shaders that previously
-package-qualified but were browser-invalid — the `stretch` specialfx family
-(`artillery`, `atomic`, `blast`, `laser`, `projectile`, all `sample_b` under a
-varying branch or `dpdxCoarse` under a varying inner branch) plus `bokeh`,
-`colorlut_preservealpha`, `digiscramble`, `wormholeerosion`, and
-`expandopaque` (auto-`sample` gated on a sampled or interpolated value). Making
-the package count honest, not reducing real coverage.
+Soundness of the trigger: constant-buffer and immediate operands are not SSA
+values, so the only varying SEEDS are interpolated fragment inputs (`input[N]`,
+incl. `SV_Position`) and per-pixel producers (texture sampling/loading,
+derivatives). A value is varying only if it genuinely derives from one of those
+— **no false positives**, so the directive is added only where truly needed.
+Loops are treated with their enclosing uniformity (a varying `breakc` mid-loop
+is not yet modelled; the browser gate remains the backstop for that rare shape).
 
-Recoverable (future): many of these derive the derivative/sample input purely
-from interpolated inputs and constants (verified on `laser`: the derivative
-chain is `dp2`/`sqrt`/`mad` over `input1.xy`), so the operation can be **hoisted
-into uniform control flow** — compute the gradient/sample ahead of the branch
-and convert auto-mip `textureSample` -> `textureSampleGrad` — to recover the
-shader. Cases whose input genuinely depends on branch-local state exploit
-DX11's lenient divergent-derivative behavior and are not portably translatable.
+Corpus: recovers 10 EVE `sm_hi` shaders that WGSL would otherwise reject — the
+`stretch` specialfx family (`artillery`, `atomic`, `blast`, `laser`,
+`projectile`: `sample_b`/`dpdxCoarse` under a varying branch) plus `bokeh`,
+`colorlut_preservealpha`, `digiscramble`, `wormholeerosion`, `expandopaque`
+(auto-`sample` gated on a sampled or interpolated value). Browser-gated `laser`,
+`bokeh`, `expandopaque` (0 warnings on the real device).
 
 ## Verification contract
 

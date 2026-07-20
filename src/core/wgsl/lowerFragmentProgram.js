@@ -746,15 +746,19 @@ function applyResultBitcast(instruction, write, expression, type)
         `instruction ${instruction.index} result`);
 }
 
-function lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds, nonUniform = false)
+function lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds, nonUniform = false, context = null)
 {
     if (!SUPPORTED_OPCODES.has(instruction.opcodeName))
     {
         throw new Error(`WGSL fragment opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
     }
-    if (nonUniform && REQUIRES_UNIFORM_CONTROL_FLOW.has(instruction.opcodeName))
+    if (nonUniform && REQUIRES_UNIFORM_CONTROL_FLOW.has(instruction.opcodeName) && context)
     {
-        throw new Error(`WGSL fragment ${instruction.opcodeName} at instruction ${instruction.index} needs uniform control flow`);
+        // Screen-space derivative / implicit-LOD sample under non-uniform control
+        // flow. Rather than reject, record that the module needs the WGSL
+        // derivative-uniformity opt-out (emitted at module top); this reproduces
+        // D3D11's permissive behavior. See uniformity.js and COMPATIBILITY-LEDGER.
+        context.requiresDerivativeUniformityOptOut = true;
     }
     validatePreciseInstruction(instruction, "fragment");
     if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
@@ -1024,6 +1028,7 @@ export function lowerFragmentProgram(program, options = {})
     const bindings = lowerBindingLayout(program, options.bindingPlan);
     const plans = buildSelectionPlans(program, "fragment");
     const varying = computeVaryingValues(program);
+    const context = { requiresDerivativeUniformityOptOut: false };
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));
     const readValueIds = new Set([
         ...program.instructions.flatMap((instruction) =>
@@ -1074,7 +1079,7 @@ export function lowerFragmentProgram(program, options = {})
                     throw new Error(`WGSL fragment has an unmatched ${marker} at instruction ${index}`);
                 }
                 const lowered = lowerInstruction(
-                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds, nonUniform);
+                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds, nonUniform, context);
                 statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
                 continue;
             }
@@ -1300,6 +1305,7 @@ export function lowerFragmentProgram(program, options = {})
         interface: { inputs, outputs },
         bindings,
         immediateConstantBuffer: program.immediateConstantBuffer || null,
+        requiresDerivativeUniformityOptOut: context.requiresDerivativeUniformityOptOut,
         statements
     });
 }
