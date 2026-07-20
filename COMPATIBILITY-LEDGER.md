@@ -54,7 +54,7 @@ storage type per SSA lane (conflicts become `bitpattern32` = `u32`) and every
 crossing emits an explicit `bitcast`. Mixed-component writes (one instruction
 writing lanes of different resolved types) split into per-component `let`s
 (`valueN_x`, …) for immediate movs, structured loads, packed intrinsic
-projections, and per-lane `movc` selects.
+projections, and per-lane `movc` selects — in BOTH stages.
 
 ### SSA-legal cross-scope reads → hoisted function-top `var`s
 

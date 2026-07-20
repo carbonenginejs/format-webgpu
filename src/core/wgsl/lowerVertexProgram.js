@@ -515,6 +515,7 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
         }
         return `${binding.generatedSymbol}[((${address}) * ${strideWords}u) + ${word}u]`;
     });
+    if (type === null) return selected;
     const parts = selected.map((part) => reinterpretCode(part, "uint32", type.scalarType, 1,
         `structured load ${instruction.index}`));
     return vectorCode(parts, type.scalarType);
@@ -665,6 +666,48 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         const mixedTypes = mixedImmediateTypes(program, write);
         if (mixedTypes)
         {
+            if (instruction.opcodeName === "ld_structured" && destination?.typeName === "temp" && !instruction.saturate)
+            {
+                const words = structuredLoadExpression(program, instruction, write, null, inputs, bindings);
+                return Array.from(write.mask).map((component, laneIndex) => ({
+                    kind: "let",
+                    instructionIndex: instruction.index,
+                    dxbcOffset: instruction.dxbcOffset,
+                    name: `${write.valueId}_${component}`,
+                    type: scalarTypeName(mixedTypes[laneIndex]),
+                    expression: {
+                        code: reinterpretCode(words[laneIndex], "uint32", mixedTypes[laneIndex], 1, `structured load ${instruction.index}`),
+                        type: scalarTypeName(mixedTypes[laneIndex])
+                    }
+                }));
+            }
+            const intrinsic = instruction.typeInfo.resultType;
+            if (destination?.typeName === "temp" && scalarTypeName(intrinsic) && instruction.opcodeName !== "mov")
+            {
+                let packedCode = expressionFor(program, instruction, write,
+                    { scalarType: intrinsic, wgslType: fieldType(intrinsic, write.mask.length) }, inputs, bindings);
+                if (instruction.saturate)
+                {
+                    if (intrinsic !== "float32") throw new Error(`WGSL vertex instruction ${instruction.index} saturates a non-float result`);
+                    packedCode = `clamp(${packedCode}, ${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")})`;
+                }
+                const packedName = `${write.valueId}_p`;
+                const packedType = fieldType(intrinsic, write.mask.length);
+                const statements = [ {
+                    kind: "let", instructionIndex: instruction.index, dxbcOffset: instruction.dxbcOffset,
+                    name: packedName, type: packedType, expression: { code: packedCode, type: packedType }
+                } ];
+                Array.from(write.mask).forEach((component, laneIndex) =>
+                {
+                    const laneType = mixedTypes[laneIndex];
+                    const access = write.mask.length === 1 ? packedName : `${packedName}.${COMPONENTS[laneIndex]}`;
+                    statements.push({
+                        kind: "let", name: `${write.valueId}_${component}`, type: scalarTypeName(laneType),
+                        expression: { code: reinterpretCode(access, intrinsic, laneType, 1, `mixed write ${instruction.index}`), type: scalarTypeName(laneType) }
+                    });
+                });
+                return statements;
+            }
             const immediateSource = instruction.operands[1];
             if (instruction.opcodeName !== "mov" || instruction.saturate
                 || destination?.typeName !== "temp" || immediateSource?.typeName !== "immediate32")
