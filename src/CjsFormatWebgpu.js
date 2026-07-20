@@ -404,7 +404,7 @@ export class CjsFormatWebgpu
     static implementationStatus = "partial";
     static format = CEWGPU_FORMAT;
     static analysisFormat = CEWGPU_ANALYSIS_FORMAT;
-    static packageVersion = "0.2.0";
+    static packageVersion = "0.3.0";
 }
 
 export default CjsFormatWebgpu;
