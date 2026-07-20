@@ -196,6 +196,17 @@ handler-only `ult`/`uge` to both stage support sets.
 - **Loop merges** — scalar phis with exactly one entry and one backedge
   incoming; multi-exit loops (several `break` sites feeding distinct post-loop
   merges) are untested beyond the single-breakc corpus shape.
+- **Loop-exit (break-join) merges** — a DXBC loop exited only through `break`
+  edges yields phis at the after-`endloop` join for registers holding different
+  values along different break paths. Each scalar phi becomes a `var` declared
+  before the loop and assigned before every `break` with that break block's true
+  reaching value (from `block.outputValues`, NOT `incoming.blockId`). Supported
+  inputs (fail closed otherwise): an instruction result / program input that
+  dominates the break edge, or this loop's own header phi. NOT yet supported: an
+  input that is a *nested* phi (e.g. a selection merge inside the loop body) —
+  it is declared by another plan, but proving that here needs cross-plan
+  declaration tracking. `ui/ubershader(3d)`, `system/shadowdepth`, and
+  `specialfx/raymarcher` hit the nested-phi case and fail closed pending that.
 - **Switch merges** — break-terminated clauses; at most ONE pass-through
   incoming (a clause that keeps the prior value); a shared-join planner exists
   for `if { switch } endif` joins (fail-closed, currently unexercised by the

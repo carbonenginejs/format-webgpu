@@ -235,6 +235,38 @@ export function inferValueTypes(program)
         }
     }
 
+    // A live value (read by an instruction or feeding a phi) whose type is
+    // otherwise unconstrained — e.g. an immediate `0` that only ever flows
+    // through moves and never reaches a typed use — defaults to raw bitpattern32
+    // bits so it can be emitted. This covers EVERY lane of a live value, not
+    // just the read lane: an emitted multi-lane value needs a type for its dead
+    // lanes too (the vector constructor references all of them). Because moves
+    // union source and destination, the default propagates consistently across
+    // the whole move chain and any phi it feeds. Genuinely dead writes are never
+    // read, keep no constraint (stay `unknown`), and are dropped by the lowerers.
+    const liveValueIds = new Set();
+    for (const instruction of program.instructions)
+    {
+        for (const read of instruction.dataflow.reads)
+        {
+            if (read.kind === "index-read") continue;
+            for (const ref of read.refs) liveValueIds.add(ref.valueId);
+        }
+    }
+    for (const value of program.values)
+    {
+        for (const incoming of value.incoming || []) liveValueIds.add(incoming.valueId);
+    }
+    for (const value of program.values)
+    {
+        if (!liveValueIds.has(value.id)) continue;
+        for (const component of valueComponents(value))
+        {
+            const ref = { valueId: value.id, component };
+            if (!constraints.get(find(ensure(ref))).size) constrain(ref, "bitpattern32");
+        }
+    }
+
     const typeForRef = (ref) =>
     {
         const types = Array.from(constraints.get(find(ensure(ref))));

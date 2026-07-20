@@ -150,6 +150,7 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
     for (const plan of plans.values())
     {
         for (const merge of plan.merges) mergePlans.set(merge.id, { plan, merge });
+        for (const merge of plan.exitMerges || []) mergePlans.set(merge.id, { plan, merge });
     }
     const memo = new Map();
     const visiting = new Set();
@@ -367,7 +368,68 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
         }
         return { id, type: wgslType, zeroCode: zeroForType(type), entryIncoming, backedgeIncoming };
     });
-    return { kind: "loop", region, header, preheaderBlockId, backedgeBlockId: backedgeBlock.id, merges };
+    // Loop-exit (break-join) merges: a DXBC loop is exited only through `break`
+    // edges, so registers holding different values along different break paths
+    // become phis at the after-`endloop` join. Each such scalar phi becomes a
+    // `var` declared before the loop and assigned right before each `break` with
+    // the value the register actually holds on that edge — taken from the break
+    // block's `outputValues` (its true reaching definition), NOT by matching the
+    // phi's `incoming.blockId`, which records the definition block rather than the
+    // break-edge predecessor.
+    const exitJoin = blockForInstruction(program, region.endInstruction + 1);
+    const exitMergeIds = (exitJoin?.mergeSite?.valueIds || []).filter((id) => live.has(id));
+    let exitMerges = [];
+    const exitEdges = new Map();
+    if (exitMergeIds.length)
+    {
+        const breakEdges = (exitJoin.predecessors || []).filter((edge) =>
+            program.blocks.find((block) => block.id === edge.blockId)?.reachable !== false);
+        if (!breakEdges.length || breakEdges.some((edge) => edge.kind !== "break"))
+        {
+            throw new Error(`WGSL ${stage} loop at ${region.startInstruction} has unsupported loop-exit predecessors`);
+        }
+        const perMerge = exitMergeIds.map((id) =>
+        {
+            const value = values.get(id);
+            const type = value?.componentTypes?.[value.writeMask];
+            const wgslType = scalarTypeName(type);
+            if (!value || value.origin !== "control-flow-merge" || value.writeMask.length !== 1
+                || !wgslType || !zeroForType(type)
+                || value.incoming.some((incoming) => incoming.kind !== "predecessor"))
+            {
+                throw new Error(`WGSL ${stage} merge ${id} is not a scalar loop-exit phi`);
+            }
+            return { id, type: wgslType, zeroCode: zeroForType(type), register: value.register, component: value.writeMask };
+        });
+        exitMerges = perMerge.map((merge) => ({ id: merge.id, type: merge.type, zeroCode: merge.zeroCode }));
+        for (const edge of breakEdges)
+        {
+            const block = program.blocks.find((entry) => entry.id === edge.blockId);
+            const assignments = perMerge.map((merge) =>
+            {
+                const ref = (block.outputValues || []).find((output) =>
+                    output.register === merge.register && output.component === merge.component)?.ref;
+                const incomingValue = ref && values.get(ref.valueId);
+                // The value must be in scope where the assignment is injected
+                // before the break. Safe shapes: (a) a directly-emittable source
+                // (instruction result / program input) that dominates the break
+                // edge; or (b) this loop's own header phi, declared as a `var`
+                // before the loop and so in scope at every break. Any other phi is
+                // only declared if some other plan owns it — fail closed.
+                const isLoopHeaderPhi = ref && mergeIds.includes(ref.valueId);
+                if (!ref || !incomingValue || exitMergeIds.includes(ref.valueId)
+                    || incomingValue.origin === "undefined-register"
+                    || (!isLoopHeaderPhi && (incomingValue.origin === "control-flow-merge"
+                        || !definitionDominates(incomingValue, edge.blockId, block.endInstruction + 1, dominators))))
+                {
+                    throw new Error(`WGSL ${stage} merge ${merge.id} has an unsupported loop-exit input`);
+                }
+                return { id: merge.id, type: merge.type, ref: { valueId: ref.valueId, component: ref.component } };
+            });
+            exitEdges.set(block.endInstruction, assignments);
+        }
+    }
+    return { kind: "loop", region, header, preheaderBlockId, backedgeBlockId: backedgeBlock.id, merges, exitMerges, exitEdges };
 }
 
 /**

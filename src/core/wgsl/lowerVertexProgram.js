@@ -887,7 +887,15 @@ export function lowerVertexProgram(program, options = {})
         ...program.values.flatMap((value) => (value.incoming || []).map((incoming) => incoming.valueId))
     ]);
 
-    function lowerRange(start, end, rangeWritten, inLoop = false)
+    function exitMergeAssignments(loopExit, breakIndex)
+    {
+        return (loopExit?.get(breakIndex) || []).map((assign) => ({
+            kind: "value-assignment", name: assign.id, type: assign.type,
+            expression: { code: valueReference(program, assign.ref, inputs), type: assign.type }
+        }));
+    }
+
+    function lowerRange(start, end, rangeWritten, inLoop = false, loopExit = null)
     {
         const statements = [];
         for (let index = start; index < end; index += 1)
@@ -903,6 +911,7 @@ export function lowerVertexProgram(program, options = {})
                     const breakInstruction = program.instructions[index];
                     if (marker === "break")
                     {
+                        statements.push(...exitMergeAssignments(loopExit, breakInstruction.index));
                         statements.push({ kind: "break", instructionIndex: breakInstruction.index, dxbcOffset: breakInstruction.dxbcOffset });
                         continue;
                     }
@@ -922,7 +931,7 @@ export function lowerVertexProgram(program, options = {})
                         instructionIndex: breakInstruction.index,
                         dxbcOffset: breakInstruction.dxbcOffset,
                         condition: { code: `${condition} ${breakInstruction.testBoolean === "zero" ? "==" : "!="} 0u`, type: "bool" },
-                        statements: [ { kind: "break" } ]
+                        statements: [ ...exitMergeAssignments(loopExit, breakInstruction.index), { kind: "break" } ]
                     });
                     continue;
                 }
@@ -977,8 +986,13 @@ export function lowerVertexProgram(program, options = {})
                     statements.push({ kind: "var", name: merge.id, type: merge.type,
                         expression: { code: valueReference(program, merge.entryIncoming, inputs), type: merge.type } });
                 }
+                for (const merge of plan.exitMerges || [])
+                {
+                    statements.push({ kind: "var", name: merge.id, type: merge.type,
+                        expression: { code: merge.zeroCode, type: merge.type } });
+                }
                 const bodyWritten = cloneWritten(rangeWritten);
-                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true);
+                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true, plan.exitEdges);
                 if (body.at(-1)?.kind === "return")
                 {
                     throw new Error(`WGSL vertex loop at ${index} terminates before latch assignments`);
@@ -1020,7 +1034,7 @@ export function lowerVertexProgram(program, options = {})
                 {
                     const clause = plan.clauses[clauseIndex];
                     const clauseWritten = cloneWritten(rangeWritten);
-                    const body = lowerRange(clause.bodyStart, clause.bodyEnd, clauseWritten);
+                    const body = lowerRange(clause.bodyStart, clause.bodyEnd, clauseWritten, false, loopExit);
                     if ((plan.merges.length || plan.outerMerges?.length) && containsOutputAssignment(body))
                     {
                         throw new Error(`WGSL vertex switch at ${index} writes output before a live merge`);
@@ -1095,7 +1109,7 @@ export function lowerVertexProgram(program, options = {})
             const comparison = ifInstruction.testBoolean === "zero" ? "==" : "!=";
             const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
             const trueWritten = cloneWritten(rangeWritten);
-            const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop);
+            const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop, loopExit);
             if (trueStatements.at(-1)?.kind === "return" && plan.merges.length)
             {
                 throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
@@ -1115,7 +1129,7 @@ export function lowerVertexProgram(program, options = {})
             if (plan.hasElse)
             {
                 falseWritten = cloneWritten(rangeWritten);
-                falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop);
+                falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop, loopExit);
                 if (falseStatements.at(-1)?.kind === "return" && plan.merges.length)
                 {
                     throw new Error(`WGSL vertex selection at ${index} terminates before merge assignments`);
