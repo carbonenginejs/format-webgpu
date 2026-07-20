@@ -101,8 +101,8 @@ function fragmentFixture(minor = 0)
             },
             instruction(12, "lt", [
                 register("temp", 0, { mask: "x" }),
-                register("input", 1, { selected: "x" }),
-                register("input", 1, { selected: "x" })
+                immediate([ 0 ]),
+                immediate([ 0x3f800000 ])
             ]),
             { ...instruction(16, "if", [ register("temp", 0, { selected: "x" }) ]), testBoolean: "nonzero" },
             instruction(18, "sample", [
@@ -683,7 +683,10 @@ test("fragment lowering rejects malformed tested-discard metadata", () =>
 test("fragment lowering maps a live SV_Position input to the WebGPU position builtin", () =>
 {
     const decoded = fragmentFixture();
-    decoded.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 0, { selected: "x" });
+    // Make SV_Position (input0) live through a top-level read rather than the
+    // branch condition, so the sample inside the branch stays in uniform
+    // control flow while SV_Position still maps to the position builtin.
+    decoded.instructions.find((entry) => entry.offset === 44).operands[1] = register("input", 0, { swizzle: "xyxx" });
     const shader = CjsFormatWebgpu.buildWgsl(decoded);
 
     assert.match(shader.code, /@builtin\(position\) position: vec4<f32>/);
@@ -741,6 +744,33 @@ test("fragment lowering checks output coverage on each return path", () =>
     const decoded = fragmentFixture();
     decoded.instructions.find((entry) => entry.offset === 33).operands[0].mask = "z";
     assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /leaves w unwritten before return/i);
+});
+
+test("fragment lowering rejects implicit-LOD sampling under a non-uniform branch", () =>
+{
+    // Gating the branch on an interpolated input makes the control flow
+    // non-uniform, where WGSL forbids implicit-LOD sampling.
+    const decoded = fragmentFixture();
+    decoded.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 1, { selected: "x" });
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /sample at instruction \d+ needs uniform control flow/i);
+});
+
+test("fragment lowering rejects derivatives under a non-uniform branch but allows them under a uniform one", () =>
+{
+    // Uniform (immediate-gated) branch: a derivative inside is legal.
+    const uniform = fragmentFixture();
+    const uniformSample = uniform.instructions.find((entry) => entry.offset === 18);
+    uniformSample.opcodeName = "deriv_rtx";
+    uniformSample.operands = [ register("temp", 1, { mask: "yz" }), register("input", 1, { swizzle: "xyxx" }) ];
+    assert.match(CjsFormatWebgpu.buildWgsl(uniform).code, /dpdx\(/);
+
+    // Non-uniform (input-gated) branch: the same derivative is rejected.
+    const nonUniform = fragmentFixture();
+    nonUniform.instructions.find((entry) => entry.offset === 12).operands[1] = register("input", 1, { selected: "x" });
+    const nonUniformSample = nonUniform.instructions.find((entry) => entry.offset === 18);
+    nonUniformSample.opcodeName = "deriv_rtx";
+    nonUniformSample.operands = [ register("temp", 1, { mask: "yz" }), register("input", 1, { swizzle: "xyxx" }) ];
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(nonUniform), /deriv_rtx at instruction \d+ needs uniform control flow/i);
 });
 
 test("fragment lowering rejects live undefined reads and accepts bounded SM5.1 control metadata", () =>

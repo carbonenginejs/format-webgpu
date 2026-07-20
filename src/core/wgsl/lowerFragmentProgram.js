@@ -3,6 +3,7 @@ import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 import { buildSelectionPlans, cloneWritten, terminatesAllPaths } from "./selectionPlans.js";
+import { computeVaryingValues, conditionIsUniform } from "./uniformity.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SUPPORTED_OPCODES = new Set([
@@ -32,6 +33,12 @@ const DERIVATIVES = Object.freeze({
     deriv_rtx_coarse: "dpdxCoarse", deriv_rty_coarse: "dpdyCoarse",
     deriv_rtx_fine: "dpdxFine", deriv_rty_fine: "dpdyFine"
 });
+// Operations that compute screen-space derivatives (the dpdx*/dpdy* family) or
+// derive them internally (implicit-LOD textureSample / textureSampleBias). WGSL
+// forbids these inside non-uniform control flow; see uniformity.js.
+const REQUIRES_UNIFORM_CONTROL_FLOW = new Set([
+    ...Object.keys(DERIVATIVES), "sample", "sample_b"
+]);
 
 function componentsFromMask(mask)
 {
@@ -739,11 +746,15 @@ function applyResultBitcast(instruction, write, expression, type)
         `instruction ${instruction.index} result`);
 }
 
-function lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds)
+function lowerInstruction(program, instruction, inputs, outputs, bindings, written, readValueIds, nonUniform = false)
 {
     if (!SUPPORTED_OPCODES.has(instruction.opcodeName))
     {
         throw new Error(`WGSL fragment opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
+    }
+    if (nonUniform && REQUIRES_UNIFORM_CONTROL_FLOW.has(instruction.opcodeName))
+    {
+        throw new Error(`WGSL fragment ${instruction.opcodeName} at instruction ${instruction.index} needs uniform control flow`);
     }
     validatePreciseInstruction(instruction, "fragment");
     if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
@@ -1012,6 +1023,7 @@ export function lowerFragmentProgram(program, options = {})
     inputs.forEach((input) => validateInterpolation(program, input));
     const bindings = lowerBindingLayout(program, options.bindingPlan);
     const plans = buildSelectionPlans(program, "fragment");
+    const varying = computeVaryingValues(program);
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));
     const readValueIds = new Set([
         ...program.instructions.flatMap((instruction) =>
@@ -1019,7 +1031,7 @@ export function lowerFragmentProgram(program, options = {})
         ...program.values.flatMap((value) => (value.incoming || []).map((incoming) => incoming.valueId))
     ]);
 
-    function lowerRange(start, end, rangeWritten, inLoop = false)
+    function lowerRange(start, end, rangeWritten, inLoop = false, nonUniform = false)
     {
         const statements = [];
         for (let index = start; index < end; index += 1)
@@ -1062,7 +1074,7 @@ export function lowerFragmentProgram(program, options = {})
                     throw new Error(`WGSL fragment has an unmatched ${marker} at instruction ${index}`);
                 }
                 const lowered = lowerInstruction(
-                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds);
+                    program, program.instructions[index], inputs, outputs, bindings, rangeWritten, readValueIds, nonUniform);
                 statements.push(...(Array.isArray(lowered) ? lowered : [ lowered ]));
                 continue;
             }
@@ -1080,7 +1092,7 @@ export function lowerFragmentProgram(program, options = {})
                         expression: { code: valueReference(program, merge.entryIncoming, inputs), type: merge.type } });
                 }
                 const bodyWritten = cloneWritten(rangeWritten);
-                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true);
+                const body = lowerRange(index + 1, plan.region.endInstruction, bodyWritten, true, nonUniform);
                 if (body.at(-1)?.kind === "return")
                 {
                     throw new Error(`WGSL fragment loop at ${index} terminates before latch assignments`);
@@ -1116,13 +1128,14 @@ export function lowerFragmentProgram(program, options = {})
                     statements.push({ kind: "var", name: merge.id, type: merge.type, expression: { code: merge.zeroCode, type: merge.type } });
                 }
                 const selector = operandExpression(program, switchInstruction, 0, "x", 1, "uint32", inputs, bindings);
+                const clauseNonUniform = nonUniform || !conditionIsUniform(switchInstruction, varying);
                 const clauses = [];
                 const clauseResults = [];
                 for (let clauseIndex = 0; clauseIndex < plan.clauses.length; clauseIndex += 1)
                 {
                     const clause = plan.clauses[clauseIndex];
                     const clauseWritten = cloneWritten(rangeWritten);
-                    const body = lowerRange(clause.bodyStart, clause.bodyEnd, clauseWritten);
+                    const body = lowerRange(clause.bodyStart, clause.bodyEnd, clauseWritten, false, clauseNonUniform);
                     if ((plan.merges.length || plan.outerMerges?.length) && containsOutputAssignment(body))
                     {
                         throw new Error(`WGSL fragment switch at ${index} writes output before a live merge`);
@@ -1195,9 +1208,10 @@ export function lowerFragmentProgram(program, options = {})
             }
             const condition = operandExpression(program, ifInstruction, 0, "x", 1, "uint32", inputs, bindings);
             const comparison = ifInstruction.testBoolean === "zero" ? "==" : "!=";
+            const branchNonUniform = nonUniform || !conditionIsUniform(ifInstruction, varying);
             const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
             const trueWritten = cloneWritten(rangeWritten);
-            const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop);
+            const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop, branchNonUniform);
             if (plan.merges.length && containsOutputAssignment(trueStatements))
             {
                 throw new Error(`WGSL fragment selection at ${index} writes output before a live merge`);
@@ -1221,7 +1235,7 @@ export function lowerFragmentProgram(program, options = {})
             if (plan.hasElse)
             {
                 falseWritten = cloneWritten(rangeWritten);
-                falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop);
+                falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop, branchNonUniform);
                 if (plan.merges.length && containsOutputAssignment(falseStatements))
                 {
                     throw new Error(`WGSL fragment selection at ${index} writes output before a live merge`);

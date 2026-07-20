@@ -188,24 +188,43 @@ handler-only `ult`/`uge` to both stage support sets.
   edge kind; guaranteed-output tracking intersects arms.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
-## Known browser-level gaps (package-qualify cannot see)
+## Not supported (fail closed) — uniformity
+
+### Derivatives / implicit-LOD samples in non-uniform control flow
 
 WGSL forbids screen-space derivatives — the `dpdx*`/`dpdy*` family and the
-implicit-LOD samples that derive internally (`textureSample`,
-`textureSampleBias`) — inside **non-uniform** control flow. The package layer
-currently emits these inside `if`/`switch`/`loop` arms unconditionally; the
-browser gate (Tint uniformity analysis) rejects the ones whose branch
-condition is non-uniform (`'dpdxCoarse' must only be called from uniform
-control flow`). So a shader with a derivative under a varying-derived branch
-**package-qualifies but fails the browser gate**. The EVE `stretch` specialfx
-family (`artillery`, `blast`, `laser`, `projectile`) is the known corpus
-instance: their vertex stages now lower (selection-merge fix above), exposing
-this pre-existing fragment incompatibility. The proper fix is a value-provenance
-uniformity analysis that fails these closed at package level (uniform =
-constant-buffer/immediate-derived; non-uniform = interpolated-input/derivative/
-sample-derived). That analysis will also require reworking the sample-in-branch
-unit-test fixtures, which currently encode the permissive behavior. Until then,
-these four are counted package-qualified but are NOT browser-valid.
+implicit-LOD samples that derive internally (`textureSample` /
+`textureSampleBias`) — inside **non-uniform** control flow (a branch whose
+condition can differ between the pixels of a 2x2 quad), because the derivative
+compares neighbor pixels that may not all be present. `src/core/wgsl/
+uniformity.js` tags each SSA value uniform or varying and the fragment lowerer
+fails these operations closed (`WGSL fragment <op> at instruction N needs
+uniform control flow`) when an enclosing branch condition is varying, rather
+than emitting WGSL the browser's Tint uniformity analysis rejects.
+
+Soundness: constant-buffer and immediate operands are not SSA values, so the
+only varying SEEDS are interpolated fragment inputs (`input[N]`, incl.
+`SV_Position`) and per-pixel producers (texture sampling/loading, derivatives).
+A value is varying only if it genuinely derives from one of those — there are
+**no false positives**, so a rejected branch is non-uniform in fact. Loops are
+treated with their enclosing uniformity (a varying `breakc` mid-loop is not yet
+modelled; the browser gate remains the backstop for that rare shape).
+
+Corpus impact: this fails closed 10 EVE `sm_hi` shaders that previously
+package-qualified but were browser-invalid — the `stretch` specialfx family
+(`artillery`, `atomic`, `blast`, `laser`, `projectile`, all `sample_b` under a
+varying branch or `dpdxCoarse` under a varying inner branch) plus `bokeh`,
+`colorlut_preservealpha`, `digiscramble`, `wormholeerosion`, and
+`expandopaque` (auto-`sample` gated on a sampled or interpolated value). Making
+the package count honest, not reducing real coverage.
+
+Recoverable (future): many of these derive the derivative/sample input purely
+from interpolated inputs and constants (verified on `laser`: the derivative
+chain is `dp2`/`sqrt`/`mad` over `input1.xy`), so the operation can be **hoisted
+into uniform control flow** — compute the gradient/sample ahead of the branch
+and convert auto-mip `textureSample` -> `textureSampleGrad` — to recover the
+shader. Cases whose input genuinely depends on branch-local state exploit
+DX11's lenient divergent-derivative behavior and are not portably translatable.
 
 ## Verification contract
 
