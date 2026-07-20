@@ -2,7 +2,7 @@ import { fixedSourceLanes } from "../ir/sourceLanes.js";
 import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
-import { buildSelectionPlans, cloneWritten } from "./selectionPlans.js";
+import { buildSelectionPlans, cloneWritten, terminatesAllPaths } from "./selectionPlans.js";
 
 function containsOutputAssignment(statements)
 {
@@ -281,6 +281,24 @@ function cbufferParts(program, instruction, operandIndex, operand, destinationMa
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
+function icbParts(program, instruction, operandIndex, operand, destinationMask, count, expectedScalarType, inputs, activeComponents = null)
+{
+    if (!program.immediateConstantBuffer?.length)
+    {
+        throw new Error(`WGSL vertex instruction ${instruction.index} has no immediate constant buffer`);
+    }
+    const vectorIndex = cbufferVectorIndex(program, instruction, operandIndex, operand, inputs);
+    const parts = sourceComponents(operand, destinationMask, count, activeComponents)
+        .map((component) => `icb[${vectorIndex}].${component}`);
+    if (expectedScalarType === "float32") return parts;
+    if (![ "int32", "uint32", "bitpattern32" ].includes(expectedScalarType))
+    {
+        throw new Error(`WGSL vertex cannot reinterpret icb lanes as ${expectedScalarType}`);
+    }
+    const target = scalarTypeName(expectedScalarType);
+    return parts.map((part) => `bitcast<${target}>(${part})`);
+}
+
 function applyModifier(parts, operand)
 {
     const modifier = operand.modifierName || "none";
@@ -414,6 +432,10 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     else if (operand.typeName === "constant_buffer")
     {
         parts = cbufferParts(program, instruction, operandIndex, operand, destinationMask, count, bindings, type, inputs, activeComponents);
+    }
+    else if (operand.typeName === "immediate_constant_buffer")
+    {
+        parts = icbParts(program, instruction, operandIndex, operand, destinationMask, count, type, inputs, activeComponents);
     }
     else
     {
@@ -916,6 +938,10 @@ export function lowerVertexProgram(program, options = {})
                         }
                     }
                 }
+                if (terminatesAllPaths(statements))
+                {
+                    return statements;
+                }
                 index = plan.region.endInstruction;
                 continue;
             }
@@ -1013,13 +1039,17 @@ export function lowerVertexProgram(program, options = {})
                     }
                 }
             }
+            if (terminatesAllPaths(statements))
+            {
+                return statements;
+            }
             index = plan.region.endInstruction;
         }
         return statements;
     }
 
     const lowered = lowerRange(0, program.instructions.length, written);
-    if (lowered.at(-1)?.kind !== "return") throw new Error("WGSL vertex path must end in return");
+    if (!terminatesAllPaths(lowered)) throw new Error("WGSL vertex path must end in return");
     const statements = hoistEscapingValues(lowered);
 
     return deepFreeze({
@@ -1031,6 +1061,7 @@ export function lowerVertexProgram(program, options = {})
         entryPoint: "main",
         interface: { inputs, outputs },
         bindings,
+        immediateConstantBuffer: program.immediateConstantBuffer || null,
         statements
     });
 }

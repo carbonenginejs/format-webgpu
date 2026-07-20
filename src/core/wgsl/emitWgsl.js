@@ -21,6 +21,20 @@ function access(base, field, components)
     return `${base}.${field.name}${suffix}`;
 }
 
+function f32Literal(value)
+{
+    const number = value.float32;
+    if (!Number.isFinite(number)) return `bitcast<f32>(0x${(value.uint32 >>> 0).toString(16).padStart(8, "0")}u)`;
+    const text = String(number);
+    return /[.eE]/u.test(text) ? text : `${text}.0`;
+}
+
+function emitImmediateConstantBuffer(lines, rows)
+{
+    const vectors = rows.map((row) => `vec4<f32>(${row.map(f32Literal).join(", ")})`);
+    lines.push(`const icb = array<vec4<f32>, ${rows.length}>(${vectors.join(", ")});`, "");
+}
+
 function emitStruct(lines, name, fields, invariantPosition = false)
 {
     lines.push(`struct ${name}`, "{");
@@ -59,6 +73,7 @@ export function buildWgsl(input, options = {})
     const hasInputs = program.interface.inputs.length > 0;
     if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
     emitStruct(lines, `${prefix}Output`, program.interface.outputs, program.stage === "vertex");
+    if (program.immediateConstantBuffer?.length) emitImmediateConstantBuffer(lines, program.immediateConstantBuffer);
     for (const binding of program.bindings || [])
     {
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);

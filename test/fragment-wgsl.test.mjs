@@ -1129,3 +1129,70 @@ test("fragment lowering splits a mixed-lane movc into per-component selects", ()
     assert.match(shader.code, /let value\d+_x: u32 = select\(/u);
     assert.match(shader.code, /let value\d+_y: f32 = select\(/u);
 });
+
+test("fragment lowering treats a fully-returning if/else as terminal and ignores the dead tail", () =>
+{
+    const color = (r) => immediate([ r, 0, 0, 0x3f800000 ]);
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 3) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(5, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 1, { selected: "x" }),
+                register("input", 1, { selected: "y" })
+            ]),
+            { ...instruction(9, "if", [ register("temp", 0, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(11, "mov", [ register("output", 0, { mask: "xyzw" }), color(0x3f800000) ]),
+            instruction(15, "ret", []),
+            instruction(16, "else", []),
+            instruction(17, "mov", [ register("output", 0, { mask: "xyzw" }), color(0) ]),
+            instruction(21, "ret", []),
+            instruction(22, "endif", []),
+            instruction(23, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-terminal-if" });
+    assert.match(shader.code, /\}\n    else\n    \{/u);
+    assert.equal((shader.code.match(/return output;/gu) || []).length, 2);
+});
+
+test("fragment lowering reads a dynamically indexed immediate constant buffer", () =>
+{
+    const icbOperand = register("immediate_constant_buffer", null, { swizzle: "xyzw" });
+    icbOperand.indices = [ { values: [], relative: register("temp", 0, { selected: "x" }) } ];
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("BLENDINDICES", 1, 1) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "customdata", isDeclaration: true, operands: [],
+                customData: { immediateConstantBuffer: [
+                    [ { uint32: 0x3f800000, float32: 1 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 } ],
+                    [ { uint32: 0, float32: 0 }, { uint32: 0x40000000, float32: 2 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 } ]
+                ] }
+            },
+            {
+                offset: 4, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(6, "ftou", [ register("temp", 0, { mask: "x" }), register("input", 1, { selected: "x" }) ]),
+            instruction(10, "mov", [ register("output", 0, { mask: "xyzw" }), icbOperand ]),
+            instruction(14, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-icb" });
+    assert.match(shader.code, /const icb = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, 0\.0, 0\.0, 0\.0\), vec4<f32>\(0\.0, 2\.0, 0\.0, 0\.0\)\);/u);
+    assert.match(shader.code, /icb\[[^\]]+\]\.x/u);
+});

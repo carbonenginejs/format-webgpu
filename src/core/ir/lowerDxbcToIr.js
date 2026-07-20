@@ -307,6 +307,10 @@ export function lowerDxbcToIr(input, options = {})
     const declarationInstructions = decoded.instructions.filter((instruction) => instruction.isDeclaration);
     const executable = decoded.instructions.filter((instruction) => !instruction.isDeclaration);
     const instructions = executable.map(buildInstruction);
+    const icbInstruction = declarationInstructions.find((instruction) => instruction.customData?.immediateConstantBuffer);
+    const immediateConstantBuffer = icbInstruction
+        ? clonePlain(icbInstruction.customData.immediateConstantBuffer)
+        : null;
     const program = {
         kind: "shader-program",
         format: SHADER_IR_FORMAT,
@@ -331,6 +335,7 @@ export function lowerDxbcToIr(input, options = {})
             operands: clonePlain(instruction.operands || [])
         })),
         bindings: declarationInstructions.map(buildBinding).filter(Boolean),
+        immediateConstantBuffer,
         instructions,
         blocks: buildBlocks(instructions)
     };

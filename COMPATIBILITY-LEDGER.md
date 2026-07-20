@@ -82,6 +82,23 @@ signed variant).
 Compiler-emitted dead stores whose values nothing reads (and whose types are
 therefore unresolvable) are dropped instead of failing the module.
 
+### Terminal control flow → dead tail dropped
+
+An `if`/`else` whose both arms return, or a `switch` with a default whose every
+clause returns, terminates all paths; instructions after it (a trailing
+unreachable `ret`, common after fully-branched Picking/depth outputs) are dead
+and not lowered. Output-completeness is validated only on reachable `ret`s.
+
+### `immediate_constant_buffer` (DXBC icb) → module `const` array
+
+DXBC's inline constant table (`customdata`, dataClass 3) is emitted as a
+module-scope `const icb = array<vec4<f32>, N>(vec4<f32>(...), ...)` with each
+lane a round-tripping f32 decimal literal (non-finite lanes fall back to
+`bitcast<f32>(0x..u)`), and `immediate_constant_buffer` operands lower as
+`icb[<index>].<comp>` reusing the dynamic constant-buffer index machinery
+(pure-relative and base+relative indices both supported), with int/uint
+consumers bitcast exactly like uniform cbuffers.
+
 ## Not supported (fail closed)
 
 - **Globally non-refactorable shaders** (`dcl_global_flags` without

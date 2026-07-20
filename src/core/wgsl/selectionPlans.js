@@ -25,6 +25,33 @@ export function blockForInstruction(program, instructionIndex)
     return program.blocks.find((block) => instructionIndex >= block.startInstruction && instructionIndex <= block.endInstruction) || null;
 }
 
+/**
+ * Whether a lowered statement definitely returns on every path: a `return`, an
+ * `if`/`else` whose both arms terminate, or a `switch` with a default whose
+ * every clause terminates. Code after such a statement is unreachable.
+ *
+ * @param {object[]} statements Lowered statement list.
+ * @returns {boolean} True when the list's last statement terminates all paths.
+ */
+export function terminatesAllPaths(statements)
+{
+    const statement = statements.at(-1);
+    if (!statement) return false;
+    if (statement.kind === "return") return true;
+    if (statement.kind === "if")
+    {
+        return Boolean(statement.elseStatements)
+            && terminatesAllPaths(statement.statements)
+            && terminatesAllPaths(statement.elseStatements);
+    }
+    if (statement.kind === "switch")
+    {
+        return statement.clauses.some((clause) => clause.isDefault)
+            && statement.clauses.every((clause) => terminatesAllPaths(clause.statements));
+    }
+    return false;
+}
+
 function buildDominators(program)
 {
     const reachable = program.blocks.filter((block) => block.reachable !== false);
