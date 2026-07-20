@@ -100,15 +100,18 @@ body. `continue` lowers to `continue;` and `continuec` to `if (cond) { continue;
 still runs the latch each iteration); it simply makes body `continue` correct
 rather than skipping the latch. Both stages.
 
-### Declared-but-unwritten location outputs → zero-filled
+### Declared-but-unwritten location outputs → zero-filled (vertex only)
 
-A vertex/fragment output signature may declare a `location` varying
-(COLOR/TEXCOORD) that a given permutation never writes (e.g. `ui/ubershader3d`
-declares COLOR1/TEXCOORD4 but the default permutation writes neither). D3D
-leaves such lanes undefined; WGSL zero-initializes `var output`, so the
-unwritten lanes read as 0 — a safe, valid choice. Completeness is still enforced
-for **builtin** outputs (`SV_Position` must be fully written; zero is not a
-meaningful position).
+A **vertex** output signature may declare a `location` varying (COLOR/TEXCOORD)
+that a given permutation never writes (e.g. `ui/ubershader3d` declares
+COLOR1/TEXCOORD4 but the default permutation writes neither). D3D leaves such
+lanes undefined; WGSL zero-initializes `var output`, so the unwritten lanes read
+as 0 — a safe, valid choice. Completeness is still enforced for **builtin**
+outputs (`SV_Position` must be fully written; zero is not a meaningful position).
+
+The **fragment** stage does NOT relax this: an unwritten `SV_Target` lane still
+fails closed (an undefined render-target lane is not a safe zero — it feeds
+blending). Only the vertex `ret` completeness check was relaxed.
 
 ### Dead untyped temp writes → skipped
 

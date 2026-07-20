@@ -173,12 +173,21 @@ function liveInputRegisters(program)
 function validateInterpolation(program, input)
 {
     if (input.attribute.kind === "builtin") return;
-    const declaration = program.declarations.find((entry) =>
+    // A merged location field may pack several signature rows onto one register
+    // (component-packed varyings). WGSL interpolation is per-location, not per-
+    // component, so EVERY dcl_input_ps covering this register must agree on the
+    // supported (perspective / "linear") mode — checking only the first row would
+    // let a differing lane render with the wrong interpolation, which the browser
+    // gate cannot detect. Any non-"linear" lane fails closed.
+    const declarations = program.declarations.filter((entry) =>
         entry.opcodeName === "dcl_input_ps" && entry.data?.registerIndex === input.registerIndex);
-    const mode = declaration?.data?.interpolationModeName;
-    if (mode && mode !== "linear")
+    for (const declaration of declarations)
     {
-        throw new Error(`WGSL fragment input r${input.registerIndex} has unsupported interpolation ${mode}`);
+        const mode = declaration.data?.interpolationModeName;
+        if (mode && mode !== "linear")
+        {
+            throw new Error(`WGSL fragment input r${input.registerIndex} has unsupported interpolation ${mode}`);
+        }
     }
 }
 
