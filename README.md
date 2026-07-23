@@ -145,7 +145,7 @@ executable or comparison implementation.
 Do not use the format-local command to acquire or rebuild an indexed EVE or
 Frontier corpus. Agents producing packages for an engine, harness, build report,
 or persistent resource overlay must run the canonical tools-core builder from
-`E:\carbonenginejs-org\tools-core`:
+the `@carbonenginejs/tools-core` package:
 
 ```powershell
 npm.cmd run build:shader:webgpu -- --shader-target eve-webgpu --build latest --out <output>
@@ -277,8 +277,8 @@ WGSL slice:
 
 ```powershell
 npm.cmd run package:effect -- `
-  E:\path\quadv5.sm_lo `
-  E:\path\quadv5-main.cewgpu `
+  path/to/quadv5.sm_lo `
+  path/to/quadv5-main.cewgpu `
   --permutation BINDLESS_RENDERING=BINDLESS_RENDERING_DISABLED `
   --permutation SPACE_OBJECT_CLIPPING=SOC_DISABLED `
   --permutation SPACE_OBJECT_PPT_ENABLED=SOPPT_ENABLED `
@@ -308,7 +308,7 @@ To qualify a paired DX11/DX12 corpus without treating expected WGSL emitter
 boundaries as front-end failures:
 
 ```powershell
-npm.cmd run qualify:effects -- E:\path\effect.dx11 E:\path\effect.dx12
+npm.cmd run qualify:effects -- path/to/effect.dx11 path/to/effect.dx12
 ```
 
 The corpus qualifier resolves the default permutation of each paired file. To
@@ -316,7 +316,7 @@ exercise every mixed-radix permutation body, every declared technique, and
 every active pass in one exact DX11/DX12 pair, use the pass-global matrix gate:
 
 ```powershell
-npm.cmd run qualify:matrix -- --summary --output E:\path\matrix.json E:\path\dx11\effect.sm_lo E:\path\dx12\effect.sm_lo
+npm.cmd run qualify:matrix -- --summary --output path/to/matrix.json path/to/dx11/effect.sm_lo path/to/dx12/effect.sm_lo
 ```
 
 The matrix runner parses each effect once, compares permutation axes and active
