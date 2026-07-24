@@ -21,6 +21,20 @@ function sampleCoordinateLanes(instruction, program)
         : XY;
 }
 
+function loadAddressLanes(instruction, program)
+{
+    const resource = instruction.operands?.[2];
+    if (!program || !resource) return null;
+    const reference = resource.resourceReference;
+    const binding = (program.bindings || []).find((entry) => entry.resourceKind === "sampled-resource"
+        && (reference?.rangeId !== null && reference?.rangeId !== undefined
+            ? entry.range?.rangeId === reference.rangeId
+            : entry.registerIndex === resource.registerIndex));
+    if (binding?.resourceDimension === "buffer") return [ "x" ];
+    if (binding?.resourceDimension === "texture2d") return [ "x", "y", "w" ];
+    return null;
+}
+
 /**
  * Returns intrinsic source-lane positions for instructions whose inputs are
  * independent of the destination write mask.
@@ -34,6 +48,7 @@ export function fixedSourceLanes(instruction, operandIndex, program = null)
 {
     const dot = DOT_LANES[instruction.opcodeName];
     if (dot && operandIndex > 0) return dot;
+    if (instruction.opcodeName === "ld" && operandIndex === 1) return loadAddressLanes(instruction, program);
     if (instruction.opcodeName === "ld_structured" && operandIndex === 1) return [ "x" ];
     if ([ "sample", "sample_b", "sample_c", "sample_c_lz", "sample_d", "sample_l", "gather4" ]
         .includes(instruction.opcodeName))

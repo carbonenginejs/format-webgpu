@@ -311,6 +311,9 @@ function buildInstruction(instruction, index)
         ...(instruction.opcodeName === "resinfo"
             ? { resinfoReturnTypeName: instruction.resinfoReturnTypeName || "float" }
             : {}),
+        ...(instruction.extensions?.length
+            ? { extensions: clonePlain(instruction.extensions) }
+            : {}),
         operands: clonePlain(instruction.operands || [])
     };
 }

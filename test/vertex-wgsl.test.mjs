@@ -434,16 +434,19 @@ test("structured skinning lowers signed indices and typeless SRV words for SM5.0
     assert.match(dx11.code, /let (value\d+): u32 = bitcast<u32>\(\(bitcast<i32>\(input\.input1\.x\) \+ bitcast<i32>\(cb3\[26\]\.x\)\)\);/u);
     const index = /let (value\d+): u32 = bitcast<u32>/u.exec(dx11.code)?.[1];
     assert(index);
-    assert.match(dx11.code, new RegExp(`bitcast<f32>\\(t0\\[\\(\\(${index}\\) \\* 12u\\) \\+ 4u\\]\\)`, "u"));
-    assert.match(dx11.code, new RegExp(`bitcast<f32>\\(t0\\[\\(\\(${index}\\) \\* 12u\\) \\+ 6u\\]\\)`, "u"));
-    assert.match(dx11.code, new RegExp(`bitcast<f32>\\(t0\\[\\(\\(${index}\\) \\* 12u\\) \\+ 5u\\]\\)`, "u"));
+    assert.match(dx11.code, new RegExp(`min\\(\\(\\(${index}\\) \\* 12u\\) \\+ 4u, arrayLength\\(&t0\\) - 1u\\)`, "u"));
+    assert.match(dx11.code, new RegExp(`min\\(\\(\\(${index}\\) \\* 12u\\) \\+ 6u, arrayLength\\(&t0\\) - 1u\\)`, "u"));
+    assert.match(dx11.code, new RegExp(`min\\(\\(\\(${index}\\) \\* 12u\\) \\+ 5u, arrayLength\\(&t0\\) - 1u\\)`, "u"));
+    assert.match(dx11.code,
+        new RegExp(`${index} < \\(arrayLength\\(&t0\\) / 12u\\)`, "u"));
+    assert.match(dx11.code, /bitcast<f32>\(select\(0u, t0\[min\(/u);
 });
 
 test("structured skinning applies source swizzles before partial destination masks", () =>
 {
     const shader = CjsFormatWebgpu.buildWgsl(structuredSkinningVertex(0, { mask: "x", swizzle: "zzzz" }));
 
-    assert.match(shader.code, /let value\d+: f32 = bitcast<f32>\(t0\[\(\(value\d+\) \* 12u\) \+ 6u\]\);/u);
+    assert.match(shader.code, /let value\d+: f32 = bitcast<f32>\(select\(0u, t0\[min\(/u);
 });
 
 test("structured skinning requires complete vector result reinterpretation metadata", () =>
@@ -470,7 +473,7 @@ test("structured skinning lowers precise transport operations and rejects precis
 
     const partial = structuredClone(CjsFormatWebgpu.buildShaderIr(decoded));
     partial.instructions.find((entry) => entry.opcodeName === "ld_structured").preciseMask = "xz";
-    assert.match(CjsFormatWebgpu.buildWgsl(partial).code, /bitcast<f32>\(t0\[/u);
+    assert.match(CjsFormatWebgpu.buildWgsl(partial).code, /bitcast<f32>\(select\(0u, t0\[min\(/u);
 
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(decoded, { precisionPolicy: "relaxed" }),
@@ -1104,7 +1107,19 @@ test("vertex lowering loads typed float4 buffer SRVs as read-only storage arrays
         hasDynamicOffset: false,
         minBindingSize: 16
     });
-    assert.match(shader.code, /select\(vec4<f32>\(\), t0\[0x00000001u\], 0x00000001u < arrayLength\(&t0\)\)/u);
+    assert.match(shader.code,
+        /select\(vec4<f32>\(\), t0\[min\(0x00000001u, arrayLength\(&t0\) - 1u\)\], 0x00000001u < arrayLength\(&t0\)\)/u);
+
+    program.instructions[2].extensions = [ {
+        token: 1,
+        type: 1,
+        typeName: "sample_controls",
+        sampleOffsets: { u: 1, v: 0, w: 0 }
+    } ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-typed-buffer-extended-ld" }),
+        /load instruction \d+ opcode extensions are not supported/u
+    );
 });
 
 test("vertex lowering fails closed on ld from texture resources", () =>

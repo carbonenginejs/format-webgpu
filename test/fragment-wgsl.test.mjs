@@ -1205,7 +1205,9 @@ test("fragment lowering emits resinfo and texel loads for 2d textures", () =>
     };
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-ld" });
     assert.match(shader.code, /textureDimensions\(t0, 0\)/u);
-    assert.match(shader.code, /textureLoad\(t0, .*\.xy, .*\.z\)/u);
+    assert.match(shader.code, /select\(vec4<f32>\(\), textureLoad\(t0, min\(/u);
+    assert.match(shader.code, /textureNumLevels\(t0\) - 1u/u);
+    assert.match(shader.code, /&& all\(/u);
 });
 
 test("fragment resinfo guards out-of-range mips and keeps rcpfloat mip counts unchanged", () =>
@@ -1235,6 +1237,34 @@ test("fragment resinfo guards out-of-range mips and keeps rcpfloat mip counts un
     assert.match(shader.code, /1\.0 \/ f32\(select\(0u, textureDimensions/u);
     assert.match(shader.code, /f32\(textureNumLevels\(t0\)\)/u);
     assert.doesNotMatch(shader.code, /1\.0 \/ f32\(textureNumLevels\(t0\)\)/u);
+});
+
+test("fragment partial texture ld takes its mip from the original address w lane", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            instruction(4, "ld", [
+                register("temp", 0, { mask: "x" }),
+                immediate([ 1, 2, 3, 4 ]),
+                register("resource", 0, { swizzle: "xyzw" })
+            ]),
+            instruction(9, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 0, { swizzle: "xxxx" })
+            ]),
+            instruction(13, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-ld-mip-lane" });
+    assert.match(shader.code, /vec3<u32>\(0x00000001u, 0x00000002u, 0x00000004u\)/u);
+    assert.doesNotMatch(shader.code, /0x00000003u/u);
 });
 
 test("fragment resinfo rejects malformed mip operands and return types", () =>
@@ -1497,7 +1527,22 @@ test("fragment lowering loads typed float4 buffer SRVs as read-only storage arra
         minBindingSize: 16
     });
     assert.match(shader.code, /@group\(0\) @binding\(0\) var<storage, read> t0: array<vec4<f32>>;/u);
-    assert.match(shader.code, /select\(vec4<f32>\(\), t0\[0x00000003u\], 0x00000003u < arrayLength\(&t0\)\)\.yzwx/u);
+    assert.match(shader.code,
+        /select\(vec4<f32>\(\), t0\[min\(0x00000003u, arrayLength\(&t0\) - 1u\)\], 0x00000003u < arrayLength\(&t0\)\)\.yzwx/u);
+
+    const sampleControls = {
+        token: 1,
+        type: 1,
+        typeName: "sample_controls",
+        sampleOffsets: { u: 1, v: 0, w: 0 }
+    };
+    program.instructions[2].extensions = [ sampleControls ];
+    const load = CjsFormatWebgpu.buildShaderIr(program).instructions.find((entry) => entry.opcodeName === "ld");
+    assert.deepEqual(load.extensions, [ sampleControls ]);
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-extended-ld" }),
+        /load instruction \d+ opcode extensions are not supported/u
+    );
 });
 
 test("fragment lowering loads typed uint4 buffer SRVs with uint storage typing", () =>
@@ -1526,7 +1571,8 @@ test("fragment lowering loads typed uint4 buffer SRVs with uint storage typing",
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-uint-ld" });
     const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "t0");
     assert.equal(binding.type, "array<vec4<u32>>");
-    assert.match(shader.code, /select\(vec4<u32>\(\), t0\[0x00000002u\], 0x00000002u < arrayLength\(&t0\)\)/u);
+    assert.match(shader.code,
+        /select\(vec4<u32>\(\), t0\[min\(0x00000002u, arrayLength\(&t0\) - 1u\)\], 0x00000002u < arrayLength\(&t0\)\)/u);
 });
 
 test("fragment lowering fails closed on unsupported typed-buffer element types", () =>

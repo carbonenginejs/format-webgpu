@@ -263,8 +263,9 @@ integer-storage case vkd3d left as a FIXME.
 ### `rcp` → ordinary f32 division
 
 DXBC `rcp` is a reduced-precision component-wise reciprocal; its maximum
-relative error is 2^-21. It lowers to `1.0 / x`, whose result for a finite,
-normal, non-zero f32 is at least as accurate under WGSL's rounding rules.
+relative error is 2^-21. It lowers to `1.0 / x`. For a finite, normal,
+non-zero f32 with `abs(x)` in `[2^-126, 2^126]`, WGSL gives f32 division a
+maximum error of 2.5 ULP, which satisfies that DXBC accuracy allowance.
 
 The special-value contract is adapted. D3D specifies signed infinities for
 signed-zero and subnormal inputs, signed zero for infinities, and NaN for NaN.
@@ -294,11 +295,18 @@ only — WebGPU vertex-stage storage buffers are read-only), and `atomic_iadd`
 becomes a bounds-guarded statement:
 `if (i < arrayLength(&uN)) { atomicAdd(&uN[i], v); }`. The guard reproduces
 D3D's defined behavior — out-of-bounds typed-UAV atomics are dropped — where
-an unguarded WGSL access would clamp onto a live element. The result-returning
-form (`imm_atomic_iadd`), other atomic opcodes, and non-uint or non-buffer
-UAV shapes fail closed. The same engine contract as typed SRV buffers applies:
-the buffer binds as storage, elements are raw 4-byte u32 words, and no DXGI
-view-format conversion is reproduced.
+an unguarded WGSL access could target a live element or otherwise raise a
+dynamic error. The result-returning form (`imm_atomic_iadd`), other atomic
+opcodes, and non-uint or non-buffer UAV shapes fail closed. The same engine
+contract as typed SRV buffers applies: the buffer binds as storage, elements
+are raw 4-byte u32 words, and no DXGI view-format conversion is reproduced.
+*Checked against vkd3d-shader:* `spirv_compiler_emit_atomic_instruction`
+(spirv.c) emits the corresponding SPIR-V atomic through a directly computed
+buffer/image pointer with no explicit bounds branch. Any out-of-bounds behavior
+is therefore delegated to the Vulkan robustness features available at runtime;
+that path does not itself confirm D3D's exact drop result. This compiler
+implements the D3D result independently with an explicit statement-level
+guard.
 
 ### `float_16` minimum precision → full-precision f32
 
@@ -321,10 +329,12 @@ this compiler does not promote either.
 WGSL has no texel-buffer type, so a `dcl_resource` with dimension `buffer`
 lowers to `var<storage, read> tN: array<vec4<f32>>` (float4 elements) or
 `array<vec4<u32>>` (uint4 elements), and `ld` on it becomes a guarded element
-fetch: `select(vec4<T>(), tN[i], i < arrayLength(&tN))` — reproducing D3D's
-defined out-of-bounds-returns-zero exactly instead of inheriting WGSL's
-clamped-index behavior. Both stages support the load (this is also the first
-vertex-stage `ld`; texture `ld` remains fragment-only).
+fetch:
+`select(vec4<T>(), tN[min(i, arrayLength(&tN) - 1u)], i < arrayLength(&tN))`.
+The in-range clamp makes the eagerly evaluated load valid before zero is
+selected, reproducing D3D's defined out-of-bounds result without triggering
+WGSL's invalid-memory-reference behavior. Both stages support the load (this
+is also the first vertex-stage `ld`; texture `ld` remains fragment-only).
 
 The deliberate divergence is the engine contract: D3D typed buffers convert
 through the *bound view's* DXGI format in hardware (an `R8G8B8A8_UNORM` view
@@ -387,7 +397,11 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
   `textureDimensions` result. `_rcpFloat` reciprocates only dimensions, never
   the mip count; its specified infinity for zero dimensions shares the
   non-finite WGSL limitation documented for `rcp` above. Unknown return-type
-  encodings fail closed. Widen per dimension when a shader needs it.
+  encodings fail closed. D3D's zero result for an unbound resource is outside
+  this shader mapping: WebGPU requires every declared binding, and the engine
+  rejects a missing caller resource; callers must bind an explicit fallback
+  texture when that behavior is needed. Widen per dimension when a shader
+  needs it.
   *Confirmed against vkd3d-shader:* `spirv_compiler_emit_resinfo` (spirv.c)
   emits image-size and mip-level-count queries, pads missing dimension
   components with zero, and converts the uint vector to float for the ordinary
@@ -395,10 +409,35 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
   follows the D3D contract independently. vkd3d also issues the size query
   directly, so our explicit clamped-query/zero-select is the WGSL-specific
   guard needed to preserve D3D's defined out-of-range result.
-- **`ld`** — 2D textures (fragment only; address layout xy=texel/z=mip, u32
-  coordinates) and typed buffers (both stages; scalar u32 element index).
+- **`ld`** — 2D textures (fragment only; original address lanes xy=texel and
+  w=mip, packed into a three-lane u32 WGSL address) and typed buffers (both
+  stages; scalar u32 element index).
+  Texture coordinates and mip are clamped to a valid texel for the eagerly
+  evaluated `textureLoad`, then the result is selected to zero unless the
+  original address was fully in range. This excludes WGSL's otherwise
+  permitted live in-bounds texel result for an invalid logical texel address.
+  The zero vector is exact under the current engine contract that these
+  bindings use four-component views (`rgba8unorm` or `rgba8unorm-srgb` today).
+  DXBC's resource declaration does not encode the bound view's channel count;
+  supporting a future one- or two-component view would require view-format
+  metadata to reproduce D3D's missing-component defaults (normally alpha one).
+  Immediate-offset opcode extensions are preserved by the shader IR but fail
+  closed until signed offset addition and its bounds interaction are lowered.
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar
-  address, fixed (non-relative) resource operands.
+  address, fixed (non-relative) resource operands. Every word fetch is clamped
+  to valid storage-buffer memory and selected to zero when the structure index
+  is outside `arrayLength / stride`. Offset-plus-swizzle accesses beyond the
+  declared stride fail closed, so D3D's undefined byte-offset-overrun case is
+  never emitted.
+  *Checked against vkd3d-shader:* `spirv_compiler_emit_ld` loads texture
+  coordinates from the resource-dimensional coordinate mask, takes LOD
+  separately from source lane w, and emits `OpImageFetch` directly, while
+  raw/structured buffer loads use direct image reads or storage-buffer access
+  chains. There is no compiler-inserted bounds guard; any out-of-bounds
+  behavior is delegated to the Vulkan robustness features available at
+  runtime, which does not itself confirm D3D's exact zero result. The explicit
+  WGSL clamps and selects above implement that D3D result independently,
+  without relying on an implementation-chosen invalid-access outcome.
 - **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`;
   `f32tof16` keeps only the low 16 bits (DXBC contract).
 - **`udiv` (both stages)** — quotient and remainder lower to WGSL `u32`

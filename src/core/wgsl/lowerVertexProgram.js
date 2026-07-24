@@ -597,6 +597,9 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
         throw new Error(`WGSL vertex structured load ${instruction.index} has a non-DWORD byte offset`);
     }
     const swizzle = sourceComponents(resource, write.mask, count);
+    const symbol = binding.generatedSymbol;
+    const wordCount = `arrayLength(&${symbol})`;
+    const addressInRange = `${address} < (${wordCount} / ${strideWords}u)`;
     const selected = swizzle.map((component) =>
     {
         const index = COMPONENTS.indexOf(component);
@@ -605,7 +608,9 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
         {
             throw new Error(`WGSL vertex structured load ${instruction.index} exceeds its ${binding.structureStride}-byte stride`);
         }
-        return `${binding.generatedSymbol}[((${address}) * ${strideWords}u) + ${word}u]`;
+        const wordAddress = `((${address}) * ${strideWords}u) + ${word}u`;
+        const safeWordAddress = `min(${wordAddress}, ${wordCount} - 1u)`;
+        return `select(0u, ${symbol}[${safeWordAddress}], ${addressInRange})`;
     });
     if (type === null) return selected;
     const parts = selected.map((part) => reinterpretCode(part, "uint32", type.scalarType, 1,
@@ -700,11 +705,13 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
             throw new Error(`WGSL vertex load instruction ${instruction.index} resource shape is not supported; only typed buffers are supported`);
         }
         // Typed Buffer SRV: storage-array element fetch. D3D ld returns
-        // zero out of bounds; select reproduces that exactly (WGSL clamps).
+        // zero out of bounds. Clamp the eagerly evaluated WGSL load itself
+        // before selecting zero so no invalid memory reference is formed.
         const element = bufferBinding.type.slice("array<".length, -1);
         const address = source(1, 1);
         const symbol = bufferBinding.generatedSymbol;
-        const loaded = `select(${element}(), ${symbol}[${address}], ${address} < arrayLength(&${symbol}))`;
+        const length = `arrayLength(&${symbol})`;
+        const loaded = `select(${element}(), ${symbol}[min(${address}, ${length} - 1u)], ${address} < ${length})`;
         const components = sourceComponents(resource, write.mask, count);
         return count === 4 && components.join("") === "xyzw" ? loaded : `${loaded}.${components.join("")}`;
     }
@@ -774,6 +781,11 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     if (!SUPPORTED_OPCODES.has(instruction.opcodeName))
     {
         throw new Error(`WGSL vertex opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
+    }
+    if (instruction.opcodeName === "ld" && instruction.extensions?.some((extension) =>
+        ![ "resource_dimension", "resource_return_type" ].includes(extension.typeName)))
+    {
+        throw new Error(`WGSL vertex load instruction ${instruction.index} opcode extensions are not supported`);
     }
     validatePreciseInstruction(instruction, "vertex");
     const imprecise = instruction.operands.find(unsupportedMinPrecision);

@@ -670,6 +670,9 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
     }
     const strideWords = binding.structureStride / 4;
     const firstWord = byteOffset / 4;
+    const symbol = binding.generatedSymbol;
+    const wordCount = `arrayLength(&${symbol})`;
+    const addressInRange = `${address} < (${wordCount} / ${strideWords}u)`;
     const swizzle = rawSelectedComponents(resource, write.mask, count);
     const selected = swizzle.map((component) =>
     {
@@ -679,7 +682,9 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
         {
             throw new Error(`WGSL fragment structured load ${instruction.index} exceeds its ${binding.structureStride}-byte stride`);
         }
-        return `${binding.generatedSymbol}[((${address}) * ${strideWords}u) + ${word}u]`;
+        const wordAddress = `((${address}) * ${strideWords}u) + ${word}u`;
+        const safeWordAddress = `min(${wordAddress}, ${wordCount} - 1u)`;
+        return `select(0u, ${symbol}[${safeWordAddress}], ${addressInRange})`;
     });
     if (type === null) return selected;
     const parts = selected.map((part) => reinterpretCode(part, "uint32", type.scalarType, 1,
@@ -842,16 +847,24 @@ function expressionFor(program, instruction, write, inputs, bindings)
         if (textureBinding.buffer && !Number.isInteger(textureBinding.structureStride))
         {
             // Typed Buffer SRV: storage-array element fetch. D3D ld returns
-            // zero out of bounds; select reproduces that exactly (WGSL clamps).
+            // zero out of bounds. Clamp the eagerly evaluated WGSL load itself
+            // before selecting zero so no invalid memory reference is formed.
             const element = textureBinding.type.slice("array<".length, -1);
             const address = source(1, 1);
             const symbol = textureBinding.generatedSymbol;
-            loaded = `select(${element}(), ${symbol}[${address}], ${address} < arrayLength(&${symbol}))`;
+            const length = `arrayLength(&${symbol})`;
+            loaded = `select(${element}(), ${symbol}[min(${address}, ${length} - 1u)], ${address} < ${length})`;
         }
         else if (textureBinding.texture?.viewDimension === "2d")
         {
             const address = source(1, 3);
-            loaded = `textureLoad(${textureBinding.generatedSymbol}, ${address}.xy, ${address}.z)`;
+            const symbol = textureBinding.generatedSymbol;
+            const mipCount = `textureNumLevels(${symbol})`;
+            const safeLevel = `min(${address}.z, ${mipCount} - 1u)`;
+            const dimensions = `textureDimensions(${symbol}, ${safeLevel})`;
+            const safeCoordinates = `min(${address}.xy, ${dimensions} - vec2<u32>(1u))`;
+            const inBounds = `${address}.z < ${mipCount} && all(${address}.xy < ${dimensions})`;
+            loaded = `select(vec4<f32>(), textureLoad(${symbol}, ${safeCoordinates}, ${safeLevel}), ${inBounds})`;
         }
         else
         {
@@ -917,6 +930,11 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     if (!SUPPORTED_OPCODES.has(instruction.opcodeName))
     {
         throw new Error(`WGSL fragment opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
+    }
+    if (instruction.opcodeName === "ld" && instruction.extensions?.some((extension) =>
+        ![ "resource_dimension", "resource_return_type" ].includes(extension.typeName)))
+    {
+        throw new Error(`WGSL fragment load instruction ${instruction.index} opcode extensions are not supported`);
     }
     if (nonUniform && REQUIRES_UNIFORM_CONTROL_FLOW.has(instruction.opcodeName) && context)
     {
