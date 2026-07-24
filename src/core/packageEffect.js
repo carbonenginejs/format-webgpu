@@ -218,9 +218,9 @@ function normalizeSelection(value)
     }
 
     if (!Array.isArray(stageNames)
-        || stageNames.some((stageName) => ![ "vertex", "pixel" ].includes(stageName)))
+        || stageNames.some((stageName) => ![ "vertex", "pixel", "compute" ].includes(stageName)))
     {
-        throw new TypeError("Effect stage selection supports only vertex and pixel stageNames");
+        throw new TypeError("Effect stage selection supports only vertex, pixel, and compute stageNames");
     }
 
     if (stageNames.length && passIndex === null)

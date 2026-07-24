@@ -9,7 +9,7 @@ import {
 export { buildWgslSelectionMetadata, validateResolvedPermutation };
 export const selectPackageEffectStages = selectEffectStages;
 
-const STAGE_NAMES = new Set([ "vertex", "pixel" ]);
+const STAGE_NAMES = new Set([ "vertex", "pixel", "compute" ]);
 const PERMUTATION_PATTERN = /^([^=\s]+)=([^=\s]+)$/u;
 
 function requireValue(args, index, flag)
@@ -96,7 +96,7 @@ export function parsePackageEffectArguments(args)
     }
     if (positionals.length !== 2)
     {
-        throw new Error("Usage: node scripts/package-effect.js <input.sm_*> <output.cewgpu> [--overwrite|--force] [--permutation NAME=VALUE ...] [--technique <name> [--pass <index> [--stage vertex --stage pixel]]]");
+        throw new Error("Usage: node scripts/package-effect.js <input.sm_*> <output.cewgpu> [--overwrite|--force] [--permutation NAME=VALUE ...] [--technique <name> [--pass <index> [--stage vertex --stage pixel|compute]]]");
     }
     if (passIndex !== null && techniqueName === null) throw new Error("--pass requires --technique");
     if (stageNames.length && (techniqueName === null || passIndex === null))

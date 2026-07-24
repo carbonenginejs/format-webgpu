@@ -1,4 +1,5 @@
 import { lowerDxbcToIr } from "../ir/lowerDxbcToIr.js";
+import { lowerComputeProgram } from "./lowerComputeProgram.js";
 import { lowerFragmentProgram } from "./lowerFragmentProgram.js";
 import { lowerVertexProgram } from "./lowerVertexProgram.js";
 
@@ -82,9 +83,14 @@ export function buildWgsl(input, options = {})
         throw new TypeError("WGSL precisionPolicy is not supported; precise controls require exact lowering");
     }
     const ir = input?.format === "CJS_SHADER_IR" ? input : lowerDxbcToIr(input, options);
-    const program = ir.stage === "vertex" ? lowerVertexProgram(ir, options) : lowerFragmentProgram(ir, options);
+    let program;
+    if (ir.stage === "vertex") program = lowerVertexProgram(ir, options);
+    else if (ir.stage === "pixel") program = lowerFragmentProgram(ir, options);
+    else if (ir.stage === "compute") program = lowerComputeProgram(ir, options);
+    else throw new Error(`WGSL lowering does not support the ${ir.stage || "unknown"} shader stage`);
     const lines = [];
     const sourceMap = [];
+    const compute = program.stage === "compute";
     const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
     if (program.requiresDerivativeUniformityOptOut)
     {
@@ -96,9 +102,11 @@ export function buildWgsl(input, options = {})
         // derivatives there, exactly as under D3D11.
         lines.push("diagnostic(off, derivative_uniformity);", "");
     }
-    const hasInputs = program.interface.inputs.length > 0;
-    if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
-    emitStruct(lines, `${prefix}Output`, program.interface.outputs, program.stage === "vertex");
+    const interfaceInputs = compute ? [] : program.interface.inputs;
+    const interfaceOutputs = compute ? [] : program.interface.outputs;
+    const hasInputs = interfaceInputs.length > 0;
+    if (hasInputs) emitStruct(lines, `${prefix}Input`, interfaceInputs);
+    if (!compute) emitStruct(lines, `${prefix}Output`, interfaceOutputs, program.stage === "vertex");
     if (program.immediateConstantBuffer?.length) emitImmediateConstantBuffer(lines, program.immediateConstantBuffer);
     if (program.constTables?.length) emitConstTables(lines, program.constTables);
     for (const binding of program.bindings || [])
@@ -106,11 +114,24 @@ export function buildWgsl(input, options = {})
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);
     }
     if (program.bindings?.length) lines.push("");
-    const parameters = hasInputs ? `input: ${prefix}Input` : "";
-    lines.push(`@${program.stage}`, `fn ${program.entryPoint}(${parameters}) -> ${prefix}Output`, "{", `    var output: ${prefix}Output;`);
+    if (compute)
+    {
+        const size = program.threadGroupSize;
+        if (!Array.isArray(size) || size.length !== 3
+            || size.some((value) => !Number.isSafeInteger(value) || value < 1))
+        {
+            throw new Error("WGSL compute lowering requires a positive three-dimensional threadGroupSize");
+        }
+        lines.push(`@compute @workgroup_size(${size.join(", ")})`, `fn ${program.entryPoint}()`, "{");
+    }
+    else
+    {
+        const parameters = hasInputs ? `input: ${prefix}Input` : "";
+        lines.push(`@${program.stage}`, `fn ${program.entryPoint}(${parameters}) -> ${prefix}Output`, "{", `    var output: ${prefix}Output;`);
+    }
 
-    const inputById = new Map(program.interface.inputs.map((field) => [ field.id, field ]));
-    const outputById = new Map(program.interface.outputs.map((field) => [ field.id, field ]));
+    const inputById = new Map(interfaceInputs.map((field) => [ field.id, field ]));
+    const outputById = new Map(interfaceOutputs.map((field) => [ field.id, field ]));
 
     function emitStatement(statement, depth)
     {
@@ -118,6 +139,7 @@ export function buildWgsl(input, options = {})
         const line = lines.length + 1;
         if (statement.kind === "assignment")
         {
+            if (compute) throw new Error("WGSL compute lowering cannot emit a render-interface assignment");
             const targetField = outputById.get(statement.target.fieldId);
             if (statement.expression.fieldId)
             {
@@ -145,7 +167,7 @@ export function buildWgsl(input, options = {})
         }
         else if (statement.kind === "return")
         {
-            lines.push(`${indent}return output;`);
+            lines.push(compute ? `${indent}return;` : `${indent}return output;`);
         }
         else if (statement.kind === "discard")
         {
@@ -229,6 +251,7 @@ export function buildWgsl(input, options = {})
         entryPoint: program.entryPoint,
         code: lines.join("\n"),
         sourceMap,
+        ...(compute ? { threadGroupSize: program.threadGroupSize } : {}),
         program
     });
 }

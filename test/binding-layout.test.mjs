@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import CjsFormatWebgpu from "../src/index.js";
+import { lowerComputeBindingLayout } from "../src/core/wgsl/lowerComputeProgram.js";
 import { lowerBindingLayout } from "../src/core/wgsl/lowerBindingLayout.js";
 
 function range(minor, registerSpace = 0)
@@ -98,6 +99,36 @@ function structuredVertexBinding(minor, stride = 48)
         program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: minor },
         instructions: [
             declaration(3, "dcl_resource_structured", "resource", { structureStride: stride }, minor),
+            { offset: 20, opcode: 62, opcodeName: "ret", isDeclaration: false, operands: [] }
+        ]
+    };
+}
+
+function computeTypedBuffers()
+{
+    const handle = (typeName) => ({
+        typeName,
+        registerIndex: 0,
+        indices: [ { relative: false, values: [ 0 ] } ],
+        componentCount: 0
+    });
+    const resource = declaration(3, "dcl_resource", "resource", {
+        resourceDimensionName: "buffer",
+        sampleCount: 0,
+        returnType: { returnTypeNames: [ "sint", "sint", "sint", "sint" ] }
+    }, 0);
+    const uav = declaration(7, "dcl_unordered_access_view_typed", "uav", {
+        resourceDimensionName: "buffer",
+        globallyCoherent: false,
+        returnType: { returnTypeNames: [ "uint", "uint", "uint", "uint" ] }
+    }, 0);
+    resource.operands = [ handle("resource") ];
+    uav.operands = [ handle("uav") ];
+    return {
+        program: { programType: 5, programTypeName: "compute", majorVersion: 5, minorVersion: 0 },
+        instructions: [
+            resource,
+            uav,
             { offset: 20, opcode: 62, opcodeName: "ret", isDeclaration: false, operands: [] }
         ]
     };
@@ -237,6 +268,36 @@ test("structured SRV lowering rejects non-DWORD strides", () =>
     assert.throws(() => lowerBindingLayout(ir), /positive DWORD-aligned stride/u);
 });
 
+test("compute binding lowering uses the validated scalar-word buffer profile", () =>
+{
+    const ir = CjsFormatWebgpu.buildShaderIr(computeTypedBuffers());
+    const layout = lowerBindingLayout(ir);
+
+    assert.deepEqual(lowerComputeBindingLayout(ir), layout);
+    assert.deepEqual(layout.map((entry) => [
+        entry.generatedSymbol, entry.binding, entry.visibility, entry.type, entry.buffer.minBindingSize
+    ]), [
+        [ "t0", 0, "compute", "array<i32>", 4 ],
+        [ "u0", 1, "compute", "array<atomic<u32>>", 4 ]
+    ]);
+    assert.deepEqual(layout.map((entry) => entry.scopeIdentity), [
+        "sampled-resource:0:0@compute",
+        "storage-resource:0:0@compute"
+    ]);
+
+    const plan = CjsFormatWebgpu.buildWgslBindingPlan([ ir ]);
+    assert.deepEqual(plan.bindings.map((entry) => [
+        entry.scopeIdentity, entry.stages, entry.binding
+    ]), [
+        [ "sampled-resource:0:0@compute", [ "compute" ], 0 ],
+        [ "storage-resource:0:0@compute", [ "compute" ], 1 ]
+    ]);
+    assert.deepEqual(
+        lowerBindingLayout(ir, plan).map((entry) => [ entry.generatedSymbol, entry.binding ]),
+        [ [ "t0", 0 ], [ "u0", 1 ] ]
+    );
+});
+
 test("pass-global binding planning assigns one dense union across vertex and pixel stages", () =>
 {
     const vertex = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ], [ 3, 2 ] ]));
@@ -314,6 +375,7 @@ test("pass-global binding planning shares compatible declarations only when conf
 test("pass-global binding planning rejects ambiguous stages and invalid sharing requests", () =>
 {
     const vertex = CjsFormatWebgpu.buildShaderIr(vertexConstantBuffers([ [ 1, 4 ] ]));
+    const compute = CjsFormatWebgpu.buildShaderIr(computeTypedBuffers());
 
     assert.throws(
         () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex, vertex ]),
@@ -340,6 +402,10 @@ test("pass-global binding planning rejects ambiguous stages and invalid sharing 
     assert.throws(
         () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex ], { sharedIdentities: null }),
         /unique D3D resource identities/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgslBindingPlan([ vertex, compute ]),
+        /cannot mix compute and render programs/u
     );
 });
 

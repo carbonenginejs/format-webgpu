@@ -7,8 +7,8 @@ const KIND_ORDER = Object.freeze({
     "storage-resource": 3
 });
 
-const STAGE_VISIBILITY = Object.freeze({ vertex: "vertex", pixel: "fragment" });
-const STAGE_ORDER = Object.freeze({ vertex: 0, fragment: 1 });
+const STAGE_VISIBILITY = Object.freeze({ vertex: "vertex", pixel: "fragment", compute: "compute" });
+const STAGE_ORDER = Object.freeze({ vertex: 0, fragment: 1, compute: 2 });
 const IDENTITY_PATTERN = /^(uniform-buffer|sampled-resource|sampler|storage-resource):\d+:\d+$/u;
 
 function identity(binding)
@@ -99,6 +99,10 @@ export function buildWgslBindingPlan(programs, options = {})
             if (!identities.has(key)) identities.set(key, []);
             identities.get(key).push({ binding: entry, stage });
         }
+    }
+    if (programStages.has("compute") && programStages.size !== 1)
+    {
+        throw new Error("BuildWgslBindingPlan cannot mix compute and render programs in one pass");
     }
 
     const bindings = [];

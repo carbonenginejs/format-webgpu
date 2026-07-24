@@ -150,6 +150,29 @@ test("BuildWgslSet accepts a structured SRV as a sampled-resource read-only buff
     assert.equal(Object.isFrozen(result.buffer), true);
 });
 
+test("BuildWgslSet preserves compute stage metadata and compute-only visibility", () =>
+{
+    const storage = binding("storage-resource", "u0", 0, {
+        type: "array<atomic<u32>>",
+        buffer: { type: "storage", hasDynamicOffset: false, minBindingSize: 4 }
+    });
+    const shader = { ...emitted("compute", [ storage ]), threadGroupSize: [ 64, 1, 1 ] };
+    shader.program = { ...shader.program, programType: 5 };
+    const set = CjsFormatWebgpu.buildWgslSet([
+        { key: "Main.pass0.compute", shader }
+    ]);
+
+    assert.equal(shader.program.programType, 5);
+    assert.deepEqual(set.shaders.map((entry) => [
+        entry.key, entry.stage, entry.stageType, entry.threadGroupSize
+    ]), [
+        [ "Main.pass0.compute", "compute", 2, [ 64, 1, 1 ] ]
+    ]);
+    assert.deepEqual(set.layouts[0].bindGroups[0].bindings[0].visibility, [ "compute" ]);
+    assert.equal(set.layouts[0].bindGroups[0].bindings[0].scopeIdentity,
+        "storage-resource:0:0@compute");
+});
+
 test("BuildWgslSet preserves stage-scoped t0 buffer and texture layouts", () =>
 {
     const structured = binding("sampled-resource", "t0", 0, {
@@ -247,4 +270,13 @@ test("BuildWgslSet rejects malformed, duplicate, and stage-mismatched entries", 
         { key: "Main.pass0.vertex", shader: vertex },
         { key: "Main.pass0.vertex", shader: vertex }
     ]), /duplicate shader key/i);
+
+    const compute = { ...emitted("compute"), threadGroupSize: [ 8, 1, 1 ] };
+    assert.throws(() => CjsFormatWebgpu.buildWgslSet([
+        { key: "Main.pass0.compute", shader: { ...compute, threadGroupSize: [ 0, 1, 1 ] } }
+    ]), /positive three-dimensional threadGroupSize/u);
+    assert.throws(() => CjsFormatWebgpu.buildWgslSet([
+        { key: "Main.pass0.vertex", shader: vertex },
+        { key: "Main.pass0.compute", shader: compute }
+    ]), /cannot mix compute and render shader stages/u);
 });

@@ -80,6 +80,27 @@ test("package-effect selects one explicitly asserted complete pass in ANLS order
     });
 });
 
+test("package-effect accepts an explicitly asserted compute-only pass", () =>
+{
+    const stages = [
+        { key: "Compute.pass0.compute", techniqueName: "Compute", passIndex: 0, stageName: "compute" }
+    ];
+    const parsed = parsePackageEffectArguments([
+        "input.sm_hi", "output.cewgpu",
+        "--technique", "Compute", "--pass", "0", "--stage", "compute"
+    ]);
+
+    assert.deepEqual(selectPackageEffectStages(stages, parsed.selection), stages);
+    assert.deepEqual(buildWgslSelectionMetadata(parsed.selection, stages), {
+        mode: "explicit",
+        completePasses: true,
+        techniqueName: "Compute",
+        passIndex: 0,
+        requestedStageNames: [ "compute" ],
+        selectedStageKeys: [ "Compute.pass0.compute" ]
+    });
+});
+
 const invalidArguments = [
     [ [ "input", "output", "extra" ], /Usage/u ],
     [ [ "input", "output", "--unknown" ], /Unknown/u ],
@@ -133,13 +154,14 @@ test("package-effect fails closed on structurally valid but unsupported stage ki
     const compute = { key: "Main.pass0.compute", techniqueName: "Main", passIndex: 0, stageName: "compute" };
     const geometry = { key: "Main.pass0.geometry", techniqueName: "Main", passIndex: 0, stageName: "geometry" };
 
-    assert.throws(
-        () => selectPackageEffectStages([ compute ], null),
-        /stage Main\.pass0\.compute kind compute is not supported/u
-    );
+    assert.deepEqual(selectPackageEffectStages([ compute ], null), [ compute ]);
     assert.throws(
         () => selectPackageEffectStages([ geometry ], null),
         /stage Main\.pass0\.geometry kind geometry is not supported/u
+    );
+    assert.throws(
+        () => selectPackageEffectStages([ STAGES[0], compute ], null),
+        /pass Main\.pass0 cannot mix compute and render stages/u
     );
 });
 

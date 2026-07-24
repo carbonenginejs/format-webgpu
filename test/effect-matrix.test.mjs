@@ -7,6 +7,10 @@ import {
     parseEffectMatrixArguments,
     validateEffectPermutationAxes
 } from "../scripts/effectMatrixHelpers.js";
+import {
+    classifyEffectPassTopology,
+    serializeIndependentShader
+} from "../scripts/effectMatrixQualification.js";
 
 test("effect matrix enumerates Carbon mixed-radix permutations in body-index order", () =>
 {
@@ -33,6 +37,39 @@ test("effect matrix requires one correctly indexed offset record per permutation
     });
     assert.equal(inspectEffectOffsets([ { index: 0 } ], 2).offsetCountMatch, false);
     assert.equal(inspectEffectOffsets([ { index: 1 }, { index: 0 } ], 2).offsetIndicesMatch, false);
+});
+
+test("effect matrix admits render and compute pipelines but rejects mixed topology", () =>
+{
+    assert.equal(classifyEffectPassTopology([ "vertex", "pixel" ]), "render");
+    assert.equal(classifyEffectPassTopology([ "pixel", "vertex" ]), "render");
+    assert.equal(classifyEffectPassTopology([ "compute" ]), "compute");
+    assert.equal(classifyEffectPassTopology([ "vertex", "compute" ]), null);
+    assert.equal(classifyEffectPassTopology([ "compute", "compute" ]), null);
+    assert.equal(classifyEffectPassTopology([]), null);
+});
+
+test("effect matrix retains independent compute thread-group metadata", () =>
+{
+    const threadGroupSize = [ 1, 1, 1 ];
+    const serialized = serializeIndependentShader({
+        stage: "compute",
+        entryPoint: "main",
+        code: "@compute fn main() {}",
+        threadGroupSize
+    });
+
+    assert.deepEqual(serialized.threadGroupSize, threadGroupSize);
+    assert.notEqual(serialized.threadGroupSize, threadGroupSize);
+    assert.deepEqual(serializeIndependentShader({
+        stage: "vertex",
+        entryPoint: "main",
+        code: "@vertex fn main() {}"
+    }), {
+        stage: "vertex",
+        entryPoint: "main",
+        code: "@vertex fn main() {}"
+    });
 });
 
 test("effect matrix rejects axes that cannot map names and values uniquely", () =>

@@ -56,6 +56,7 @@ export function fixedSourceLanes(instruction, operandIndex, program = null)
     const dot = DOT_LANES[instruction.opcodeName];
     if (dot && operandIndex > 0) return dot;
     if (instruction.opcodeName === "ld" && operandIndex === 1) return loadAddressLanes(instruction, program);
+    if (instruction.opcodeName === "store_uav_typed" && operandIndex === 1) return [ "x" ];
     if (instruction.opcodeName === "ld_structured" && operandIndex === 1) return [ "x" ];
     if ([ "sample", "sample_b", "sample_c", "sample_c_lz", "sample_d", "sample_l", "gather4" ]
         .includes(instruction.opcodeName))

@@ -1,6 +1,7 @@
-const KEY_PATTERN = /^(.*)\.pass([0-9]+)\.(vertex|pixel)$/;
-const KEY_STAGE = Object.freeze({ vertex: "vertex", pixel: "fragment" });
-const STAGE_TYPES = Object.freeze({ vertex: 0, pixel: 1 });
+const KEY_PATTERN = /^(.*)\.pass([0-9]+)\.(vertex|pixel|compute)$/;
+const KEY_STAGE = Object.freeze({ vertex: "vertex", pixel: "fragment", compute: "compute" });
+const STAGE_TYPES = Object.freeze({ vertex: 0, pixel: 1, compute: 2 });
+const STAGE_NAME_ORDER = Object.freeze([ "vertex", "pixel", "compute" ]);
 
 const VISIBILITY_ORDER = Object.freeze([ "vertex", "fragment", "compute" ]);
 
@@ -42,7 +43,30 @@ function normalizeEntry(entry, index)
     {
         throw new Error(`WGSL set key ${key} does not match shader stage ${shader.stage}`);
     }
-    return { shader, stage: shader.stage, techniqueName, passIndex, stageName, stageType: STAGE_TYPES[stageName], key };
+    let threadGroupSize = null;
+    if (stageName === "compute")
+    {
+        threadGroupSize = shader.threadGroupSize;
+        if (!Array.isArray(threadGroupSize) || threadGroupSize.length !== 3
+            || threadGroupSize.some((value) => !Number.isSafeInteger(value) || value < 1))
+        {
+            throw new Error(`WGSL compute shader ${key} requires a positive three-dimensional threadGroupSize`);
+        }
+    }
+    else if (shader.threadGroupSize !== undefined && shader.threadGroupSize !== null)
+    {
+        throw new Error(`WGSL render shader ${key} cannot declare threadGroupSize`);
+    }
+    return {
+        shader,
+        stage: shader.stage,
+        techniqueName,
+        passIndex,
+        stageName,
+        stageType: STAGE_TYPES[stageName],
+        ...(threadGroupSize ? { threadGroupSize: clonePlain(threadGroupSize) } : {}),
+        key
+    };
 }
 
 function portableBinding(binding, visibility)
@@ -212,6 +236,24 @@ function buildLayouts(entries)
         || left.passIndex - right.passIndex);
 }
 
+function validatePassTopologies(entries)
+{
+    const stagesByPass = new Map();
+    for (const entry of entries)
+    {
+        const passKey = `${entry.techniqueName}.pass${entry.passIndex}`;
+        if (!stagesByPass.has(passKey)) stagesByPass.set(passKey, []);
+        stagesByPass.get(passKey).push(entry.stageName);
+    }
+    for (const [ passKey, stages ] of stagesByPass)
+    {
+        if (stages.includes("compute") && (stages.length !== 1 || stages[0] !== "compute"))
+        {
+            throw new Error(`WGSL set ${passKey} cannot mix compute and render shader stages`);
+        }
+    }
+}
+
 /**
  * Builds the portable JSON document stored in a CEWGPU `WGSL` chunk.
  * Existing numeric bindings are validated and never reassigned.
@@ -237,12 +279,14 @@ export function buildWgslSet(input)
             stageType: entry.stageType,
             entryPoint: entry.shader.entryPoint,
             code: entry.shader.code,
-            sourceMap: clonePlain(entry.shader.sourceMap || [])
+            sourceMap: clonePlain(entry.shader.sourceMap || []),
+            ...(entry.threadGroupSize ? { threadGroupSize: clonePlain(entry.threadGroupSize) } : {})
         };
     }).sort((left, right) =>
         left.techniqueName.localeCompare(right.techniqueName)
         || left.passIndex - right.passIndex
-        || [ "vertex", "pixel" ].indexOf(left.stageName) - [ "vertex", "pixel" ].indexOf(right.stageName));
+        || STAGE_NAME_ORDER.indexOf(left.stageName) - STAGE_NAME_ORDER.indexOf(right.stageName));
+    validatePassTopologies(entries);
     return deepFreeze({
         format: "CJS_WGSL_SET",
         formatVersion: 2,

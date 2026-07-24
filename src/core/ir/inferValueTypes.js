@@ -25,11 +25,11 @@ const SAMPLE_OPS = new Set([
     "sample", "sample_b", "sample_c", "sample_c_lz", "sample_d", "sample_l"
 ]);
 
-function sampleResultType(program, instruction)
+function bindingResultType(program, instruction, operandTypeName, resourceKind)
 {
-    const resource = instruction.operands.find((operand) => operand.typeName === "resource");
+    const resource = instruction.operands.find((operand) => operand.typeName === operandTypeName);
     const reference = resource?.resourceReference;
-    const binding = program.bindings.find((entry) => entry.resourceKind === "sampled-resource"
+    const binding = program.bindings.find((entry) => entry.resourceKind === resourceKind
         && (reference?.rangeId !== null && reference?.rangeId !== undefined
             ? entry.range.rangeId === reference.rangeId
             : entry.registerIndex === resource?.registerIndex));
@@ -43,6 +43,11 @@ function sampleResultType(program, instruction)
     const concrete = mapped.filter((type) => type !== "unknown");
     if (!concrete.length) return null;
     return new Set(concrete).size === 1 ? concrete[0] : "bitpattern32";
+}
+
+function sampleResultType(program, instruction)
+{
+    return bindingResultType(program, instruction, "resource", "sampled-resource");
 }
 
 function ruleFor(opcodeName, program, instruction)
@@ -85,6 +90,17 @@ function ruleFor(opcodeName, program, instruction)
             name: "atomic-add",
             destination: null,
             sourceByOperand: { 1: "uint32", 2: "uint32" }
+        };
+    }
+    if (opcodeName === "store_uav_typed")
+    {
+        return {
+            name: "typed-uav-store",
+            destination: null,
+            sourceByOperand: {
+                1: "uint32",
+                2: bindingResultType(program, instruction, "uav", "storage-resource")
+            }
         };
     }
     if (opcodeName === "ld_structured")

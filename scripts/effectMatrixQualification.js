@@ -119,16 +119,36 @@ function qualifyStage(bytecode, source)
     }
 }
 
+/**
+ * Classifies the complete active stage set for one pipeline pass.
+ *
+ * @param {string[]} stageNames Active Trinity stage names.
+ * @returns {"render"|"compute"|null} Supported topology, or null.
+ */
+export function classifyEffectPassTopology(stageNames)
+{
+    if (!Array.isArray(stageNames) || stageNames.some((stageName) => typeof stageName !== "string"))
+    {
+        throw new TypeError("Effect pass topology requires a stage-name array");
+    }
+    if (stageNames.length === 1 && stageNames[0] === "compute") return "compute";
+    if (stageNames.length === RENDER_STAGE_NAMES.length
+        && RENDER_STAGE_NAMES.every((stageName) => stageNames.includes(stageName)))
+    {
+        return "render";
+    }
+    return null;
+}
+
 function qualifyPass(passKey, stages)
 {
     const stageNames = stages.map((stage) => stage.stageName);
-    if (stageNames.length !== RENDER_STAGE_NAMES.length
-        || RENDER_STAGE_NAMES.some((stageName) => !stageNames.includes(stageName)))
+    if (!classifyEffectPassTopology(stageNames))
     {
         return {
             status: "unsupported",
             phase: "topology",
-            reason: `render pass requires exactly vertex+pixel, found ${stageNames.join("+") || "no active stages"}`
+            reason: `pipeline pass requires exactly vertex+pixel or one compute stage, found ${stageNames.join("+") || "no active stages"}`
         };
     }
     const failed = stages.find((stage) => stage.qualification.frontEnd !== "qualified");
@@ -285,6 +305,25 @@ function passSummary(variants)
     };
 }
 
+/**
+ * Serializes the portable shader fields retained on a matrix stage variant.
+ *
+ * @param {object|null} shader Emitted independent shader descriptor.
+ * @returns {object|null} JSON-safe shader summary.
+ */
+export function serializeIndependentShader(shader)
+{
+    if (!shader) return null;
+    return {
+        stage: shader.stage,
+        entryPoint: shader.entryPoint,
+        code: shader.code,
+        ...(Array.isArray(shader.threadGroupSize)
+            ? { threadGroupSize: [ ...shader.threadGroupSize ] }
+            : {})
+    };
+}
+
 function serializeStageVariants(variants)
 {
     return Array.from(variants.values(), (variant) => ({
@@ -298,11 +337,7 @@ function serializeStageVariants(variants)
         wgsl: variant.qualification.wgsl || null,
         wgslBytes: variant.qualification.wgslBytes ?? null,
         reason: variant.qualification.reason || null,
-        independentShader: variant.qualification.independentShader ? {
-            stage: variant.qualification.independentShader.stage,
-            entryPoint: variant.qualification.independentShader.entryPoint,
-            code: variant.qualification.independentShader.code
-        } : null
+        independentShader: serializeIndependentShader(variant.qualification.independentShader)
     })).sort((left, right) => left.digest.localeCompare(right.digest));
 }
 
@@ -504,7 +539,7 @@ function compareBackends(dx11, dx12)
 }
 
 /**
- * Qualifies every permutation and active render pass in one DX11/DX12 pair.
+ * Qualifies every permutation and active pipeline pass in one DX11/DX12 pair.
  * Unsupported WGSL is a recorded boundary, while body/front-end/topology
  * failures make the report fail.
  *

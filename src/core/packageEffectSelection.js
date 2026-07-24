@@ -1,9 +1,8 @@
-const STAGE_NAMES = new Set([ "vertex", "pixel" ]);
+const STAGE_NAMES = new Set([ "vertex", "pixel", "compute" ]);
 // Structurally valid DXBC stage kinds that the WGSL packager cannot lower yet:
-// there is no WGSL geometry/hull/domain stage, and compute lowering plus its
-// compute-pipeline browser gate are not built. These fail closed as
-// unsupported rather than being misreported as malformed records.
-const KNOWN_UNSUPPORTED_STAGE_NAMES = new Set([ "compute", "geometry", "hull", "domain" ]);
+// there is no WGSL geometry/hull/domain stage. These fail closed as unsupported
+// rather than being misreported as malformed records.
+const KNOWN_UNSUPPORTED_STAGE_NAMES = new Set([ "geometry", "hull", "domain" ]);
 
 /**
  * Verify that every requested permutation resolved exactly.
@@ -102,6 +101,22 @@ function validateStageRecords(stages)
         }
 
         keys.add(stage.key);
+    }
+
+    const stagesByPass = new Map();
+    for (const stage of stages)
+    {
+        const passKey = `${stage.techniqueName}.pass${stage.passIndex}`;
+        if (!stagesByPass.has(passKey)) stagesByPass.set(passKey, []);
+        stagesByPass.get(passKey).push(stage.stageName);
+    }
+    for (const [ passKey, stageNames ] of stagesByPass)
+    {
+        if (stageNames.includes("compute")
+            && (stageNames.length !== 1 || stageNames[0] !== "compute"))
+        {
+            throw new Error(`WGSL effect pass ${passKey} cannot mix compute and render stages`);
+        }
     }
 }
 

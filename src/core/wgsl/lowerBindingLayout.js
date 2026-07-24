@@ -12,8 +12,9 @@ const KIND_PREFIX = Object.freeze({
     "storage-resource": "u"
 });
 
-const STAGE_VISIBILITY = Object.freeze({ vertex: "vertex", pixel: "fragment" });
-const STAGES = Object.freeze([ "vertex", "fragment" ]);
+const STAGE_VISIBILITY = Object.freeze({ vertex: "vertex", pixel: "fragment", compute: "compute" });
+const STAGES = Object.freeze([ "vertex", "fragment", "compute" ]);
+const LEGACY_SHARED_STAGES = Object.freeze([ "vertex", "fragment" ]);
 const IDENTITY_PATTERN = /^(uniform-buffer|sampled-resource|sampler|storage-resource):\d+:\d+$/u;
 
 function bindingRegister(binding)
@@ -141,13 +142,29 @@ const TYPED_BUFFER_ELEMENTS = Object.freeze({
     uint: "vec4<u32>"
 });
 
-function typedBufferLayout(binding)
+function typedBufferLayout(program, binding)
 {
     if (binding.structureStride !== null && binding.structureStride !== undefined)
     {
         throw new Error(`WGSL typed buffer resource ${binding.id} has unexpected structured-resource metadata`);
     }
     const returns = binding.returnType?.returnTypeNames || [];
+    if (program.stage === "compute")
+    {
+        if (returns.length !== 4 || returns.some((entry) => entry !== "sint"))
+        {
+            throw new Error(`WGSL compute typed buffer resource ${binding.id} return type is not supported; the bounded scalar-word profile requires uniform sint components`);
+        }
+        return {
+            declaration: "var<storage, read>",
+            type: "array<i32>",
+            buffer: {
+                type: "read-only-storage",
+                hasDynamicOffset: false,
+                minBindingSize: 4
+            }
+        };
+    }
     const element = returns.length === 4 && returns.every((entry) => entry === returns[0])
         ? TYPED_BUFFER_ELEMENTS[returns[0]]
         : null;
@@ -166,9 +183,9 @@ function typedBufferLayout(binding)
     };
 }
 
-function sampledResourceLayout(binding)
+function sampledResourceLayout(program, binding)
 {
-    if (binding.resourceDimension === "buffer") return typedBufferLayout(binding);
+    if (binding.resourceDimension === "buffer") return typedBufferLayout(program, binding);
     return binding.structureStride === null || binding.structureStride === undefined
         ? textureLayout(binding)
         : structuredBufferLayout(binding);
@@ -176,9 +193,9 @@ function sampledResourceLayout(binding)
 
 function uavBufferLayout(program, binding)
 {
-    // Fragment-only under the current compiler/engine portability contract.
-    // Vertex-stage writable storage is deliberately not admitted.
-    if (program.stage !== "pixel")
+    // Writable storage is admitted for fragment and compute shaders. Vertex
+    // storage writes remain outside the current portability contract.
+    if (program.stage !== "pixel" && program.stage !== "compute")
     {
         throw new Error(`WGSL storage resource ${binding.id} is not supported in the ${program.stage} stage`);
     }
@@ -230,7 +247,7 @@ function lowerOne(program, binding, bindingIndex)
     }
     let layout;
     if (binding.resourceKind === "uniform-buffer") layout = uniformLayout(program, binding);
-    else if (binding.resourceKind === "sampled-resource") layout = sampledResourceLayout(binding);
+    else if (binding.resourceKind === "sampled-resource") layout = sampledResourceLayout(program, binding);
     else if (binding.resourceKind === "sampler") layout = samplerLayout(program, binding);
     else if (binding.resourceKind === "storage-resource") layout = uavBufferLayout(program, binding);
     else throw new Error(`WGSL binding ${binding.id} has unsupported kind ${binding.resourceKind}`);
@@ -289,7 +306,7 @@ function normalizeBindingPlan(plan, stage)
     {
         const identity = bindingIdentity(entry);
         const stages = plan.formatVersion === 1
-            ? (sharedIdentities.has(identity) ? STAGES : [ visibility ])
+            ? (sharedIdentities.has(identity) ? LEGACY_SHARED_STAGES : [ visibility ])
             : entry.stages;
         const scopeIdentity = plan.formatVersion === 1
             ? (sharedIdentities.has(identity) ? identity : `${identity}@${visibility}`)

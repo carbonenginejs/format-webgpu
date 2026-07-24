@@ -343,21 +343,22 @@ vertex stage lowers `sample_l` (`textureSampleLevel`) and `sample_d`
 (`textureSampleGrad`). Implicit-LOD `sample`/`sample_b` stay fragment-only —
 WGSL forbids implicit derivatives in a vertex entry point.
 
-### Typed uint buffer UAVs + `atomic_iadd` → guarded storage atomics
+### Typed uint buffer UAVs + atomic operations → guarded storage atomics
 
 A `dcl_unordered_access_view_typed` buffer with a uniform uint return type
-lowers to `var<storage, read_write> uN: array<atomic<u32>>` (fragment stage
-only under the current compiler/engine portability contract; vertex writable
-storage is not admitted), and `atomic_iadd`
-becomes a bounds-guarded statement:
+lowers to `var<storage, read_write> uN: array<atomic<u32>>`. In fragment
+programs, `atomic_iadd` becomes a bounds-guarded statement:
 `if (i < arrayLength(&uN)) { atomicAdd(&uN[i], v); }`. The guard reproduces
 D3D's defined behavior — out-of-bounds typed-UAV atomics are dropped — where
 an unguarded WGSL access could target a live element or otherwise raise a
 dynamic error. The result-returning form (`imm_atomic_iadd`), other atomic
-opcodes, and non-uint or non-buffer UAV shapes fail closed. The engine must
-bind it as storage containing raw 4-byte u32 words (`minBindingSize: 4`);
-unlike typed SRV buffers, this is one scalar word per element. No DXGI
-view-format conversion is reproduced.
+opcodes, and non-uint or non-buffer UAV shapes fail closed. Vertex writable
+storage remains outside the current portability contract. The bounded compute
+profile below uses the same representation and `atomicStore` for ordinary
+typed stores because WGSL requires every access to an atomic-typed element to
+use an atomic builtin. The engine must bind either form as storage containing
+raw 4-byte u32 words (`minBindingSize: 4`); unlike typed SRV buffers, this is
+one scalar word per element. No DXGI view-format conversion is reproduced.
 *Checked against vkd3d-shader:* `spirv_compiler_emit_atomic_instruction`
 (spirv.c) emits the corresponding SPIR-V atomic through a directly computed
 buffer/image pointer with no explicit bounds branch. Any out-of-bounds behavior
@@ -365,6 +366,39 @@ is therefore delegated to the Vulkan robustness features available at runtime;
 that path does not itself confirm D3D's exact drop result. This compiler
 implements the D3D result independently with an explicit statement-level
 guard.
+
+### Bounded 1×1×1 compute programs → native WebGPU compute pipelines
+
+Compute lowering is admitted only for an exact, whole-program-validated SM5.0
+structural profile currently exercised by `particles/gpu/setdrawparameters` and
+`particles/gpu/setsortargs`. It requires canonical global/SRV/UAV/temp/thread-
+group declarations, one temporary register, `dcl_thread_group 1,1,1`, one
+reachable straight-line block ending in `ret`, and exactly one typed scalar
+sint buffer SRV plus one typed scalar uint buffer UAV. The supported body
+opcodes are `ld`, low-half `imul`, `umax`, `iadd`, `ushr`,
+`store_uav_typed`, and `ret`; every operand, selector, immediate, binding,
+type-flow fact, and SSA edge is revalidated before emission.
+
+The SRV is exposed as `var<storage, read> tN: array<i32>` and an out-of-bounds
+`ld` returns zero through a clamped load plus `select`. The UAV is
+`var<storage, read_write> uN: array<atomic<u32>>`; an in-range typed store
+uses `atomicStore`, while an out-of-bounds store is dropped by an explicit
+branch. These scalar-word layouts deliberately do not reproduce DXGI typed-view
+conversion, so the engine binding contract is one raw 4-byte word per element.
+Restricting the profile to scalar `x` loads and replicated full-mask stores
+also avoids guessing the width of a general DXBC typed-buffer view.
+
+The package carries the declared thread-group size as `[1, 1, 1]`. Trinity
+effect metadata identifies compute as stage type `2`, while the decoded DXBC
+program type remains `5`; these two enums are intentionally kept separate.
+The browser gate creates and validates native shader modules, compute bind-group
+layouts, pipeline layouts, and compute pipelines. It does not dispatch work or
+expand the public render-only device API.
+
+The full corpus transition moved from 504 qualified / 33 unsupported / 0
+failed to 506 / 31 / 0: exactly the two programs named above became qualified,
+and SHA-256 comparison confirmed all 504 previously qualified package bytes
+remained identical.
 
 ### `float_16` minimum precision → full-precision f32
 
@@ -443,11 +477,11 @@ fail closed.
   width-four slots are scalarized as described above; any relative shape outside
   the immutable constant-table form still fails closed), and subroutine control flow
   (`call`/`callc`/`label`/`interface_call`) — front-end rejections.
-- **Compute, geometry, hull, and domain stage kinds** — structurally valid
-  stages the packager cannot lower: WGSL has no geometry/hull/domain stage,
-  and compute lowering plus its compute-pipeline browser gate are not built.
-  These fail closed per stage kind instead of being misreported as malformed
-  records.
+- **Geometry, hull, and domain stage kinds, plus compute programs outside the
+  bounded profile above** — WGSL has no geometry/hull/domain stage. General
+  compute resource shapes, thread-group sizes, builtins, control flow, and
+  instruction families are not yet lowered. These fail closed per stage kind
+  or bounded-profile reason instead of being misreported as malformed records.
 - **Sampler modes other than `default`**, fragment input interpolation modes
   other than `linear` and `linear_noperspective`, minimum-precision operand
   kinds other than `float_16` (which promotes; see Adapted), and vertex system semantics
