@@ -277,6 +277,12 @@ observable versus a conforming D3D driver running at full precision. The other
 minimum-precision kinds (`float_2_8`, `sint_16`, `uint_16`) stay fail-closed
 until a shader needs them.
 
+*Confirmed against vkd3d-shader:* its SPIR-V backend (`spirv.c`) never reads the
+decoded `min_precision` field — arithmetic lowers at full 32-bit width, the same
+promotion. Its GLSL backend fails closed, but only on min-precision *I/O
+signature elements* (a separate axis: varying declarations, not operands), which
+this compiler does not promote either.
+
 ### Typed `Buffer` SRVs → read-only storage buffers
 
 WGSL has no texel-buffer type, so a `dcl_resource` with dimension `buffer`
@@ -353,7 +359,13 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
   division and remainder only when every divisor lane is an immediate non-zero
   value; both destinations may be written by one instruction (with independent
   masks). Dynamic or zero divisors fail closed because DXBC and WGSL define
-  divide-by-zero results differently.
+  divide-by-zero results differently. *Confirmed against vkd3d-shader:* its
+  `vsir_program_lower_udiv` comments that "division by zero is well-defined for
+  … UDIV, and returns UINT_MAX", and it emits a `MOVC` selecting `0xffffffff`
+  for both quotient and remainder when the divisor is zero — exactly the D3D
+  semantic WGSL does not provide. (A dynamic divisor could be supported later by
+  emitting the same `select(0xffffffffu, a / max(b,1u), b != 0u)` guard;
+  fail-closed is correct until then.)
 - **Loop merges** — scalar phis with exactly one entry and one backedge
   incoming; multi-exit loops (several `break` sites feeding distinct post-loop
   merges) are not validated beyond the single-`breakc` shape.
