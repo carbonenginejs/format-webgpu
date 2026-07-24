@@ -74,7 +74,7 @@ function valueType(program, write)
     const types = Array.from(write.mask).map((component) => value?.componentTypes?.[component]);
     if (!types.length || types.some((type) => !scalarTypeName(type)) || new Set(types).size !== 1)
     {
-        throw new Error(`WGSL fragment value ${write.valueId} has an unresolved or mixed result type`);
+        throw new Error(`WGSL fragment value ${write.valueId} has an unresolved or mixed result type that is not supported`);
     }
     const scalarType = types[0];
     return {
@@ -1073,7 +1073,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             if (instruction.opcodeName !== "mov" || instruction.saturate
                 || destination?.typeName !== "temp" || immediateSource?.typeName !== "immediate32")
             {
-                throw new Error(`WGSL fragment value ${write.valueId} has an unresolved or mixed result type`);
+                throw new Error(`WGSL fragment value ${write.valueId} has an unresolved or mixed result type that is not supported`);
             }
             return Array.from(write.mask).map((component, laneIndex) => ({
                 kind: "let",

@@ -101,6 +101,33 @@ surrounding machinery (per-arm written-component cloning, post-branch
 intersection, merge-var appends) is identical; the fragment guard is now
 removed too, browser-validated across fragment selections with live merges.
 
+### Scalar merge inputs inherited through an arm tail
+
+A two-armed selection merge's inputs were matched to arms strictly by
+`incoming.blockId === trueBlockId/falseBlockId`. But a phi records the block
+that *defines* the value, not the CFG edge into the join: when an arm tail only
+carries a register through (an intermediate `selection-merge` block, or a value
+threaded down a chain) the phi's incoming names the upstream definition block,
+which is not the arm-tail predecessor, so the match failed and the shape was
+rejected. Now each input is matched by direct blockId first, and — because a
+two-armed join has exactly two edges and the phi exactly two inputs — the
+remaining input is assigned to the remaining arm by elimination when the other
+arm matched directly. This is the selection analogue of the loop-exit reaching
+resolution already used for break edges.
+
+The inherited input frequently does not lexically dominate its arm-tail merge
+assignment. That is safe for the two arms whose assignment is emitted *inside* a
+branch body (the true arm, and the else arm of an if/else): a selection region
+is acyclic, so on the path reaching the arm tail the value was already assigned
+before the merge write, and `hoistEscapingValues` lifts its declaration to a
+function-top `var` (the zero initializer is unobservable on paths that skip it).
+The **no-else false input is excluded** from this relaxation — it pre-initializes
+the merge `var` *before* the `if`, so it must genuinely dominate the header;
+hoisting cannot rescue a value that may be unassigned on a path reaching the
+pre-init. Inputs that neither dominate nor are hoistable (and undefined-register
+inputs on the true edge) still fail closed. Browser-validated on avatar tattoo
+picking selections whose merges inherit a true-arm value through an inner join.
+
 ### Source modifiers (`neg`/`abs`/`absneg`) → exact per-consumer-type lowering
 
 DXBC source-modifier semantics depend on the consuming instruction's type, and

@@ -131,6 +131,27 @@ function definitionDominates(value, targetBlockId, targetInstruction, dominators
 }
 
 /**
+ * Whether a two-armed selection merge input can be referenced at its arm-tail
+ * merge assignment. The fast path is lexical dominance. A selection region is
+ * acyclic, so an input that does NOT dominate its arm tail is still safe when it
+ * is a value `hoistEscapingValues` can lift to a function-top `var`: an ordinary
+ * instruction result (always emitted as a `let`) or a live merge phi (emitted as
+ * a `var` by its own plan). This is the inherited-input case — the arm tail only
+ * carries the register through, so the phi records the upstream definition block,
+ * not this edge. On the path that reaches the arm tail the value was assigned
+ * before the merge write, so the hoisted var's zero initializer is unobservable.
+ * (Loops cannot use this relaxation: a back-edge could reach the assignment with
+ * the value defined in a different iteration.) Undefined-register inputs are
+ * handled by the caller; anything else fails closed.
+ */
+function armInputUsable(value, armBlockId, boundaryInstruction, dominators, live)
+{
+    if (definitionDominates(value, armBlockId, boundaryInstruction, dominators)) return true;
+    if (value?.origin === "instruction-write") return true;
+    return value?.origin === "control-flow-merge" && live.has(value.id);
+}
+
+/**
  * The value a register+component actually holds at the exit of a block, found by
  * walking the dominator chain from that block to the nearest dominating block
  * whose `outputValues` define the register. A break predecessor frequently only
@@ -211,7 +232,7 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
             .some((read) => read.refs.some((ref) => ref.valueId === id)));
         if (directlyRead && undefinedPaths(id).length)
         {
-            throw new Error(`WGSL ${stage} merge ${id} has an observable undefined path`);
+            throw new Error(`WGSL ${stage} merge ${id} has an unsupported observable undefined path`);
         }
     }
 }
@@ -676,9 +697,21 @@ export function buildSelectionPlans(program, stage)
             {
                 throw new Error(`WGSL ${stage} merge ${id} is not a scalar float predecessor phi`);
             }
-            const falseIncoming = value.incoming.find((incoming) => incoming.blockId === falseBlockId);
-            const trueIncoming = value.incoming.find((incoming) => incoming.blockId === trueBlockId);
-            if (!falseIncoming || !trueIncoming || [ falseIncoming, trueIncoming ].some((incoming) => mergeIds.includes(incoming.valueId)))
+            // An arm input may be defined upstream of its arm tail and merely
+            // inherited through it: the tail block carries the register without
+            // redefining it, so the phi's `incoming.blockId` records the upstream
+            // definition block, not this CFG edge. When exactly one arm matches an
+            // incoming directly, the other incoming belongs to the remaining arm by
+            // elimination — a two-armed join has exactly two edges and this phi has
+            // exactly two inputs, so each input maps to one edge.
+            const directFalse = value.incoming.find((incoming) => incoming.blockId === falseBlockId);
+            const directTrue = value.incoming.find((incoming) => incoming.blockId === trueBlockId);
+            let falseIncoming = directFalse;
+            let trueIncoming = directTrue;
+            if (directTrue && !directFalse) falseIncoming = value.incoming.find((incoming) => incoming !== directTrue);
+            else if (directFalse && !directTrue) trueIncoming = value.incoming.find((incoming) => incoming !== directFalse);
+            if (!falseIncoming || !trueIncoming || falseIncoming === trueIncoming
+                || [ falseIncoming, trueIncoming ].some((incoming) => mergeIds.includes(incoming.valueId)))
             {
                 throw new Error(`WGSL ${stage} merge ${id} has unsupported incoming edges`);
             }
@@ -696,13 +729,18 @@ export function buildSelectionPlans(program, stage)
                 }
             }
             else if (hasElse
-                ? !definitionDominates(falseValue, falseBlockId, program.blocks.find((block) => block.id === falseBlockId).endInstruction + 1, dominators)
+                // The else-arm false input is assigned inside the else body, so an
+                // inherited (non-dominating) value is hoistable like the true arm.
+                ? !armInputUsable(falseValue, falseBlockId, program.blocks.find((block) => block.id === falseBlockId).endInstruction + 1, dominators, live)
+                // The no-else false input pre-initializes the merge var BEFORE the
+                // `if`; it must genuinely dominate the header (hoisting cannot help —
+                // the value may be unassigned on some path reaching the pre-init).
                 : !definitionDominates(falseValue, header.id, region.startInstruction, dominators))
             {
                 throw new Error(`WGSL ${stage} merge ${id} false input does not dominate its declaration`);
             }
             if (trueValue?.origin === "undefined-register"
-                || !definitionDominates(trueValue, trueBlockId, program.blocks.find((block) => block.id === trueBlockId).endInstruction + 1, dominators))
+                || !armInputUsable(trueValue, trueBlockId, program.blocks.find((block) => block.id === trueBlockId).endInstruction + 1, dominators, live))
             {
                 throw new Error(`WGSL ${stage} merge ${id} true input does not dominate its edge`);
             }

@@ -828,10 +828,28 @@ test("SM5.1 scalar merge lowering emits one mutable phi without synthetic source
     assert.equal(shader.sourceMap.some((entry) => entry.dxbcOffset === 20), false);
 });
 
+test("SM5.1 scalar merge resolves an inherited incoming edge by elimination", () =>
+{
+    const ir = structuredClone(CjsFormatWebgpu.buildShaderIr(scalarMergeFixture()));
+    const merge = ir.values.find((value) => value.origin === "control-flow-merge");
+    assert(merge);
+    // Simulate an arm tail that inherits the register: the phi records the
+    // upstream definition block rather than the arm-tail predecessor, so one
+    // incoming no longer matches its arm's blockId directly. With the other arm
+    // matching, the remaining incoming must belong to it by elimination, and the
+    // (unchanged) value id still yields correct output.
+    const trueIncoming = merge.incoming.find((incoming) => incoming.valueId !== merge.incoming[0].valueId)
+        || merge.incoming[1];
+    trueIncoming.blockId = "block-inherited";
+    const shader = CjsFormatWebgpu.buildWgsl(ir);
+    assert.match(shader.code, new RegExp(`var ${merge.id}: f32 = value\\d+(?:\\.[xyzw])?;`));
+    assert.match(shader.code, new RegExp(`${merge.id} = value\\d+(?:\\.[xyzw])?;`));
+});
+
 const mergeCorruptions = [
     [ "cycles", (ir, merge) => { merge.incoming[0].valueId = merge.id; }, /merge graph contains a cycle/i ],
     [ "unresolved types", (ir, merge) => { merge.componentTypes[merge.writeMask] = "unknown"; }, /not a scalar float predecessor phi/i ],
-    [ "unknown predecessor edges", (ir, merge) => { merge.incoming[0].blockId = "block999"; }, /unsupported incoming edges/i ],
+    [ "unknown predecessor edges", (ir, merge) => { merge.incoming[0].blockId = "block999"; merge.incoming[1].blockId = "block998"; }, /unsupported incoming edges/i ],
     [ "false-edge dominance violations", (ir, merge) => { merge.incoming[0].valueId = merge.incoming[1].valueId; }, /false input does not dominate/i ],
     [ "observable undefined carriers", (ir, merge) => {
         const exemplar = ir.values.find((value) => value.origin === "undefined-register");
