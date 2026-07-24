@@ -7,7 +7,7 @@ import { computeVaryingValues, conditionIsUniform } from "./uniformity.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SUPPORTED_OPCODES = new Set([
-    "add", "and", "deriv_rtx", "deriv_rty", "deriv_rtx_coarse",
+    "add", "and", "atomic_iadd", "deriv_rtx", "deriv_rty", "deriv_rtx_coarse",
     "deriv_rty_coarse", "deriv_rtx_fine", "deriv_rty_fine", "discard", "div",
     "dp2", "dp3", "dp4", "eq", "exp", "f16tof32", "f32tof16", "frc", "ftoi",
     "ftou", "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul",
@@ -953,6 +953,37 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             dxbcOffset: instruction.dxbcOffset,
             condition: { code: `${condition} ${projection === "zero" ? "==" : "!="} 0u`, type: "bool" },
             statements: [ { kind: "discard" } ]
+        };
+    }
+    if (instruction.opcodeName === "atomic_iadd")
+    {
+        const uav = instruction.operands[0];
+        if (instruction.operands.length !== 3 || uav?.typeName !== "uav"
+            || (uav.modifierName || "none") !== "none" || instruction.saturate)
+        {
+            throw new Error(`WGSL fragment atomic instruction ${instruction.index} has an unsupported operand shape`);
+        }
+        const binding = bindingForOperand(bindings, "storage-resource", uav);
+        if (!binding) throw new Error(`WGSL fragment atomic instruction ${instruction.index} has an unresolved UAV binding`);
+        if (binding.type !== "array<atomic<u32>>")
+        {
+            throw new Error(`WGSL fragment atomic instruction ${instruction.index} UAV layout ${binding.type} is not supported`);
+        }
+        const address = operandExpression(program, instruction, 1, "x", 1, "uint32", inputs, bindings);
+        const value = operandExpression(program, instruction, 2, "x", 1, "uint32", inputs, bindings);
+        // D3D defines out-of-bounds typed-UAV atomics as dropped writes; the
+        // bounds guard reproduces that (WGSL would clamp to a live element).
+        return {
+            kind: "if",
+            instructionIndex: instruction.index,
+            dxbcOffset: instruction.dxbcOffset,
+            condition: { code: `${address} < arrayLength(&${binding.generatedSymbol})`, type: "bool" },
+            statements: [ {
+                kind: "call",
+                instructionIndex: instruction.index,
+                dxbcOffset: instruction.dxbcOffset,
+                expression: { code: `atomicAdd(&${binding.generatedSymbol}[${address}], ${value})`, type: "void" }
+            } ]
         };
     }
     const writes = instruction.dataflow.writes;

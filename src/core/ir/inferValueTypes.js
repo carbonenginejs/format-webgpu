@@ -79,6 +79,14 @@ function ruleFor(opcodeName, program, instruction)
             sourceByOperand: { 1: "uint32" }
         };
     }
+    if (opcodeName === "atomic_iadd")
+    {
+        return {
+            name: "atomic-add",
+            destination: null,
+            sourceByOperand: { 1: "uint32", 2: "uint32" }
+        };
+    }
     if (opcodeName === "ld_structured")
     {
         return {

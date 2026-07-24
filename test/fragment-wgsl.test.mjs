@@ -1481,3 +1481,52 @@ test("fragment lowering fails closed on unsupported typed-buffer element types",
         () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-sint" }),
         /only uniform float4 and uint4 elements are supported/u);
 });
+
+test("fragment lowering emits guarded storage atomics for typed uint buffer UAVs", () =>
+{
+    const uav = { ...register("uav", 0), componentCount: 0 };
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_unordered_access_view_typed", "uav", {
+                resourceDimensionName: "buffer",
+                returnType: { returnTypeNames: [ "uint", "uint", "uint", "uint" ] }
+            }),
+            instruction(4, "atomic_iadd", [ uav, immediate([ 5 ]), immediate([ 1 ]) ]),
+            instruction(9, "mov", [ register("output", 0, { mask: "xyzw" }), immediate([ 0, 0, 0, 0 ]) ]),
+            instruction(13, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-uav-atomic" });
+    const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "u0");
+    assert.equal(binding.declaration, "var<storage, read_write>");
+    assert.equal(binding.type, "array<atomic<u32>>");
+    assert.deepEqual(binding.buffer, { type: "storage", hasDynamicOffset: false, minBindingSize: 4 });
+    assert.match(shader.code, /@group\(0\) @binding\(\d+\) var<storage, read_write> u0: array<atomic<u32>>;/u);
+    assert.match(shader.code, /if \(0x00000005u < arrayLength\(&u0\)\)/u);
+    assert.match(shader.code, /atomicAdd\(&u0\[0x00000005u\], 0x00000001u\);/u);
+});
+
+test("fragment lowering fails closed on non-uint typed buffer UAVs", () =>
+{
+    const uav = { ...register("uav", 0), componentCount: 0 };
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_unordered_access_view_typed", "uav", {
+                resourceDimensionName: "buffer",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            instruction(4, "atomic_iadd", [ uav, immediate([ 0 ]), immediate([ 1 ]) ]),
+            instruction(9, "mov", [ register("output", 0, { mask: "xyzw" }), immediate([ 0, 0, 0, 0 ]) ]),
+            instruction(13, "ret", [])
+        ]
+    };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-uav-float" }),
+        /only typed uint buffer UAVs are supported/u);
+});

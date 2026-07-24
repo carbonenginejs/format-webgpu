@@ -1142,3 +1142,32 @@ test("vertex lowering fails closed on ld from texture resources", () =>
         () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-texture-ld" }),
         /only typed buffers are supported/u);
 });
+
+test("vertex lowering fails closed on storage-resource UAV bindings", () =>
+{
+    const uav = { ...register("uav", 0), componentCount: 0 };
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Position", 0, 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2,
+                opcode: 0,
+                opcodeName: "dcl_unordered_access_view_typed",
+                isDeclaration: true,
+                declaration: {
+                    registerIndex: 0,
+                    resourceDimensionName: "buffer",
+                    returnType: { returnTypeNames: [ "uint", "uint", "uint", "uint" ] }
+                },
+                operands: [ uav ]
+            },
+            instruction(4, "mov", [ register("output", 0, { mask: "xyzw" }), immediate([ 0, 0, 0, 0 ]) ]),
+            instruction(9, "ret", [])
+        ]
+    };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-uav" }),
+        /is not supported in the vertex stage/u);
+});

@@ -78,6 +78,7 @@ function portableBinding(binding, visibility)
     const expectedDescriptors = {
         "uniform-buffer": [ "buffer" ],
         "sampled-resource": [ "buffer", "texture" ],
+        "storage-resource": [ "buffer" ],
         sampler: [ "sampler" ]
     }[binding.resourceKind];
     if (!expectedDescriptors || descriptorKeys.length !== 1 || !expectedDescriptors.includes(descriptorKeys[0]))

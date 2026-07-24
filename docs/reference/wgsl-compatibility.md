@@ -226,6 +226,20 @@ vertex stage lowers `sample_l` (`textureSampleLevel`) and `sample_d`
 (`textureSampleGrad`). Implicit-LOD `sample`/`sample_b` stay fragment-only —
 WGSL forbids implicit derivatives in a vertex entry point.
 
+### Typed uint buffer UAVs + `atomic_iadd` → guarded storage atomics
+
+A `dcl_unordered_access_view_typed` buffer with a uniform uint return type
+lowers to `var<storage, read_write> uN: array<atomic<u32>>` (fragment stage
+only — WebGPU vertex-stage storage buffers are read-only), and `atomic_iadd`
+becomes a bounds-guarded statement:
+`if (i < arrayLength(&uN)) { atomicAdd(&uN[i], v); }`. The guard reproduces
+D3D's defined behavior — out-of-bounds typed-UAV atomics are dropped — where
+an unguarded WGSL access would clamp onto a live element. The result-returning
+form (`imm_atomic_iadd`), other atomic opcodes, and non-uint or non-buffer
+UAV shapes fail closed. The same engine contract as typed SRV buffers applies:
+the buffer binds as storage, elements are raw 4-byte u32 words, and no DXGI
+view-format conversion is reproduced.
+
 ### `float_16` minimum precision → full-precision f32
 
 D3D minimum precision is a floor, not a format: an implementation that computes

@@ -148,6 +148,10 @@ export function buildWgsl(input, options = {})
         {
             lines.push(`${indent}discard;`);
         }
+        else if (statement.kind === "call")
+        {
+            lines.push(`${indent}${statement.expression.code};`);
+        }
         else if (statement.kind === "if")
         {
             lines.push(`${indent}if (${statement.condition.code})`, `${indent}{`);

@@ -174,6 +174,31 @@ function sampledResourceLayout(binding)
         : structuredBufferLayout(binding);
 }
 
+function uavBufferLayout(program, binding)
+{
+    // Fragment-only: WebGPU vertex-stage storage buffers are read-only.
+    if (program.stage !== "pixel")
+    {
+        throw new Error(`WGSL storage resource ${binding.id} is not supported in the ${program.stage} stage`);
+    }
+    const returns = binding.returnType?.returnTypeNames || [];
+    if (binding.resourceDimension !== "buffer"
+        || Number.isInteger(binding.structureStride)
+        || returns.length !== 4 || returns.some((entry) => entry !== "uint"))
+    {
+        throw new Error(`WGSL storage resource ${binding.id} shape is not supported; only typed uint buffer UAVs are supported`);
+    }
+    return {
+        declaration: "var<storage, read_write>",
+        type: "array<atomic<u32>>",
+        buffer: {
+            type: "storage",
+            hasDynamicOffset: false,
+            minBindingSize: 4
+        }
+    };
+}
+
 function samplerLayout(program, binding)
 {
     const declaration = declarationFor(program, binding);
@@ -206,6 +231,7 @@ function lowerOne(program, binding, bindingIndex)
     if (binding.resourceKind === "uniform-buffer") layout = uniformLayout(program, binding);
     else if (binding.resourceKind === "sampled-resource") layout = sampledResourceLayout(binding);
     else if (binding.resourceKind === "sampler") layout = samplerLayout(program, binding);
+    else if (binding.resourceKind === "storage-resource") layout = uavBufferLayout(program, binding);
     else throw new Error(`WGSL binding ${binding.id} has unsupported kind ${binding.resourceKind}`);
     const identity = `${binding.resourceKind}:${registerSpace}:${registerIndex}`;
     const visibility = STAGE_VISIBILITY[program.stage];
