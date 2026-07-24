@@ -112,18 +112,20 @@ export function computeEntryPointParameters(program)
         }
         builtins.add(input.builtin);
         names.add(input.name);
-        if (input.builtin !== "global_invocation_id"
-            || input.name !== "dispatch_thread_id"
-            || input.type !== "vec3<u32>")
-        {
-            throw new Error(`WGSL compute builtin input ${input.builtin || "<empty>"} is not supported`);
-        }
     }
-    if (inputs.length !== 1)
+    const signature = inputs.map((input) =>
+        `${input.builtin}:${input.name}:${input.type}`).join("|");
+    if (signature === "global_invocation_id:dispatch_thread_id:vec3<u32>")
     {
-        throw new Error("WGSL compute builtinInputs contains unsupported entries");
+        return "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
     }
-    return "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
+    if (signature === "workgroup_id:workgroup_id:vec3<u32>|"
+        + "local_invocation_id:local_invocation_id:vec3<u32>")
+    {
+        return "@builtin(workgroup_id) workgroup_id: vec3<u32>, "
+            + "@builtin(local_invocation_id) local_invocation_id: vec3<u32>";
+    }
+    throw new Error("WGSL compute builtinInputs contains an unsupported ordered schema");
 }
 
 /**

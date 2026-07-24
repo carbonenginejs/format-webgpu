@@ -444,6 +444,55 @@ failed to 507 / 30 / 0: only `system/raytracing/skinvertices` became
 qualified, and direct byte comparison confirmed all 506 previously qualified
 packages remained identical.
 
+### Bounded 256×1×1 two-word particle sort step
+
+An isolated SM5.0/SM5.1 compute profile covers
+`particles/gpu/sortstep`. Both backends declare the same finite space-zero
+resources: immediate `cb3` with one vec4 row, typed uint buffer `t0`,
+non-coherent structured UAV `u0` with an 8-byte stride,
+`input_thread_group_id.x`, `input_thread_id_in_group.x`, two temporary
+registers, and `dcl_thread_group 256,1,1`. The SM5.1 form additionally requires
+canonical finite range-zero encodings; range-relative `cb0[3]` is normalized
+back to physical `cb3`, not treated as a different binding. The exact 20-opcode
+body has two nested selections and no loops, barriers, atomics, workgroup
+memory, textures, samplers, or live register merges. Declaration, operand,
+modifier, extension, binding-range, CFG, SSA, and type metadata are replayed
+and compared before emission.
+
+The two compute builtins map, in fixed order, to
+`@builtin(workgroup_id) workgroup_id` and
+`@builtin(local_invocation_id) local_invocation_id`. Their x components form
+the global scalar lane used by the source; neither y nor z is read. Integer
+arithmetic remains raw wrapping u32, including the profile's sole source
+modifier: integer `NEG` is emitted as two's-complement negation rather than
+floating negation. The pair comparison bitcasts the second word of each record
+to f32, so ordinary WGSL `<` also preserves the source's false result for NaN.
+
+The fixed `t0[3]` typed-buffer read uses a clamped physical word access and
+selects zero when index 3 is out of range. The scalar-word view is not inferred
+from the DXBC return tuple alone: the already-qualified `setsortargs` producer
+publishes the same `SortParameters` binding as a typed scalar uint UAV and
+writes its four words individually. The consumer therefore uses
+`var<storage, read> t0: array<u32>` with `minBindingSize: 4`.
+
+The UAV is `var<storage, read_write> u0: array<u32>` with
+`minBindingSize: 8`. Structured loads divide `arrayLength` by two to obtain the
+complete-record count, clamp both eagerly evaluated physical word accesses,
+and select two zero words for an out-of-range record. Each two-word structured
+store has its own complete-record bounds branch and is dropped as one source
+instruction when out of range.
+
+DX11 and DX12 are both substantive comparison inputs for this profile and emit
+the same WGSL and portable binding layout after finite-range normalization.
+The native browser gate validates the two-builtin 256×1×1 module, its compute
+bind-group and pipeline layouts, and the compute pipeline with zero WGSL
+warnings.
+
+The full corpus transition moved from 507 qualified / 30 unsupported / 0
+failed to 508 / 29 / 0: only `particles/gpu/sortstep` became qualified, and
+direct byte comparison confirmed all 507 previously qualified packages
+remained identical.
+
 ### `float_16` minimum precision → full-precision f32
 
 D3D minimum precision is a floor, not a format: an implementation that computes
@@ -564,6 +613,10 @@ sample form and in both stages.
   emitted. Fragment supports all four opcodes; vertex supports the
   explicit-gradient/LOD pair already legal there. Duplicate or malformed
   records, offsets on other opcodes, and non-2D resource shapes fail closed.
+  The completed corpus transition kept 497 shaders qualified and intentionally
+  changed exactly seven prior packages: `downsample`, `taa`, the tactical
+  overlay `anchor`, `connector`, `ubershader`, and `velocity` shaders, and
+  `ui/glowtransform`.
   *Confirmed against vkd3d-shader:* its IR preserves the signed immediate
   offset on sample instructions, and its SPIR-V, GLSL, and MSL backends pass
   those constants through as the target sampling operation's constant offset.

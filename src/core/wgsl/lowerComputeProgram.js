@@ -4,6 +4,10 @@ import {
     isSkinVerticesComputeProfile,
     lowerSkinVerticesComputeProgram
 } from "./lowerSkinVerticesComputeProgram.js";
+import {
+    isSortStepComputeProfile,
+    lowerSortStepComputeProgram
+} from "./lowerSortStepComputeProgram.js";
 
 const COMPONENTS = Object.freeze([ "x", "y", "z", "w" ]);
 const DECLARATION_OPCODES = Object.freeze([
@@ -1048,6 +1052,10 @@ function lowerScalarWordComputeProgram(program, options = {})
  */
 export function lowerComputeProgram(program, options = {})
 {
+    if (isSortStepComputeProfile(program))
+    {
+        return lowerSortStepComputeProgram(program, options);
+    }
     if (isSkinVerticesComputeProfile(program))
     {
         return lowerSkinVerticesComputeProgram(program, options);

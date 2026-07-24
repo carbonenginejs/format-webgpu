@@ -151,13 +151,16 @@ function typedBufferLayout(program, binding)
     const returns = binding.returnType?.returnTypeNames || [];
     if (program.stage === "compute")
     {
-        if (returns.length !== 4 || returns.some((entry) => entry !== "sint"))
+        const component = returns.length === 4 && returns.every((entry) => entry === returns[0])
+            ? { sint: "i32", uint: "u32" }[returns[0]]
+            : null;
+        if (!component)
         {
-            throw new Error(`WGSL compute typed buffer resource ${binding.id} return type is not supported; the bounded scalar-word profile requires uniform sint components`);
+            throw new Error(`WGSL compute typed buffer resource ${binding.id} return type is not supported; bounded scalar-word profiles require uniform sint or uint components`);
         }
         return {
             declaration: "var<storage, read>",
-            type: "array<i32>",
+            type: `array<${component}>`,
             buffer: {
                 type: "read-only-storage",
                 hasDynamicOffset: false,

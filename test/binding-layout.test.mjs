@@ -327,6 +327,31 @@ test("compute binding lowering uses the validated scalar-word buffer profile", (
     );
 });
 
+test("compute typed uint buffers lower to raw scalar words without widening render layouts", () =>
+{
+    const uintDecoded = computeTypedBuffers();
+    uintDecoded.instructions.find((entry) => entry.opcodeName === "dcl_resource")
+        .declaration.returnType.returnTypeNames =
+        [ "uint", "uint", "uint", "uint" ];
+    const uintIr = CjsFormatWebgpu.buildShaderIr(uintDecoded);
+    const uintBinding = lowerBindingLayout(uintIr)
+        .find((entry) => entry.resourceKind === "sampled-resource");
+    assert.equal(uintBinding.type, "array<u32>");
+    assert.deepEqual(uintBinding.buffer, {
+        type: "read-only-storage",
+        hasDynamicOffset: false,
+        minBindingSize: 4
+    });
+
+    const mixedDecoded = computeTypedBuffers();
+    mixedDecoded.instructions.find((entry) => entry.opcodeName === "dcl_resource")
+        .declaration.returnType.returnTypeNames =
+        [ "uint", "sint", "uint", "uint" ];
+    const mixedIr = CjsFormatWebgpu.buildShaderIr(mixedDecoded);
+    assert.throws(() => lowerBindingLayout(mixedIr),
+        /require uniform sint or uint components/u);
+});
+
 test("compute structured UAV lowering uses writable raw DWORD storage", () =>
 {
     const ir = CjsFormatWebgpu.buildShaderIr(computeStructuredUav());
