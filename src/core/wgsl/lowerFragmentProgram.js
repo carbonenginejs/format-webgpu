@@ -437,13 +437,23 @@ function applyLaneModifier(code, operand, targetType, instruction, operandIndex)
     return modifierOnStorage(code, targetType, modifier);
 }
 
+function unsupportedMinPrecision(operand)
+{
+    // D3D minimum precision is a floor, not a format: computing float_16
+    // operands at full 32-bit is a conforming implementation, so they promote
+    // to ordinary f32 lanes (registers are 32-bit either way). Other kinds
+    // stay fail-closed until a shader needs them.
+    const name = operand.minPrecisionName || "default";
+    return name !== "default" && name !== "float_16";
+}
+
 function operandLaneExpression(program, instruction, operandIndex, destinationMask, laneIndex, targetType, inputs, bindings)
 {
     const operand = instruction.operands[operandIndex];
     if (!operand) throw new Error(`WGSL fragment instruction ${instruction.index} has no operand ${operandIndex}`);
-    if ((operand.minPrecisionName || "default") !== "default")
+    if (unsupportedMinPrecision(operand))
     {
-        throw new Error(`WGSL fragment instruction ${instruction.index} lane operand ${operandIndex} uses an unsupported modifier`);
+        throw new Error(`WGSL fragment instruction ${instruction.index} minimum-precision kind ${operand.minPrecisionName} is not supported`);
     }
     const read = sourceRead(instruction, operandIndex);
     if (read)
@@ -476,9 +486,9 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
 {
     const operand = instruction.operands[operandIndex];
     if (!operand) throw new Error(`WGSL fragment instruction ${instruction.index} has no operand ${operandIndex}`);
-    if ((operand.minPrecisionName || "default") !== "default")
+    if (unsupportedMinPrecision(operand))
     {
-        throw new Error(`WGSL fragment instruction ${instruction.index} uses minimum precision`);
+        throw new Error(`WGSL fragment instruction ${instruction.index} minimum-precision kind ${operand.minPrecisionName} is not supported`);
     }
     const read = sourceRead(instruction, operandIndex);
     const activeComponents = fixedSourceLanes(instruction, operandIndex, program);
@@ -897,9 +907,10 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         context.requiresDerivativeUniformityOptOut = true;
     }
     validatePreciseInstruction(instruction, "fragment");
-    if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
+    const imprecise = instruction.operands.find(unsupportedMinPrecision);
+    if (imprecise)
     {
-        throw new Error(`WGSL fragment instruction ${instruction.index} uses minimum precision`);
+        throw new Error(`WGSL fragment instruction ${instruction.index} minimum-precision kind ${imprecise.minPrecisionName} is not supported`);
     }
     validateRegisterBitcasts(program, instruction);
     if (instruction.opcodeName === "ret")

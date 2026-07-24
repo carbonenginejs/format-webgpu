@@ -463,13 +463,23 @@ function validateRegisterBitcasts(program, instruction)
     }
 }
 
+function unsupportedMinPrecision(operand)
+{
+    // D3D minimum precision is a floor, not a format: computing float_16
+    // operands at full 32-bit is a conforming implementation, so they promote
+    // to ordinary f32 lanes (registers are 32-bit either way). Other kinds
+    // stay fail-closed until a shader needs them.
+    const name = operand.minPrecisionName || "default";
+    return name !== "default" && name !== "float_16";
+}
+
 function operandExpression(program, instruction, operandIndex, destinationMask, count, inputs, bindings)
 {
     const operand = instruction.operands[operandIndex];
     if (!operand) throw new Error(`WGSL vertex instruction ${instruction.index} has no operand ${operandIndex}`);
-    if ((operand.minPrecisionName || "default") !== "default")
+    if (unsupportedMinPrecision(operand))
     {
-        throw new Error(`WGSL vertex instruction ${instruction.index} uses minimum precision`);
+        throw new Error(`WGSL vertex instruction ${instruction.index} minimum-precision kind ${operand.minPrecisionName} is not supported`);
     }
     const type = expectedType(instruction, operandIndex);
     const read = sourceRead(instruction, operandIndex);
@@ -766,9 +776,10 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         throw new Error(`WGSL vertex opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
     }
     validatePreciseInstruction(instruction, "vertex");
-    if (instruction.operands.some((operand) => (operand.minPrecisionName || "default") !== "default"))
+    const imprecise = instruction.operands.find(unsupportedMinPrecision);
+    if (imprecise)
     {
-        throw new Error(`WGSL vertex instruction ${instruction.index} uses minimum precision`);
+        throw new Error(`WGSL vertex instruction ${instruction.index} minimum-precision kind ${imprecise.minPrecisionName} is not supported`);
     }
     validateRegisterBitcasts(program, instruction);
     if (instruction.opcodeName === "ld_structured" && instruction.saturate)

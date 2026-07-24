@@ -524,15 +524,25 @@ test("WGSL lowering requires consistent DXBC refactoring controls", () =>
     assert.throws(() => CjsFormatWebgpu.buildWgsl(inconsistent), /inconsistent dcl_global_flags metadata/u);
 });
 
-test("structured skinning rejects minimum precision on every operand role", () =>
+test("structured skinning rejects unsupported minimum-precision kinds on every operand role", () =>
 {
     for (const operandIndex of [ 0, 2 ])
     {
         const decoded = structuredSkinningVertex();
         const load = decoded.instructions.find((entry) => entry.opcodeName === "ld_structured");
-        load.operands[operandIndex].minPrecisionName = operandIndex === 0 ? "min16_float" : "min16_uint";
-        assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /uses minimum precision/u);
+        load.operands[operandIndex].minPrecisionName = operandIndex === 0 ? "sint_16" : "uint_16";
+        assert.throws(() => CjsFormatWebgpu.buildWgsl(decoded), /minimum-precision kind (?:sint_16|uint_16) is not supported/u);
     }
+});
+
+test("float_16 minimum precision promotes to full precision unchanged", () =>
+{
+    const baseline = CjsFormatWebgpu.buildWgsl(structuredSkinningVertex());
+    const decoded = structuredSkinningVertex();
+    const load = decoded.instructions.find((entry) => entry.opcodeName === "ld_structured");
+    load.operands[0].minPrecisionName = "float_16";
+    load.operands[1].minPrecisionName = "float_16";
+    assert.equal(CjsFormatWebgpu.buildWgsl(decoded).code, baseline.code);
 });
 
 test("packed vertex sincos rejects malformed multi-result metadata", () =>

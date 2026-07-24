@@ -226,6 +226,16 @@ vertex stage lowers `sample_l` (`textureSampleLevel`) and `sample_d`
 (`textureSampleGrad`). Implicit-LOD `sample`/`sample_b` stay fragment-only —
 WGSL forbids implicit derivatives in a vertex entry point.
 
+### `float_16` minimum precision → full-precision f32
+
+D3D minimum precision is a floor, not a format: an implementation that computes
+`min16float` operands at full 32-bit precision is conforming, and the registers
+are 32-bit regardless of the hint. Operands tagged `float_16` therefore lower
+exactly as ordinary f32 lanes — the hint is dropped, which changes nothing
+observable versus a conforming D3D driver running at full precision. The other
+minimum-precision kinds (`float_2_8`, `sint_16`, `uint_16`) stay fail-closed
+until a shader needs them.
+
 ### Typed `Buffer` SRVs → read-only storage buffers
 
 WGSL has no texel-buffer type, so a `dcl_resource` with dimension `buffer`
@@ -271,7 +281,8 @@ fail closed.
   These fail closed per stage kind instead of being misreported as malformed
   records.
 - **Sampler modes other than `default`**, non-`linear` fragment input
-  interpolation, minimum-precision operands, and vertex system semantics
+  interpolation, minimum-precision kinds other than `float_16` (which
+  promotes; see Adapted), and vertex system semantics
   outside `SV_Position`/`SV_VertexID`/`SV_InstanceID` (fragment:
   `SV_Position`/`SV_IsFrontFace`, output `SV_Target`).
 
