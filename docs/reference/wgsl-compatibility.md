@@ -103,17 +103,14 @@ removed too, browser-validated across fragment selections with live merges.
 
 ### Scalar merge inputs inherited through an arm tail
 
-A two-armed selection merge's inputs were matched to arms strictly by
-`incoming.blockId === trueBlockId/falseBlockId`. But a phi records the block
-that *defines* the value, not the CFG edge into the join: when an arm tail only
-carries a register through (an intermediate `selection-merge` block, or a value
-threaded down a chain) the phi's incoming names the upstream definition block,
-which is not the arm-tail predecessor, so the match failed and the shape was
-rejected. Now each input is matched by direct blockId first, and — because a
-two-armed join has exactly two edges and the phi exactly two inputs — the
-remaining input is assigned to the remaining arm by elimination when the other
-arm matched directly. This is the selection analogue of the loop-exit reaching
-resolution already used for break edges.
+A two-armed selection merge's inputs are matched to arms by
+`incoming.blockId === trueBlockId/falseBlockId`; canonical IR records the CFG
+predecessor there even when its value ref resolves to an upstream definition.
+For accepted prebuilt IR where exactly one edge identity is unavailable, the
+remaining input is assigned to the remaining arm by elimination — a two-armed
+join has exactly two edges and the phi exactly two inputs. The referenced input
+may still be inherited through an arm tail, which requires the scope handling
+described below.
 
 The inherited input frequently does not lexically dominate its arm-tail merge
 assignment. That is safe for the two arms whose assignment is emitted *inside* a
@@ -528,30 +525,41 @@ sample form and in both stages.
   … UDIV, and returns UINT_MAX", and it emits a `MOVC` selecting `0xffffffff`
   for both quotient and remainder when the divisor is zero — the same semantic
   reproduced by the eager-safe WGSL guard.
-- **Loop merges** — scalar phis with exactly one entry and one backedge
-  incoming; multi-exit loops (several `break` sites feeding distinct post-loop
-  merges) are not validated beyond the single-`breakc` shape.
+- **Loop merges** — scalar header phis with exactly one entry and one
+  backedge incoming. The entry and backedge use their actual reaching
+  references, including an inherited preheader value. Multi-exit loops resolve
+  and validate one assignment for every live scalar exit phi at every reachable
+  `break` edge.
 - **Loop-exit (break-join) and header-backedge merges — cross-plan reaching
   values.** A loop exited only through `break` edges yields phis at the after-
   `endloop` join; a header phi likewise takes a value back along the latch edge.
   In both cases the per-edge value is resolved by `reachingRef` — a walk up the
   dominator chain from the edge's predecessor to the nearest block whose
   `outputValues` actually define the register. This is necessary because a break
-  predecessor (or latch block) commonly only *inherits* the register: it appears
-  in neither its own `outputValues` nor the phi's recorded `incoming` (which
-  names the register's *definition* block, not the CFG edge). The resolved value
-  is accepted when it is (a) an instruction result / program input that dominates
-  the edge; (b) this loop's own header phi (a `var` before the loop / a no-op
+  predecessor (or latch block) commonly only *inherits* the register: it has no
+  matching entry in its own `outputValues`, while the canonical phi incoming
+  retains the predecessor `blockId` but may reference an upstream definition.
+  The resolved value is accepted when it is (a) an instruction result / program
+  input that dominates the edge; (b) this loop's own header phi (a `var` before
+  the loop / a no-op
   self-latch); or (c) any other **live** merge phi — an enclosing selection/
   switch/loop plan declares it as a `var` and `hoistEscapingValues` lifts that
   declaration to function scope, so the cross-plan read resolves. A non-live phi
   is never declared and fails closed.
 - **Switch merges** — break-terminated clauses; at most ONE pass-through
   incoming (a clause that keeps the prior value); a shared-join planner exists
-  for `if { switch } endif` joins (fail-closed and not exercised by current
-  package tests).
+  for `if { switch } endif` joins.
 - **Selection merges** — scalar phis; two-armed regions identify arm tails by
   edge kind; guaranteed-output tracking intersects arms.
+- **Observable undefined merge paths** — validation follows the exact
+  references emitted by ordinary selections, switch clauses, shared
+  `if { switch }` joins, loop header entry/backedge assignments, and loop-exit
+  break assignments. Correlation keys include both SSA value identity and
+  component, so two lanes written by one vector comparison are not conflated.
+  Conditions are preserved through acyclic selection paths but cleared across
+  loop backedges/exits, where they may change between iterations. Switch
+  selector correlations and guarded direct instruction reads are not modeled;
+  those cases fail closed rather than using a contradictory-path proof.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
 Unless a mapping states otherwise, ordinary WGSL floating-point operations

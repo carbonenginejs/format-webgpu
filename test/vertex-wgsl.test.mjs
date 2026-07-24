@@ -1104,6 +1104,88 @@ test("vertex switch merges accept a pass-through incoming for clauses that keep 
     assert.equal(assignments.length, 2);
 });
 
+test("vertex switch merges reject pass-through values with indirect undefined ancestry", () =>
+{
+    const selector = (value) => ({
+        ...register("immediate32", null, {}),
+        immediateValues: [ { uint32: value, float32: 0 } ]
+    });
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            { ...instruction(2, "if", [ register("input", 0, { selected: "y" }) ]), testBoolean: "nonzero" },
+            instruction(4, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(8, "endif", []),
+            instruction(9, "switch", [ register("input", 0, { selected: "x" }) ]),
+            instruction(11, "case", [ selector(1) ]),
+            instruction(13, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(17, "break", []),
+            instruction(18, "default", []),
+            instruction(20, "break", []),
+            instruction(21, "endswitch", []),
+            instruction(22, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xxxx" }) ]),
+            instruction(26, "ret", [])
+        ]
+    };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-switch-undefined-ancestry" }),
+        /observable undefined path/i
+    );
+});
+
+test("vertex shared if-switch merges preserve outer condition correlation", () =>
+{
+    const selector = (value) => ({
+        ...register("immediate32", null, {}),
+        immediateValues: [ { uint32: value, float32: 0 } ]
+    });
+    const fixture = (secondTestBoolean) => ({
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3, "uint32") ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            { ...instruction(2, "if", [ register("input", 0, { selected: "y" }) ]), testBoolean: "nonzero" },
+            instruction(4, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(8, "endif", []),
+            {
+                ...instruction(9, "if", [ register("input", 0, { selected: "y" }) ]),
+                testBoolean: secondTestBoolean
+            },
+            instruction(11, "switch", [ register("input", 0, { selected: "x" }) ]),
+            instruction(13, "case", [ selector(1) ]),
+            instruction(15, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(19, "break", []),
+            instruction(20, "default", []),
+            instruction(22, "utof", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(26, "break", []),
+            instruction(27, "endswitch", []),
+            instruction(28, "endif", []),
+            instruction(29, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xxxx" }) ]),
+            instruction(33, "ret", [])
+        ]
+    });
+
+    const complementary = CjsFormatWebgpu.buildWgsl(fixture("zero"), {
+        source: "synthetic-shared-switch-correlated"
+    });
+    assert.match(complementary.code, /if \(input\.input0\.y == 0u\)/u);
+    assert.match(complementary.code, /switch \(input\.input0\.x\)/u);
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(fixture("nonzero"), {
+            source: "synthetic-shared-switch-undefined-ancestry"
+        }),
+        /observable undefined path/i
+    );
+});
+
 test("vertex lowering samples a texture with an explicit level of detail", () =>
 {
     const program = {

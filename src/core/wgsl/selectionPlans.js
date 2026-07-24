@@ -137,9 +137,9 @@ function definitionDominates(value, targetBlockId, targetInstruction, dominators
  * is a value `hoistEscapingValues` can lift to a function-top `var`: an ordinary
  * instruction result (always emitted as a `let`) or a live merge phi (emitted as
  * a `var` by its own plan). This is the inherited-input case — the arm tail only
- * carries the register through, so the phi records the upstream definition block,
- * not this edge. On the path that reaches the arm tail the value was assigned
- * before the merge write, so the hoisted var's zero initializer is unobservable.
+ * carries the register through, and its incoming ref resolves to an upstream
+ * definition. On the path that reaches the arm tail the value was assigned before
+ * the merge write, so the hoisted var's zero initializer is unobservable.
  * (Loops cannot use this relaxation: a back-edge could reach the assignment with
  * the value defined in a different iteration.) Undefined-register inputs are
  * handled by the caller; anything else fails closed.
@@ -156,8 +156,9 @@ function armInputUsable(value, armBlockId, boundaryInstruction, dominators, live
  * walking the dominator chain from that block to the nearest dominating block
  * whose `outputValues` define the register. A break predecessor frequently only
  * INHERITS the register (never redefines it on that path), so it is absent from
- * both its own `outputValues` and the exit phi's `incoming` — the latter records
- * the register's *definition* block, which need not be the CFG edge predecessor.
+ * its own `outputValues`. Canonical phi inputs do retain the CFG predecessor as
+ * `blockId`, but their value ref may resolve to an upstream definition; this walk
+ * derives that same reaching value directly from block state.
  *
  * @returns {{valueId: string, component: string}|null} The reaching ref, or null.
  */
@@ -179,18 +180,35 @@ function reachingRef(program, blockId, register, component, dominators)
     return best ? { valueId: best.ref.valueId, component: best.ref.component } : null;
 }
 
-function extendUndefinedPaths(paths, conditionId, nonzero)
+function withCondition(constraints, conditionId, nonzero)
 {
-    const extended = [];
-    for (const path of paths)
-    {
-        const existing = path.get(conditionId);
-        if (existing !== undefined && existing !== nonzero) continue;
-        const next = new Map(path);
-        next.set(conditionId, nonzero);
-        extended.push(next);
-    }
-    return extended;
+    const existing = constraints.get(conditionId);
+    if (existing !== undefined && existing !== nonzero) return null;
+    const next = new Map(constraints);
+    next.set(conditionId, nonzero);
+    return next;
+}
+
+function selectionConditionId(instruction)
+{
+    const reads = instruction.dataflow.reads;
+    const read = reads.length === 1
+        && reads[0].kind === "register-read"
+        && reads[0].operandIndex === 0
+        && reads[0].refs.length === 1
+        ? reads[0]
+        : null;
+    return read
+        ? `${read.refs[0].valueId}.${read.refs[0].component}`
+        : `selection:${instruction.index}`;
+}
+
+function undefinedTraversalKey(valueId, constraints)
+{
+    return JSON.stringify([
+        valueId,
+        Array.from(constraints.entries()).sort(([ left ], [ right ]) => left.localeCompare(right))
+    ]);
 }
 
 function validateUndefinedMergePaths(program, live, values, plans, stage)
@@ -201,36 +219,67 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
         for (const merge of plan.merges) mergePlans.set(merge.id, { plan, merge });
         for (const merge of plan.exitMerges || []) mergePlans.set(merge.id, { plan, merge });
     }
-    const memo = new Map();
-    const visiting = new Set();
-
-    function undefinedPaths(valueId)
+    function hasUndefinedPath(valueId, constraints, visiting)
     {
         const value = values.get(valueId);
-        if (value?.origin === "undefined-register") return [ new Map() ];
-        if (value?.origin !== "control-flow-merge" || !live.has(valueId)) return [];
-        if (memo.has(valueId)) return memo.get(valueId);
-        if (visiting.has(valueId)) throw new Error(`WGSL ${stage} merge graph contains a cycle at ${valueId}`);
+        if (value?.origin === "undefined-register") return true;
+        if (value?.origin !== "control-flow-merge" || !live.has(valueId)) return false;
+        const traversalKey = undefinedTraversalKey(valueId, constraints);
+        if (visiting.has(traversalKey)) return false;
         const entry = mergePlans.get(valueId);
         if (!entry) throw new Error(`WGSL ${stage} merge ${valueId} has no selection plan`);
-        if (entry.plan.kind === "switch" || entry.plan.kind === "loop" || entry.merge.viaSwitch) return [];
-        visiting.add(valueId);
+        visiting.add(traversalKey);
         const { plan, merge } = entry;
-        const trueRequiresNonzero = plan.testBoolean !== "zero";
-        const paths = [
-            ...extendUndefinedPaths(undefinedPaths(merge.falseIncoming.valueId), plan.conditionId, !trueRequiresNonzero),
-            ...extendUndefinedPaths(undefinedPaths(merge.trueIncoming.valueId), plan.conditionId, trueRequiresNonzero)
-        ];
-        visiting.delete(valueId);
-        memo.set(valueId, paths);
-        return paths;
+        let result = false;
+        if (plan.kind === "switch")
+        {
+            result = merge.perClause.some((incoming) =>
+                hasUndefinedPath(incoming.valueId, constraints, visiting));
+        }
+        else if (plan.kind === "loop" && merge.entryIncoming)
+        {
+            // Follow the exact entry and reaching backedge refs emitted by the
+            // loop plan. A carried backedge may legitimately refer to this phi;
+            // the per-traversal visiting set breaks that cycle without hiding
+            // undefined ancestry on another carried value.
+            result = hasUndefinedPath(merge.entryIncoming.valueId, constraints, visiting)
+                || hasUndefinedPath(merge.backedgeIncoming.valueId, new Map(), visiting);
+        }
+        else if (plan.kind === "loop")
+        {
+            // Loop-exit phis are assigned from the actual reaching reference at
+            // each break edge, not necessarily from the IR phi's raw incoming.
+            result = Array.from(plan.exitEdges.values())
+                .some((assignments) => assignments
+                    .filter((assignment) => assignment.id === merge.id)
+                    .some((assignment) => hasUndefinedPath(
+                        assignment.ref.valueId, new Map(), visiting)));
+        }
+        else
+        {
+            const trueRequiresNonzero = plan.testBoolean !== "zero";
+            const falseConstraints = withCondition(
+                constraints, plan.conditionId, !trueRequiresNonzero);
+            const trueInputs = merge.viaSwitch ? merge.perClause : [ merge.trueIncoming ];
+            const trueConstraints = withCondition(
+                constraints, plan.conditionId, trueRequiresNonzero);
+            result = Boolean(falseConstraints)
+                && hasUndefinedPath(merge.falseIncoming.valueId, falseConstraints, visiting);
+            if (!result && trueConstraints)
+            {
+                result = trueInputs.some((incoming) =>
+                    hasUndefinedPath(incoming.valueId, trueConstraints, visiting));
+            }
+        }
+        visiting.delete(traversalKey);
+        return result;
     }
 
     for (const id of live)
     {
         const directlyRead = program.instructions.some((instruction) => instruction.dataflow.reads
             .some((read) => read.refs.some((ref) => ref.valueId === id)));
-        if (directlyRead && undefinedPaths(id).length)
+        if (directlyRead && hasUndefinedPath(id, new Map(), new Set()))
         {
             throw new Error(`WGSL ${stage} merge ${id} has an unsupported observable undefined path`);
         }
@@ -395,13 +444,21 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
         {
             throw new Error(`WGSL ${stage} merge ${id} is not a scalar loop phi`);
         }
-        const entryIncoming = value.incoming.find((incoming) => incoming.blockId === preheaderBlockId);
+        // Canonical IR records the preheader edge directly. Retain a defensive
+        // fallback for accepted prebuilt IR whose edge record is absent: resolve
+        // the value actually reaching the preheader, and require a live plan if
+        // that value is itself a merge.
+        const entryIncoming = value.incoming.find((incoming) => incoming.blockId === preheaderBlockId)
+            || reachingRef(program, preheaderBlockId, value.register, value.writeMask, dominators);
         if (!entryIncoming)
         {
             throw new Error(`WGSL ${stage} merge ${id} has unsupported loop incoming edges`);
         }
         const entryValue = values.get(entryIncoming.valueId);
+        const entryIsLiveMerge = entryValue?.origin === "control-flow-merge"
+            && live.has(entryIncoming.valueId);
         if (entryValue?.origin === "undefined-register"
+            || (entryValue?.origin === "control-flow-merge" && !entryIsLiveMerge)
             || !definitionDominates(entryValue, preheaderBlockId,
                 program.blocks.find((block) => block.id === preheaderBlockId).endInstruction + 1, dominators))
         {
@@ -409,8 +466,8 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
         }
         // Backedge (latch) value: the register's TRUE reaching definition at the
         // latch block's exit, resolved by dominator walk (see reachingRef). The
-        // phi's own recorded backedge incoming frequently names a redundant nested
-        // join phi (its *definition* site), not the value that actually flows back;
+        // phi's own recorded backedge ref can name a redundant nested join phi,
+        // rather than the value that actually flows back;
         // emitting that phi id yields an undeclared name because such a phi is not
         // live and no plan declares it. The resolved value is one of: an emittable
         // definition dominating the latch; this loop's own header phi (a no-op self
@@ -433,9 +490,9 @@ function buildLoopPlan(program, region, values, live, dominators, stage)
     // become phis at the after-`endloop` join. Each such scalar phi becomes a
     // `var` declared before the loop and assigned right before each `break` with
     // the value the register actually holds on that edge — taken from the break
-    // block's `outputValues` (its true reaching definition), NOT by matching the
-    // phi's `incoming.blockId`, which records the definition block rather than the
-    // break-edge predecessor.
+    // block's reaching definition. Canonical `incoming.blockId` does identify the
+    // break-edge predecessor, but resolving from block state also handles inherited
+    // values and avoids emitting a redundant/non-live nested merge ref.
     const exitJoin = blockForInstruction(program, region.endInstruction + 1);
     const exitMergeIds = (exitJoin?.mergeSite?.valueIds || []).filter((id) => live.has(id));
     let exitMerges = [];
@@ -569,10 +626,7 @@ export function buildSelectionPlans(program, stage)
             const switchPlan = buildSwitchPlan(program, sharedSwitch, values, live, dominators, stage, true);
             plans.set(sharedSwitch.startInstruction, switchPlan);
             const sharedIf = program.instructions[region.startInstruction];
-            const sharedConditionRefs = sharedIf.dataflow.reads.flatMap((read) => read.refs);
-            const sharedConditionId = sharedConditionRefs.length === 1
-                ? sharedConditionRefs[0].valueId
-                : `selection:${region.startInstruction}`;
+            const sharedConditionId = selectionConditionId(sharedIf);
             if (![ "zero", "nonzero" ].includes(sharedIf.testBoolean))
             {
                 throw new Error(`WGSL ${stage} if instruction ${sharedIf.index} has no supported condition projection`);
@@ -677,10 +731,7 @@ export function buildSelectionPlans(program, stage)
             trueBlockId = truePredecessors[0]?.blockId || null;
         }
         const ifInstruction = program.instructions[region.startInstruction];
-        const conditionRefs = ifInstruction.dataflow.reads.flatMap((read) => read.refs);
-        const conditionId = conditionRefs.length === 1
-            ? conditionRefs[0].valueId
-            : `selection:${region.startInstruction}`;
+        const conditionId = selectionConditionId(ifInstruction);
         if (![ "zero", "nonzero" ].includes(ifInstruction.testBoolean))
         {
             throw new Error(`WGSL ${stage} if instruction ${ifInstruction.index} has no supported condition projection`);
@@ -697,13 +748,10 @@ export function buildSelectionPlans(program, stage)
             {
                 throw new Error(`WGSL ${stage} merge ${id} is not a scalar float predecessor phi`);
             }
-            // An arm input may be defined upstream of its arm tail and merely
-            // inherited through it: the tail block carries the register without
-            // redefining it, so the phi's `incoming.blockId` records the upstream
-            // definition block, not this CFG edge. When exactly one arm matches an
-            // incoming directly, the other incoming belongs to the remaining arm by
-            // elimination — a two-armed join has exactly two edges and this phi has
-            // exactly two inputs, so each input maps to one edge.
+            // Canonical IR records both arm predecessors directly. For accepted
+            // prebuilt IR where exactly one edge identity is missing, the other
+            // incoming belongs to the remaining arm by elimination: a two-armed
+            // join has exactly two edges and this phi exactly two inputs.
             const directFalse = value.incoming.find((incoming) => incoming.blockId === falseBlockId);
             const directTrue = value.incoming.find((incoming) => incoming.blockId === trueBlockId);
             let falseIncoming = directFalse;

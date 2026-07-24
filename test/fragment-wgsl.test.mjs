@@ -409,9 +409,10 @@ function scalarMergeFixture()
     };
 }
 
-function undefinedMergeChainFixture(secondTestBoolean = "zero")
+function undefinedMergeChainFixture(secondTestBoolean = "zero", secondConditionComponent = "x")
 {
     const constants = immediate([ 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000 ]);
+    const vectorConditions = secondConditionComponent !== "x";
     return {
         program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 1 },
         signatures: {
@@ -429,14 +430,17 @@ function undefinedMergeChainFixture(secondTestBoolean = "zero")
                 operands: [ register("input", 0) ]
             },
             instruction(5, "lt", [
-                register("temp", 1, { mask: "x" }),
-                register("input", 0, { selected: "x" }),
-                register("input", 0, { selected: "y" })
+                register("temp", 1, { mask: vectorConditions ? "xy" : "x" }),
+                register("input", 0, vectorConditions ? { swizzle: "xyxx" } : { selected: "x" }),
+                register("input", 0, vectorConditions ? { swizzle: "yxxx" } : { selected: "y" })
             ]),
             { ...instruction(9, "if", [ register("temp", 1, { selected: "x" }) ]), testBoolean: "nonzero" },
             instruction(12, "mov", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
             instruction(16, "endif", []),
-            { ...instruction(17, "if", [ register("temp", 1, { selected: "x" }) ]), testBoolean: secondTestBoolean },
+            {
+                ...instruction(17, "if", [ register("temp", 1, { selected: secondConditionComponent }) ]),
+                testBoolean: secondTestBoolean
+            },
             instruction(20, "mov", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
             instruction(24, "endif", []),
             instruction(25, "mov", [ register("output", 0, { mask: "x" }), register("temp", 0, { selected: "x" }) ]),
@@ -952,6 +956,14 @@ test("SM5.1 undefined carriers require a correlated complementary overwrite", ()
     assert.match(complementary.code, /var value\d+: f32 = 0\.0;/);
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(undefinedMergeChainFixture("nonzero")),
+        /observable undefined path/i
+    );
+});
+
+test("SM5.1 undefined-path correlation distinguishes components of one condition value", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(undefinedMergeChainFixture("zero", "y")),
         /observable undefined path/i
     );
 });
@@ -1567,6 +1579,198 @@ test("fragment lowering emits a counted loop with carried phis and a conditional
     assert.equal(varCount, 2);
     const assignments = shader.code.match(/value\d+ = value\d+;/gu) || [];
     assert.ok(assignments.length >= 2);
+
+    const selfLatchIr = structuredClone(CjsFormatWebgpu.buildShaderIr(program));
+    const loopRegion = selfLatchIr.controlFlow.regions.find((region) => region.kind === "loop");
+    const header = selfLatchIr.blocks.find((block) => block.startInstruction === loopRegion.startInstruction);
+    const merge = selfLatchIr.values.find((value) => header.mergeSite.valueIds.includes(value.id));
+    const backedgeOutput = selfLatchIr.blocks
+        .filter((block) => block.startInstruction <= loopRegion.endInstruction)
+        .sort((left, right) => right.startInstruction - left.startInstruction)
+        .flatMap((block) => block.outputValues)
+        .find((entry) => entry.register === merge.register && entry.component === merge.writeMask);
+    assert(backedgeOutput);
+    backedgeOutput.ref = { valueId: merge.id, component: merge.writeMask };
+    assert.match(CjsFormatWebgpu.buildWgsl(selfLatchIr).code, /loop\n    \{/u);
+
+    const inheritedEntryIr = structuredClone(CjsFormatWebgpu.buildShaderIr(program));
+    const inheritedLoop = inheritedEntryIr.controlFlow.regions.find((region) => region.kind === "loop");
+    const inheritedHeader = inheritedEntryIr.blocks.find((block) =>
+        block.startInstruction === inheritedLoop.startInstruction);
+    const inheritedBackedge = inheritedEntryIr.blocks.find((block) =>
+        inheritedLoop.endInstruction >= block.startInstruction
+        && inheritedLoop.endInstruction <= block.endInstruction);
+    const inheritedMerge = inheritedEntryIr.values.find((value) =>
+        inheritedHeader.mergeSite.valueIds.includes(value.id));
+    const inheritedEntry = inheritedMerge.incoming.find((incoming) =>
+        incoming.blockId !== inheritedBackedge.id);
+    inheritedEntry.blockId = "prebuilt-inherited-entry";
+    assert.match(CjsFormatWebgpu.buildWgsl(inheritedEntryIr).code, /loop\n    \{/u);
+});
+
+test("fragment loop headers reject carried entry values with indirect undefined ancestry", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 3) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2,
+                opcode: 0,
+                opcodeName: "dcl_input_ps",
+                isDeclaration: true,
+                declaration: { registerIndex: 0, interpolationModeName: "linear" },
+                operands: [ register("input", 0) ]
+            },
+            instruction(5, "mov", [ register("temp", 0, { mask: "x" }), immediate([ 0 ]) ]),
+            instruction(9, "lt", [
+                register("temp", 4, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(13, "if", [ register("temp", 4, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(16, "mov", [ register("temp", 1, { mask: "x" }), immediate([ 0 ]) ]),
+            instruction(20, "endif", []),
+            instruction(21, "loop", []),
+            instruction(22, "ige", [
+                register("temp", 2, { mask: "x" }),
+                register("temp", 0, { selected: "x" }),
+                immediate([ 4 ])
+            ]),
+            { ...instruction(26, "breakc", [ register("temp", 2, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(28, "iadd", [
+                register("temp", 1, { mask: "x" }),
+                register("temp", 1, { selected: "x" }),
+                register("temp", 0, { selected: "x" })
+            ]),
+            instruction(32, "iadd", [
+                register("temp", 0, { mask: "x" }),
+                register("temp", 0, { selected: "x" }),
+                immediate([ 1 ])
+            ]),
+            instruction(36, "endloop", []),
+            instruction(37, "itof", [ register("temp", 3, { mask: "x" }), register("temp", 1, { selected: "x" }) ]),
+            instruction(41, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 3, { swizzle: "xxxx" }) ]),
+            instruction(45, "ret", [])
+        ]
+    };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-loop-undefined-entry" }),
+        /observable undefined path/i
+    );
+});
+
+test("fragment loop backedges and exits reject indirect undefined ancestry", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 3) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2,
+                opcode: 0,
+                opcodeName: "dcl_input_ps",
+                isDeclaration: true,
+                declaration: { registerIndex: 0, interpolationModeName: "linear" },
+                operands: [ register("input", 0) ]
+            },
+            instruction(5, "lt", [
+                register("temp", 3, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(9, "if", [ register("temp", 3, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(12, "mov", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "x" }) ]),
+            instruction(16, "endif", []),
+            { ...instruction(17, "if", [ register("temp", 3, { selected: "x" }) ]), testBoolean: "zero" },
+            instruction(20, "mov", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(24, "endif", []),
+            instruction(25, "loop", []),
+            instruction(26, "mov", [ register("temp", 7, { mask: "x" }), register("temp", 0, { selected: "x" }) ]),
+            instruction(30, "lt", [
+                register("temp", 4, { mask: "x" }),
+                register("input", 0, { selected: "y" }),
+                register("input", 0, { selected: "x" })
+            ]),
+            { ...instruction(34, "breakc", [ register("temp", 4, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(36, "mov", [ register("temp", 0, { mask: "x" }), register("input", 0, { selected: "y" }) ]),
+            instruction(40, "lt", [
+                register("temp", 5, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(44, "breakc", [ register("temp", 5, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(46, "endloop", []),
+            instruction(47, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 0, { swizzle: "xxxx" })
+            ]),
+            instruction(51, "ret", [])
+        ]
+    };
+    assert.match(CjsFormatWebgpu.buildWgsl(program).code, /loop\n    \{/u);
+
+    const ir = structuredClone(CjsFormatWebgpu.buildShaderIr(program));
+    const selectionRegion = ir.controlFlow.regions.find((region) => region.kind === "selection");
+    const selectionJoin = ir.blocks.find((block) => block.startInstruction === selectionRegion.endInstruction);
+    const undefinedMerge = ir.values.find((value) =>
+        selectionJoin.mergeSite.valueIds.includes(value.id) && value.register === "temp[0]");
+    const loopRegion = ir.controlFlow.regions.find((region) => region.kind === "loop");
+    const exitJoin = ir.blocks.find((block) => block.startInstruction === loopRegion.endInstruction + 1);
+    const exitMerge = ir.values.find((value) =>
+        exitJoin.mergeSite.valueIds.includes(value.id) && value.register === "temp[0]");
+    const firstBreak = ir.instructions.find((entry) =>
+        entry.opcodeName === "breakc" && entry.index > loopRegion.startInstruction);
+    const firstBreakBlock = ir.blocks.find((block) =>
+        firstBreak.index >= block.startInstruction && firstBreak.index <= block.endInstruction);
+    assert(undefinedMerge);
+    assert(exitMerge);
+
+    const backedgeIr = structuredClone(ir);
+    const backedgeLoop = backedgeIr.controlFlow.regions.find((region) => region.kind === "loop");
+    const backedgeHeader = backedgeIr.blocks.find((block) =>
+        block.startInstruction === backedgeLoop.startInstruction);
+    const backedgeMerge = backedgeIr.values.find((value) =>
+        backedgeHeader.mergeSite.valueIds.includes(value.id) && value.register === "temp[0]");
+    const unsafeBackedgeValue = backedgeIr.values.find((value) => value.id === undefinedMerge.id);
+    const latchOutput = backedgeIr.blocks
+        .filter((block) => block.startInstruction <= backedgeLoop.endInstruction)
+        .sort((left, right) => right.startInstruction - left.startInstruction)
+        .flatMap((block) => block.outputValues)
+        .find((entry) =>
+            entry.register === backedgeMerge.register && entry.component === backedgeMerge.writeMask);
+    assert(latchOutput);
+    latchOutput.ref = { valueId: unsafeBackedgeValue.id, component: unsafeBackedgeValue.writeMask };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(backedgeIr, { source: "synthetic-loop-backedge-undefined-ancestry" }),
+        /observable undefined path/i
+    );
+
+    const inheritedOutput = firstBreakBlock.outputValues.find((entry) =>
+        entry.register === exitMerge.register && entry.component === exitMerge.writeMask);
+    const undefinedRef = { valueId: undefinedMerge.id, component: undefinedMerge.writeMask };
+    if (inheritedOutput) inheritedOutput.ref = undefinedRef;
+    else
+    {
+        firstBreakBlock.outputValues.push({
+            register: exitMerge.register,
+            component: exitMerge.writeMask,
+            ref: undefinedRef
+        });
+    }
+    exitMerge.incoming[0].valueId = undefinedMerge.id;
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(ir, { source: "synthetic-loop-exit-undefined-ancestry" }),
+        /observable undefined path/i
+    );
 });
 
 test("fragment lowering splits a mixed-lane movc into per-component selects", () =>
