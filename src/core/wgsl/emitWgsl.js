@@ -28,7 +28,10 @@ function access(base, field, components)
 function f32Literal(value)
 {
     const number = value.float32;
-    if (!Number.isFinite(number)) return `bitcast<f32>(0x${(value.uint32 >>> 0).toString(16).padStart(8, "0")}u)`;
+    if (!Number.isFinite(number) || Object.is(number, -0))
+    {
+        return `bitcast<f32>(0x${(value.uint32 >>> 0).toString(16).padStart(8, "0")}u)`;
+    }
     const text = String(number);
     return /[.eE]/u.test(text) ? text : `${text}.0`;
 }

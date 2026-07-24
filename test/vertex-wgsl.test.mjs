@@ -1176,12 +1176,216 @@ function constTableVertex({ mutable = false } = {})
     };
 }
 
+function fixedIndexableVertex()
+{
+    return {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            indexableTempDeclaration(2, 0, 2),
+            instruction(4, "mov", [
+                indexableTempOperand(0, 0, { mask: "xy" }),
+                immediate([ 0x3f800000, 0x40000000, 0, 0 ])
+            ]),
+            instruction(8, "mov", [
+                indexableTempOperand(0, 1, { mask: "xy" }),
+                register("input", 0, { swizzle: "xyxx" })
+            ]),
+            instruction(12, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(16, "if", [ register("temp", 0, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(18, "add", [
+                indexableTempOperand(0, 0, { mask: "x" }),
+                indexableTempOperand(0, 0, { selected: "x" }),
+                indexableTempOperand(0, 1, { selected: "x" })
+            ]),
+            instruction(22, "else", []),
+            instruction(23, "mul", [
+                indexableTempOperand(0, 0, { mask: "x" }),
+                indexableTempOperand(0, 0, { selected: "x" }),
+                indexableTempOperand(0, 1, { selected: "x" })
+            ]),
+            instruction(27, "endif", []),
+            instruction(28, "mov", [
+                register("output", 0, { mask: "xy" }),
+                indexableTempOperand(0, 0, { swizzle: "xyxx" })
+            ]),
+            instruction(32, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0, 0x3f800000 ])
+            ]),
+            instruction(36, "ret", [])
+        ]
+    };
+}
+
+test("vertex lowering scalarizes declared fixed indexable-temp slots through masked writes and branch merges", () =>
+{
+    const program = fixedIndexableVertex();
+    const ir = CjsFormatWebgpu.buildShaderIr(program, { source: "synthetic-vertex-fixed-indexable" });
+    assert.ok(ir.values.some((value) => value.register === "indexable_temp[0,0]"));
+    assert.ok(ir.values.some((value) => value.register === "indexable_temp[0,1]"));
+    assert.ok(ir.values.some((value) =>
+        value.origin === "control-flow-merge" && value.register === "indexable_temp[0,0]"));
+
+    const shader = CjsFormatWebgpu.buildWgsl(ir);
+    assert.doesNotMatch(shader.code, /\bxt0\b/u);
+    assert.match(shader.code, /var value\d+: f32 = 0\.0;/u);
+    assert.match(shader.code, /output\.position\.xy = vec2<f32>\(value\d+, value\d+\.y\);/u);
+});
+
+test("fixed indexable temps fail closed on undeclared, out-of-range, narrow, and inconsistent identities", () =>
+{
+    const undeclared = fixedIndexableVertex();
+    undeclared.instructions.splice(1, 1);
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(undeclared), /x0 is undeclared/u);
+
+    const outOfRange = fixedIndexableVertex();
+    outOfRange.instructions[2].operands[0].indices[1].values[0] = 2;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(outOfRange), /x0\[2\] is outside its declared range/u);
+
+    const narrow = fixedIndexableVertex();
+    narrow.instructions[1].declaration.componentCount = 2;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(narrow), /not a four-component mutable operand/u);
+
+    const inconsistent = structuredClone(CjsFormatWebgpu.buildShaderIr(fixedIndexableVertex()));
+    const fixedWrite = inconsistent.instructions.find((entry) =>
+        entry.dataflow.writes.some((write) => write.register === "indexable_temp[0,0]"));
+    fixedWrite.dataflow.writes[0].register = "indexable_temp[0,1]";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(inconsistent), /inconsistent indexable-temp dataflow/u);
+
+    const sourceMismatch = structuredClone(CjsFormatWebgpu.buildShaderIr(fixedIndexableVertex()));
+    const add = sourceMismatch.instructions.find((entry) => entry.opcodeName === "add");
+    add.operands[2].indices[1].values[0] = 0;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(sourceMismatch), /fixed source has inconsistent register dataflow/u);
+
+    const sourceLaneMismatch = structuredClone(CjsFormatWebgpu.buildShaderIr(fixedIndexableVertex()));
+    sourceLaneMismatch.instructions.find((entry) => entry.opcodeName === "add").operands[1].selected = "y";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(sourceLaneMismatch), /fixed source has inconsistent register dataflow/u);
+
+    const destinationMaskMismatch = structuredClone(CjsFormatWebgpu.buildShaderIr(fixedIndexableVertex()));
+    destinationMaskMismatch.instructions.find((entry) => entry.opcodeName === "add").operands[0].mask = "y";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(destinationMaskMismatch), /fixed destination has inconsistent indexable-temp dataflow/u);
+});
+
 test("vertex lowering emits a relative indexable temp as a module constant table", () =>
 {
     const shader = CjsFormatWebgpu.buildWgsl(constTableVertex(), { source: "synthetic-vertex-const-table" });
     assert.match(shader.code, /const xt0 = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, -1\.0, 0\.0, 0\.0\), vec4<f32>\(-1\.0, 1\.0, 0\.0, 0\.0\)\);/u);
     assert.match(shader.code, /xt0\[i32\(value\d+\)\]\.x/u);
     assert.doesNotMatch(shader.code, /xt0\[[^\]]*\]\s*=/u);
+
+    const mismatched = structuredClone(CjsFormatWebgpu.buildShaderIr(constTableVertex()));
+    const tableRead = mismatched.instructions.find((entry) =>
+        entry.operands.some((operand) => operand.typeName === "indexable_temp"));
+    tableRead.operands.find((operand) => operand.typeName === "indexable_temp").registerIndex = 1;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(mismatched), /operand register identity does not match/u);
+
+    const maskedSource = structuredClone(CjsFormatWebgpu.buildShaderIr(constTableVertex()));
+    const maskedRead = maskedSource.instructions.find((entry) =>
+        entry.operands.some((operand) => operand.typeName === "indexable_temp"));
+    const maskedOperand = maskedRead.operands.find((operand) => operand.typeName === "indexable_temp");
+    maskedOperand.swizzle = "";
+    maskedOperand.mask = "xy";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(maskedSource),
+        /source indexable temp requires swizzle or select component mode/u
+    );
+
+    const narrowOperand = structuredClone(CjsFormatWebgpu.buildShaderIr(constTableVertex()));
+    const narrowRead = narrowOperand.instructions.find((entry) =>
+        entry.operands.some((operand) => operand.typeName === "indexable_temp"));
+    narrowRead.operands.find((operand) => operand.typeName === "indexable_temp").componentCount = 1;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(narrowOperand), /operand is not four-component/u);
+});
+
+test("constant-table extraction maps initializer swizzles and routes fixed reads through the table", () =>
+{
+    const program = constTableVertex();
+    program.instructions[2].operands[1].swizzle = "yxzw";
+    program.instructions.splice(6, 0, instruction(18, "add", [
+        register("temp", 1, { mask: "x" }),
+        register("temp", 1, { selected: "x" }),
+        indexableTempOperand(0, 1, { selected: "x" })
+    ]));
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-const-table-fixed-read" });
+    assert.match(shader.code, /const xt0 = array<vec4<f32>, 2>\(vec4<f32>\(-1\.0, 1\.0,/u);
+    assert.match(shader.code, /\+ xt0\[1\]\.x/u);
+});
+
+test("constant-table extraction replicates scalar immediate initializers across written lanes", () =>
+{
+    const program = constTableVertex();
+    for (const initializer of program.instructions.slice(2, 4))
+    {
+        initializer.operands[1] = immediate([ 0x3f800000 ]);
+    }
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-const-table-scalar" });
+    assert.match(shader.code, /const xt0 = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, 1\.0, 0\.0, 0\.0\), vec4<f32>\(1\.0, 1\.0, 0\.0, 0\.0\)\);/u);
+});
+
+test("constant-table extraction rejects reads before initialization and relative second destinations", () =>
+{
+    const readFirst = constTableVertex();
+    const [ global, declaration, write0, write1, index, read, output0, output1, ret ] = readFirst.instructions;
+    [ index, read, write0, write1, output0, output1, ret ].forEach((entry, position) =>
+    {
+        entry.offset = 4 + position * 4;
+    });
+    readFirst.instructions = [ global, declaration, index, read, write0, write1, output0, output1, ret ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(readFirst),
+        /all initializers must precede every read/u
+    );
+
+    const dualDestination = constTableVertex();
+    dualDestination.instructions.splice(4, 0, instruction(10, "sincos", [
+        register("temp", 2, { mask: "x" }),
+        indexableTempOperand(0, 0, {
+            mask: "x",
+            relative: register("temp", 0, { selected: "x" })
+        }),
+        immediate([ 0x3f800000 ])
+    ]));
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(dualDestination),
+        /is only writable by non-saturating mov initializers/u
+    );
+
+    const mismatchedIdentity = constTableVertex();
+    mismatchedIdentity.instructions[2].operands[0].registerIndex = 1;
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(mismatchedIdentity),
+        /consistent fixed register identity/u
+    );
+
+    const shortSwizzle = constTableVertex();
+    shortSwizzle.instructions[2].operands[1].swizzle = "x";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(shortSwizzle),
+        /canonical destination and source component selection/u
+    );
+
+    const wideInitializerIndex = constTableVertex();
+    wideInitializerIndex.instructions[2].operands[0].indices[1].values = [ 0, 1 ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(wideInitializerIndex),
+        /initializers require an immediate slot index/u
+    );
+
+    const wideRelativeBase = constTableVertex();
+    wideRelativeBase.instructions[5].operands[1].indices[1].values = [ 0, 1 ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(wideRelativeBase),
+        /invalid relative slot base/u
+    );
 });
 
 test("vertex fails closed on mutable relative indexable temps", () =>

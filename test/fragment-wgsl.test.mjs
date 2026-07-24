@@ -74,6 +74,30 @@ function globalFlagsDeclaration(refactoringAllowed = true)
     };
 }
 
+function indexableTempDeclaration(offset, registerIndex, registerCount)
+{
+    return {
+        offset,
+        opcode: 0,
+        opcodeName: "dcl_indexable_temp",
+        isDeclaration: true,
+        declaration: { registerIndex, registerCount, componentCount: 4 },
+        operands: []
+    };
+}
+
+function indexableTempOperand(registerIndex, slot, { mask = "", swizzle = "", selected = "" } = {})
+{
+    return {
+        ...register("indexable_temp", null, { mask, swizzle, selected }),
+        registerIndex,
+        indices: [
+            { values: [ registerIndex ], relative: null },
+            { values: [ slot ], relative: null }
+        ]
+    };
+}
+
 function fragmentFixture(minor = 0)
 {
     const zeroOne = immediate([ 0, 0, 0x3f800000, 0x3f800000 ]);
@@ -553,6 +577,47 @@ function undefinedAndMaskFixture({
         instructions
     };
 }
+
+test("fragment lowering accepts declaration-backed fixed indexable-temp locals", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 3) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            indexableTempDeclaration(2, 0, 1),
+            instruction(4, "mov", [
+                indexableTempOperand(0, 0, { mask: "xy" }),
+                register("input", 0, { swizzle: "xyxx" })
+            ]),
+            instruction(8, "add", [
+                indexableTempOperand(0, 0, { mask: "x" }),
+                indexableTempOperand(0, 0, { selected: "x" }),
+                immediate([ 0x3f800000 ])
+            ]),
+            instruction(12, "mov", [
+                register("output", 0, { mask: "xy" }),
+                indexableTempOperand(0, 0, { swizzle: "xyxx" })
+            ]),
+            instruction(16, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0, 0x3f800000 ])
+            ]),
+            instruction(20, "ret", [])
+        ]
+    };
+    const ir = CjsFormatWebgpu.buildShaderIr(program, { source: "synthetic-fragment-fixed-indexable" });
+    const shader = CjsFormatWebgpu.buildWgsl(ir);
+    assert.doesNotMatch(shader.code, /\bxt0\b/u);
+    assert.match(shader.code, /output\.output0\.xy = vec2<f32>\(value\d+, value\d+\.y\);/u);
+
+    const sourceMismatch = structuredClone(ir);
+    sourceMismatch.instructions.find((entry) => entry.opcodeName === "add").operands[1].selected = "y";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(sourceMismatch), /fixed source has inconsistent register dataflow/u);
+});
 
 test("BuildWgsl emits the bounded fragment interface, bindings, and positional sample lanes", () =>
 {
@@ -2220,7 +2285,7 @@ test("fragment lowering reads a dynamically indexed immediate constant buffer", 
             {
                 offset: 2, opcode: 0, opcodeName: "customdata", isDeclaration: true, operands: [],
                 customData: { immediateConstantBuffer: [
-                    [ { uint32: 0x3f800000, float32: 1 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 } ],
+                    [ { uint32: 0x3f800000, float32: 1 }, { uint32: 0x80000000, float32: -0 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 } ],
                     [ { uint32: 0, float32: 0 }, { uint32: 0x40000000, float32: 2 }, { uint32: 0, float32: 0 }, { uint32: 0, float32: 0 } ]
                 ] }
             },
@@ -2235,7 +2300,7 @@ test("fragment lowering reads a dynamically indexed immediate constant buffer", 
         ]
     };
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-icb" });
-    assert.match(shader.code, /const icb = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, 0\.0, 0\.0, 0\.0\), vec4<f32>\(0\.0, 2\.0, 0\.0, 0\.0\)\);/u);
+    assert.match(shader.code, /const icb = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, bitcast<f32>\(0x80000000u\), 0\.0, 0\.0\), vec4<f32>\(0\.0, 2\.0, 0\.0, 0\.0\)\);/u);
     assert.match(shader.code, /icb\[[^\]]+\]\.x/u);
 });
 

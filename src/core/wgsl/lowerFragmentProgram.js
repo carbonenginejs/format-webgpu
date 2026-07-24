@@ -1,4 +1,9 @@
 import { fixedSourceLanes } from "../ir/sourceLanes.js";
+import {
+    validateIndexableTempOperand,
+    validateIndexableTempRead,
+    validateIndexableTempWrite
+} from "../ir/indexableTemps.js";
 import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
@@ -76,10 +81,9 @@ function scalarTypeName(type)
     return ({ float32: "f32", int32: "i32", uint32: "u32", bool: "bool", bitpattern32: "u32" })[type] || null;
 }
 
-function isDeadUntypedWrite(program, instruction, write, readValueIds)
+function isDeadUntypedWrite(program, write, readValueIds, localSsaDestination)
 {
-    const destination = instruction.operands[write.operandIndex];
-    if (destination?.typeName !== "temp" || readValueIds.has(write.valueId)) return false;
+    if (!localSsaDestination || readValueIds.has(write.valueId)) return false;
     const value = program.values.find((entry) => entry.id === write.valueId);
     return Array.from(write.mask).some((component) => !scalarTypeName(value?.componentTypes?.[component]));
 }
@@ -365,6 +369,10 @@ function cbufferVectorIndex(program, instruction, operandIndex, operand, inputs)
     const read = instruction.dataflow.reads.find((entry) => entry.kind === "index-read"
         && entry.operandIndex === operandIndex && entry.dimension === indices.length - 1);
     if (!read || read.refs.length !== 1) throw new Error("WGSL fragment dynamic cbuffer index has no resolved register");
+    if (last.relative?.typeName === "indexable_temp")
+    {
+        validateIndexableTempRead(program, last.relative, read, rawSelectedComponents(last.relative, "x", 1));
+    }
     const ref = read.refs[0];
     const storage = valueStorageType(program, ref);
     let indexCode = valueReference(program, ref, inputs);
@@ -409,6 +417,10 @@ function icbParts(program, instruction, operandIndex, operand, destinationMask, 
 
 function constTableParts(program, instruction, operandIndex, operand, destinationMask, count, expectedType, inputs, activeComponents = null)
 {
+    if (validateIndexableTempOperand(program, operand, "source") !== null)
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} fixed indexable temp has no resolved SSA read`);
+    }
     const registerIndex = operand.indices?.[0]?.values?.[0];
     const table = (program.constTables || []).find((entry) => entry.registerIndex === registerIndex);
     if (!table)
@@ -516,6 +528,13 @@ function operandLaneExpression(program, instruction, operandIndex, destinationMa
         throw new Error(`WGSL fragment instruction ${instruction.index} minimum-precision kind ${operand.minPrecisionName} is not supported`);
     }
     const read = sourceRead(instruction, operandIndex);
+    const activeComponents = fixedSourceLanes(instruction, operandIndex, program);
+    if (read && operand.typeName === "indexable_temp")
+    {
+        validateIndexableTempRead(
+            program, operand, read,
+            rawSelectedComponents(operand, destinationMask, read.refs.length, activeComponents));
+    }
     if (read)
     {
         const replicated = read.refs.length === 1 && Boolean(operand.selected);
@@ -559,6 +578,12 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     }
     const read = sourceRead(instruction, operandIndex);
     const activeComponents = fixedSourceLanes(instruction, operandIndex, program);
+    if (read && operand.typeName === "indexable_temp")
+    {
+        validateIndexableTempRead(
+            program, operand, read,
+            rawSelectedComponents(operand, destinationMask, read.refs.length, activeComponents));
+    }
     let parts;
     if (read)
     {
@@ -1122,12 +1147,16 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     }
     const lowerWrite = (write) =>
     {
-    if (isDeadUntypedWrite(program, instruction, write, readValueIds)) return [];
-    const destination = instruction.operands[write.operandIndex];
+        const destination = instruction.operands[write.operandIndex];
+        const indexableAddress = destination?.typeName === "indexable_temp"
+            ? validateIndexableTempWrite(program, destination, write)
+            : null;
+        const localSsaDestination = destination?.typeName === "temp" || Boolean(indexableAddress);
+        if (isDeadUntypedWrite(program, write, readValueIds, localSsaDestination)) return [];
         const mixedTypes = mixedImmediateTypes(program, write);
         if (mixedTypes)
         {
-            if (instruction.opcodeName === "ld_structured" && destination?.typeName === "temp" && !instruction.saturate)
+            if (instruction.opcodeName === "ld_structured" && localSsaDestination && !instruction.saturate)
             {
                 const words = structuredLoadExpression(program, instruction, write, null, inputs, bindings);
                 return Array.from(write.mask).map((component, laneIndex) => ({
@@ -1143,7 +1172,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
                 }));
             }
             const intrinsic = instruction.typeInfo.resultType;
-            if (destination?.typeName === "temp" && scalarTypeName(intrinsic) && instruction.opcodeName !== "mov")
+            if (localSsaDestination && scalarTypeName(intrinsic) && instruction.opcodeName !== "mov")
             {
                 let packedCode = expressionFor(program, instruction, write, inputs, bindings);
                 if (instruction.saturate)
@@ -1180,7 +1209,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
                 });
                 return statements;
             }
-            if (instruction.opcodeName === "movc" && destination?.typeName === "temp" && !instruction.saturate)
+            if (instruction.opcodeName === "movc" && localSsaDestination && !instruction.saturate)
             {
                 return Array.from(write.mask).map((component, laneIndex) =>
                 {
@@ -1203,7 +1232,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             }
             const immediateSource = instruction.operands[1];
             if (instruction.opcodeName !== "mov" || instruction.saturate
-                || destination?.typeName !== "temp" || immediateSource?.typeName !== "immediate32")
+                || !localSsaDestination || immediateSource?.typeName !== "immediate32")
             {
                 throw new Error(`WGSL fragment value ${write.valueId} has an unresolved or mixed result type that is not supported`);
             }
@@ -1286,7 +1315,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             }
         ];
     }
-    if (destination.typeName !== "temp")
+    if (!localSsaDestination)
     {
         throw new Error(`WGSL fragment instruction ${instruction.index} writes unsupported ${destination.typeName}`);
     }

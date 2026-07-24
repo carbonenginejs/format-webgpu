@@ -209,12 +209,12 @@ and not lowered. Output-completeness is validated only on reachable `ret`s.
 
 DXBC's inline constant table (`customdata`, dataClass 3) is emitted as a
 module-scope `const icb = array<vec4<f32>, N>(vec4<f32>(...), ...)`. Finite
-non-zero lanes use a shortest f32 decimal and non-finite lanes fall back to
-`bitcast<f32>(0x..u)`; negative zero currently serializes as positive zero.
+non-zero lanes use a shortest f32 decimal; non-finite lanes and negative zero
+use `bitcast<f32>(0x..u)` so the exceptional or sign bit pattern is preserved.
 WGSL does not fix the rounding direction for an inexact decimal-to-f32
-conversion, so readable decimal emission is not a normative raw-bit guarantee;
-guaranteed preservation would require raw-bit literals for every lane. The same
-literal emitter is used for immutable indexable-temp tables.
+conversion, so readable finite decimal emission is not a normative raw-bit
+guarantee; guaranteed preservation would require raw-bit literals for every
+lane. The same literal emitter is used for immutable indexable-temp tables.
 `immediate_constant_buffer` operands lower as
 `icb[<index>].<comp>` reusing the dynamic constant-buffer index machinery
 (pure-relative and base+relative indices both supported), with int/uint
@@ -223,13 +223,38 @@ are an adaptation: D3D constant/ICB reads return zero, while the emitted
 unchecked WGSL array access has implementation-chosen out-of-bounds behavior;
 qualified corpus shaders stay in range.
 
+### Fixed-slot indexable temps → scalarized SSA locals
+
+A declared width-four `indexable_temp` addressed as an exact
+`x#[immediate-slot]` is treated as a bounded family of ordinary register
+locals. The declaration must be unique, both index dimensions and the register
+identity must be exact, the slot must be in range, and source selectors,
+destination masks, and direct-IR SSA metadata must agree with the referenced
+lanes. Each slot/lane then participates independently in the existing SSA,
+masked-write, and structured merge machinery in both vertex and fragment
+stages. No mutable WGSL array or dynamic array write is emitted.
+
+Relative/dynamic addressing and narrower mutable declarations remain
+fail-closed. Fixed reads of a register recognized as the immutable table shape
+below are routed through that table rather than through mutable SSA. The
+`cloud` and `cloudsimple` browser gates cover fixed-slot writes and reads with
+zero WGSL warnings. The full corpus transition moved from 502 qualified / 35
+unsupported / 0 failed to 504 / 33 / 0: exactly those two packages became
+qualified, and SHA-256 comparison confirmed all 502 previously qualified
+package bytes remained identical.
+
 ### Relative indexable temps → module `const` tables (immutable shape only)
 
 An indexable temp (`x#`) accessed with relative addressing is recognized when
 it is an immutable constant table: every write is a straight-line
-pre-control-flow `mov x#[slot].mask, l(...)` immediate with one shared write
-mask, every declared slot is fully written, and reads select only written
-lanes. Such registers lower exactly like the icb — a module-scope
+pre-control-flow `mov x#[slot].mask, l(...)` immediate, all initializers precede
+every read, one write mask is shared, every declared slot is fully written for
+that mask, and reads select only written lanes. Operand roles (including
+dual-destination instructions), register identities, index widths, modifiers,
+and precision metadata are validated exactly. Initializer source
+selection/swizzles are applied before storage, and scalar immediates replicate
+across every written lane. Such registers lower exactly like the icb — a
+module-scope
 `const xt# = array<vec4<f32>, N>(...)` with reads through the shared dynamic
 index machinery (`xt#[base + i32(index)].comp`) — so the dynamic read needs no
 mutable-register SSA and inherits index-driven uniformity. This is the
@@ -414,8 +439,9 @@ fail closed.
 - **Immediate texture offsets** (`sample_controls` / `_aoffimmi`) outside the
   bounded 2D sample family below. In particular, offset texture `ld` and
   non-2D sampling fail closed.
-- **Mutable relative `indexable_temp` registers** (any shape outside the
-  constant-table form above), and subroutine control flow
+- **Mutable relative `indexable_temp` registers** (fixed, declared, bounded
+  width-four slots are scalarized as described above; any relative shape outside
+  the immutable constant-table form still fails closed), and subroutine control flow
   (`call`/`callc`/`label`/`interface_call`) — front-end rejections.
 - **Compute, geometry, hull, and domain stage kinds** — structurally valid
   stages the packager cannot lower: WGSL has no geometry/hull/domain stage,

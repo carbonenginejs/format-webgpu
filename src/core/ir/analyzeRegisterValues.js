@@ -1,4 +1,5 @@
 import { fixedSourceLanes } from "./sourceLanes.js";
+import { validateIndexableTempOperand } from "./indexableTemps.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 
@@ -23,8 +24,7 @@ const NO_DESTINATION = new Set([
     "endloop", "endswitch", "if", "label", "loop", "nop", "ret", "retc",
     "switch", "sync", "store_uav_typed", "store_raw", "store_structured",
     "atomic_and", "atomic_or", "atomic_xor", "atomic_cmp_store", "atomic_iadd",
-    "atomic_imax", "atomic_imin", "atomic_umax", "atomic_umin", "imm_atomic_alloc",
-    "imm_atomic_consume"
+    "atomic_imax", "atomic_imin", "atomic_umax", "atomic_umin"
 ]);
 
 const DUAL_DESTINATION = new Set([ "sincos", "imul", "umul", "udiv", "swapc" ]);
@@ -52,17 +52,12 @@ function operandComponents(operand, destination = false, activeComponents = null
     return activeComponents ? activeComponents.slice() : COMPONENTS.slice();
 }
 
-function registerKey(operand)
+function registerKey(program, operand, role)
 {
     if (!REGISTER_FILES.has(operand.typeName)) return null;
-    if (operand.typeName === "indexable_temp" && (operand.indices || []).some((index) => index.relative))
+    if (operand.typeName === "indexable_temp")
     {
-        // Relative indexable-temp accesses only reach this pass as validated
-        // constant-table reads (extractConstTables fails closed on any other
-        // shape). The table contents are compile-time constants resolved at
-        // emit time — like cbuffer/immediate operands they carry no register
-        // dataflow; the slot index still contributes through its index-read.
-        return null;
+        return validateIndexableTempOperand(program, operand, role)?.key || null;
     }
     const indices = (operand.indices || []).map((index) =>
     {
@@ -72,7 +67,7 @@ function registerKey(operand)
     return `${operand.typeName}[${indices.join(",")}]`;
 }
 
-function operandRoles(instruction)
+export function operandRoles(instruction)
 {
     const operands = instruction.operands || [];
     if (NO_DESTINATION.has(instruction.opcodeName))
@@ -141,7 +136,7 @@ function analyzeBlock(program, block, values)
         {
             const { operand, role } = roles[operandIndex];
             if (role !== "source") continue;
-            const register = registerKey(operand);
+            const register = registerKey(program, operand, "source");
             if (!register) continue;
             const components = operandComponents(
                 operand,
@@ -164,7 +159,7 @@ function analyzeBlock(program, block, values)
             {
                 const relative = indices[dimension].relative;
                 if (!relative) continue;
-                const register = registerKey(relative);
+                const register = registerKey(program, relative, "source");
                 if (!register) throw new Error("Shader IR relative index uses an unsupported register file");
                 const components = operandComponents(relative, false);
                 if (components.length !== 1) throw new Error("Shader IR relative index requires one scalar component");
@@ -182,7 +177,7 @@ function analyzeBlock(program, block, values)
         {
             const { operand, role } = roles[operandIndex];
             if (role !== "destination" || operand.typeName === "null") continue;
-            const register = registerKey(operand);
+            const register = registerKey(program, operand, "destination");
             if (!register) continue;
             const mask = operandComponents(operand, true);
             const previous = {};

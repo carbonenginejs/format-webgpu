@@ -1,5 +1,5 @@
 import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
-import { analyzeRegisterValues } from "./analyzeRegisterValues.js";
+import { analyzeRegisterValues, operandRoles } from "./analyzeRegisterValues.js";
 import { buildControlFlow } from "./buildControlFlow.js";
 import { resolveRegisterFlow } from "./resolveRegisterFlow.js";
 import { inferValueTypes, SCALAR_TYPES } from "./inferValueTypes.js";
@@ -147,10 +147,12 @@ function immediateRecord(value)
 function extractConstTables(declarationInstructions, executable)
 {
     const declared = new Map();
+    const duplicateDeclarations = new Set();
     for (const declaration of declarationInstructions)
     {
         if (declaration.opcodeName !== "dcl_indexable_temp") continue;
         const data = declaration.declaration || {};
+        if (declared.has(data.registerIndex)) duplicateDeclarations.add(data.registerIndex);
         declared.set(data.registerIndex, {
             slotCount: data.registerCount,
             componentCount: data.componentCount
@@ -177,19 +179,22 @@ function extractConstTables(declarationInstructions, executable)
 
     executable.forEach((instruction, instructionIndex) =>
     {
-        (instruction.operands || []).forEach((operand, operandIndex) =>
+        operandRoles(instruction).forEach(({ operand, role }, operandIndex) =>
         {
             if (operand.typeName !== "indexable_temp") return;
             const indices = operand.indices || [];
             const registerIndex = indices[0]?.values?.[0];
             const entry = entryFor(registerIndex);
-            if (indices.length !== 2 || indices[0]?.relative)
+            if (indices.length !== 2 || indices[0]?.relative
+                || indices[0]?.values?.length !== 1
+                || !Number.isInteger(registerIndex) || registerIndex < 0
+                || operand.registerIndex !== registerIndex)
             {
-                return invalidate(entry, "requires [register][slot] addressing with a fixed register");
+                return invalidate(entry, "requires one consistent fixed register identity and [register][slot] addressing");
             }
             if (indices[1]?.relative) entry.hasRelative = true;
 
-            if (operandIndex !== 0)
+            if (role === "source")
             {
                 const lanes = operand.selected
                     ? [ operand.selected ]
@@ -197,7 +202,7 @@ function extractConstTables(declarationInstructions, executable)
                         ? Array.from(new Set(operand.swizzle))
                         : COMPONENT_ORDER.slice();
                 entry.reads = entry.reads || [];
-                entry.reads.push({ lanes });
+                entry.reads.push({ instructionIndex, lanes });
                 return;
             }
 
@@ -213,7 +218,8 @@ function extractConstTables(declarationInstructions, executable)
             {
                 return invalidate(entry, "initializers must precede all control flow");
             }
-            if (indices[1]?.relative || !Number.isInteger(slot))
+            if (indices[1]?.relative || indices[1]?.values?.length !== 1
+                || !Number.isInteger(slot) || slot < 0)
             {
                 return invalidate(entry, "initializers require an immediate slot index");
             }
@@ -222,11 +228,37 @@ function extractConstTables(declarationInstructions, executable)
             {
                 return invalidate(entry, "initializers require immediate32 sources");
             }
-            if (!operand.mask)
+            if ((operand.modifierName || "none") !== "none"
+                || (operand.minPrecisionName || "default") !== "default"
+                || (source.minPrecisionName || "default") !== "default"
+                || instruction.extensions?.length)
             {
-                return invalidate(entry, "initializers require an explicit write mask");
+                return invalidate(entry, "initializers require canonical default-precision mov operands");
             }
-            entry.writes.push({ instructionIndex, slot, mask: operand.mask, values: source.immediateValues });
+            if (!operand.mask || operand.swizzle || operand.selected || source.mask
+                || (source.swizzle && source.selected)
+                || (source.selected && !COMPONENT_ORDER.includes(source.selected))
+                || (source.swizzle && (source.swizzle.length !== 4
+                    || Array.from(source.swizzle).some((lane) => !COMPONENT_ORDER.includes(lane)))))
+            {
+                return invalidate(entry, "initializers require canonical destination and source component selection");
+            }
+            const valuesByLane = {};
+            for (const lane of operand.mask)
+            {
+                const destinationLane = COMPONENT_ORDER.indexOf(lane);
+                const sourceLane = source.selected || source.swizzle?.[destinationLane] || lane;
+                const sourceLaneIndex = COMPONENT_ORDER.indexOf(sourceLane);
+                const value = source.immediateValues.length === 1
+                    ? source.immediateValues[0]
+                    : source.immediateValues[sourceLaneIndex];
+                if (!value)
+                {
+                    return invalidate(entry, "an initializer selects an unavailable immediate lane");
+                }
+                valuesByLane[lane] = value;
+            }
+            entry.writes.push({ instructionIndex, slot, mask: operand.mask, valuesByLane });
         });
     });
 
@@ -240,12 +272,29 @@ function extractConstTables(declarationInstructions, executable)
         const describe = (reason) => new Error(
             `Shader IR indexable temp x${registerIndex} relative addressing is not supported: ${reason}`);
         if (entry.invalid) throw describe(entry.invalid);
+        if (duplicateDeclarations.has(registerIndex)) throw describe("it has duplicate declarations");
         if (!declaration || !Number.isInteger(declaration.slotCount) || declaration.slotCount < 1)
         {
             throw describe("it has no usable declaration");
         }
+        if (!Number.isInteger(declaration.componentCount)
+            || declaration.componentCount < 1 || declaration.componentCount > 4)
+        {
+            throw describe("it has an invalid component count");
+        }
+        const lastWrite = Math.max(...entry.writes.map((write) => write.instructionIndex));
+        const firstRead = Math.min(...(entry.reads || []).map((read) => read.instructionIndex));
+        if (lastWrite >= firstRead)
+        {
+            throw describe("all initializers must precede every read");
+        }
 
         const laneMask = entry.writes[0]?.mask;
+        if (Array.from(laneMask || "").some((lane) =>
+            COMPONENT_ORDER.indexOf(lane) >= declaration.componentCount))
+        {
+            throw describe("an initializer writes outside the declared component range");
+        }
         const rows = Array.from({ length: declaration.slotCount }, () =>
             COMPONENT_ORDER.map(() => null));
         for (const write of entry.writes)
@@ -259,9 +308,7 @@ function extractConstTables(declarationInstructions, executable)
             {
                 const laneIndex = COMPONENT_ORDER.indexOf(lane);
                 if (rows[write.slot][laneIndex] !== null) throw describe("a slot lane is written twice");
-                rows[write.slot][laneIndex] = immediateRecord(write.values.length === 1
-                    ? write.values[0]
-                    : write.values[laneIndex]);
+                rows[write.slot][laneIndex] = immediateRecord(write.valuesByLane[lane]);
             }
             removed.add(write.instructionIndex);
         }
