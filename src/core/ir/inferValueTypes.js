@@ -8,7 +8,7 @@ export const SCALAR_TYPES = Object.freeze([
 const FLOAT_OPS = new Set([
     "add", "deriv_rtx", "deriv_rty", "deriv_rtx_coarse", "deriv_rtx_fine",
     "deriv_rty_coarse", "deriv_rty_fine", "div", "dp2", "dp3", "dp4",
-    "exp", "frc", "log", "mad", "max", "min", "mul", "round_ne",
+    "exp", "frc", "log", "mad", "max", "min", "mul", "rcp", "round_ne",
     "round_ni", "round_pi", "round_z", "rsq", "sqrt", "sincos"
 ]);
 const FLOAT_COMPARE = new Set([ "eq", "ge", "lt", "ne" ]);

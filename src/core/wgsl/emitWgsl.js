@@ -6,7 +6,11 @@ const COMPONENTS = [ "x", "y", "z", "w" ];
 
 function attribute(field, invariantPosition = false)
 {
-    if (field.attribute.kind !== "builtin") return `@location(${field.attribute.index})`;
+    if (field.attribute.kind !== "builtin")
+    {
+        const interpolate = field.interpolation ? ` @interpolate(${field.interpolation})` : "";
+        return `@location(${field.attribute.index})${interpolate}`;
+    }
     const invariant = invariantPosition && field.attribute.name === "position" ? "@invariant " : "";
     return `${invariant}@builtin(${field.attribute.name})`;
 }

@@ -974,6 +974,52 @@ function udivProgram(quotientOperand, divisorOperand)
     };
 }
 
+test("fragment noperspective inputs emit @interpolate(linear)", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 1) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear_noperspective" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(4, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xxxx" })
+            ]),
+            instruction(8, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-noperspective" });
+    assert.match(shader.code, /@location\(1\) @interpolate\(linear\) input1: f32/u);
+});
+
+test("fragment rejects centroid and constant interpolation modes", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 1) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear_centroid" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(4, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xxxx" })
+            ]),
+            instruction(8, "ret", [])
+        ]
+    };
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-centroid" }),
+        /input r1 has unsupported interpolation linear_centroid/u);
+});
+
 test("fragment lowering emits udiv quotient and remainder for an immediate divisor", () =>
 {
     const program = udivProgram(register("temp", 2, { mask: "x" }), immediate([ 7 ]));

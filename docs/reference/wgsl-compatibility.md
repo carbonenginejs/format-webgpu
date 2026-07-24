@@ -199,6 +199,26 @@ gap in the WGSL location layout. Both stages now group signature rows by
 faithfulness fix, not a divergence — the merged field reproduces the register's
 true lane occupancy.
 
+### `linear_noperspective` varyings → `@interpolate(linear)` on both stages
+
+DXBC `linear` interpolation is perspective-correct — the WGSL default — and
+needs no attribute. DXBC `linear_noperspective` maps exactly to WGSL
+`@interpolate(linear)` (center sampling on both sides). Because WebGPU
+requires the vertex output and fragment input attributes at one location to
+MATCH at pipeline creation, and DXBC declares interpolation only on the
+fragment side (`dcl_input_ps`), the pass-global binding plan records the
+non-default modes (`varyingInterpolation`) and the vertex module mirrors them
+onto its paired outputs. Mixed modes on one packed register, centroid and
+sample variants, and `constant` fail closed.
+
+### Non-float `saturate` on movers → float clamp on the raw bits
+
+D3D `saturate` assumes float data (like source modifiers). When a
+bit-preserving `mov`/`movc` result's lanes resolve to integer storage, the
+saturate lowers as `bitcast<T>(clamp(bitcast<f32-vec>(bits), 0.0, 1.0))` —
+the exact float clamp on the raw lanes, keeping the storage type. Saturate on
+genuinely integer arithmetic results still fails closed.
+
 ### Vertex-stage texture sampling → explicit LOD/gradient only
 
 The vertex binding restriction now admits texture and sampler bindings, and the
@@ -249,9 +269,9 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
 
 ## Bounded / temporary
 
-- **`resinfo`** — 2D textures, immediate mip, components x/y (dimensions) and
-  w (`textureNumLevels`); z (depth/array size) rejected for 2D. Widen per
-  dimension when a shader needs it.
+- **`resinfo`** — 2D and 3D textures, immediate mip, components x/y
+  (dimensions), z (depth, 3D only), and w (`textureNumLevels`); z rejected
+  for 2D. Widen per dimension when a shader needs it.
 - **`ld`** — 2D textures, address layout xy=texel/z=mip, u32 coordinates.
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar
   address, fixed (non-relative) resource operands.

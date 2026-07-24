@@ -143,10 +143,30 @@ export function buildWgslBindingPlan(programs, options = {})
         || left.scopeIdentity.localeCompare(right.scopeIdentity));
     const plannedBindings = bindings
         .map((binding, bindingIndex) => ({ ...binding, group: 0, binding: bindingIndex }));
+
+    // WebGPU pipeline creation requires the vertex output and fragment input
+    // interpolation attributes at one location to MATCH, and interpolation is
+    // declared only on the fragment side in DXBC (dcl_input_ps). Record the
+    // non-default modes here so the vertex module can mirror them.
+    const varyingInterpolation = {};
+    for (const program of programs)
+    {
+        if (program.stage !== "pixel") continue;
+        for (const declaration of program.declarations || [])
+        {
+            if (declaration.opcodeName !== "dcl_input_ps") continue;
+            if (declaration.data?.interpolationModeName === "linear_noperspective")
+            {
+                varyingInterpolation[declaration.data.registerIndex] = "linear";
+            }
+        }
+    }
+
     return deepFreeze({
         format: "CJS_WGSL_BINDING_PLAN",
         formatVersion: 2,
         ...(sharedIdentities.size ? { sharedIdentities: Object.freeze([ ...sharedIdentities ].sort()) } : {}),
+        ...(Object.keys(varyingInterpolation).length ? { varyingInterpolation } : {}),
         bindings: plannedBindings
     });
 }

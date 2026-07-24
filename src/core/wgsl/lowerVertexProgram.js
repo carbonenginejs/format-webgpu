@@ -865,8 +865,24 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         let expression = expressionFor(program, instruction, write, type, inputs, bindings);
         if (instruction.saturate)
         {
-            if (instruction.typeInfo.resultType !== "float32") throw new Error(`WGSL vertex instruction ${instruction.index} saturates a non-float result`);
-            expression = `clamp(${expression}, ${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")})`;
+            const clampBounds = `${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")}`;
+            if (instruction.typeInfo.resultType === "float32")
+            {
+                expression = `clamp(${expression}, ${clampBounds})`;
+            }
+            else if ([ "mov", "movc" ].includes(instruction.opcodeName)
+                && [ "int32", "uint32", "bitpattern32" ].includes(type.scalarType))
+            {
+                // D3D saturate assumes float data (like source modifiers); on a
+                // bit-preserving mover whose lanes resolved to integer storage,
+                // clamp the float interpretation of the bits and keep the storage.
+                const floatType = fieldType("float32", write.mask.length);
+                expression = `bitcast<${type.wgslType}>(clamp(bitcast<${floatType}>(${expression}), ${clampBounds}))`;
+            }
+            else
+            {
+                throw new Error(`WGSL vertex instruction ${instruction.index} saturates a non-float result`);
+            }
         }
         expression = applyResultBitcast(program, instruction, write, expression, type);
         if (destination.typeName === "output")
@@ -950,6 +966,13 @@ export function lowerVertexProgram(program, options = {})
     const liveRegisters = liveInputRegisters(program);
     const inputs = interfaceFields(program, "input").filter((field) => liveRegisters.has(field.registerIndex));
     const outputs = interfaceFields(program, "output");
+    // Mirror the fragment stage's non-default interpolation modes (recorded on
+    // the pass-global plan) — WebGPU requires both sides of a location to match.
+    for (const field of outputs)
+    {
+        const interpolation = options.bindingPlan?.varyingInterpolation?.[field.registerIndex];
+        if (interpolation && field.attribute.kind === "location") field.interpolation = interpolation;
+    }
     for (const fields of [ inputs, outputs ])
     {
         if (new Set(fields.map((field) => field.registerIndex)).size !== fields.length)

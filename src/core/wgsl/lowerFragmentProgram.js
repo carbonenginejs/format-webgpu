@@ -12,7 +12,7 @@ const SUPPORTED_OPCODES = new Set([
     "dp2", "dp3", "dp4", "eq", "exp", "f16tof32", "f32tof16", "frc", "ftoi",
     "ftou", "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul",
     "ine", "ineg", "ishl", "ishr", "if", "itof", "ld", "ld_structured", "log", "lt",
-    "mad", "max", "min", "mov", "movc", "mul", "ne", "or", "resinfo",
+    "mad", "max", "min", "mov", "movc", "mul", "ne", "or", "rcp", "resinfo",
     "round_ne", "round_ni", "round_pi", "round_z", "rsq", "sample", "sample_b", "sample_d",
     "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax", "umin", "ushr",
     "utof", "xor", "endif", "ret"
@@ -175,20 +175,27 @@ function validateInterpolation(program, input)
     if (input.attribute.kind === "builtin") return;
     // A merged location field may pack several signature rows onto one register
     // (component-packed varyings). WGSL interpolation is per-location, not per-
-    // component, so EVERY dcl_input_ps covering this register must agree on the
-    // supported (perspective / "linear") mode — checking only the first row would
-    // let a differing lane render with the wrong interpolation, which the browser
-    // gate cannot detect. Any non-"linear" lane fails closed.
+    // component, so EVERY dcl_input_ps covering this register must agree on one
+    // supported mode — checking only the first row would let a differing lane
+    // render with the wrong interpolation, which the browser gate cannot detect.
+    // DXBC "linear" is perspective-correct (the WGSL default); DXBC
+    // "linear_noperspective" maps exactly to `@interpolate(linear)` (center
+    // sampling on both sides). Everything else fails closed.
     const declarations = program.declarations.filter((entry) =>
         entry.opcodeName === "dcl_input_ps" && entry.data?.registerIndex === input.registerIndex);
-    for (const declaration of declarations)
+    const modes = new Set(declarations.map((entry) => entry.data?.interpolationModeName).filter(Boolean));
+    if (modes.size > 1)
     {
-        const mode = declaration.data?.interpolationModeName;
-        if (mode && mode !== "linear")
-        {
-            throw new Error(`WGSL fragment input r${input.registerIndex} has unsupported interpolation ${mode}`);
-        }
+        throw new Error(`WGSL fragment input r${input.registerIndex} packs mixed interpolation modes`);
     }
+    const mode = modes.values().next().value;
+    if (!mode || mode === "linear") return;
+    if (mode === "linear_noperspective")
+    {
+        input.interpolation = "linear";
+        return;
+    }
+    throw new Error(`WGSL fragment input r${input.registerIndex} has unsupported interpolation ${mode}`);
 }
 
 function sourceRead(instruction, operandIndex)
@@ -741,6 +748,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
     if (op === "round_pi") return `ceil(${source(1)})`;
     if (op === "round_z") return `trunc(${source(1)})`;
     if (DERIVATIVES[op]) return `${DERIVATIVES[op]}(${source(1)})`;
+    if (op === "rcp") return `(${floatBound(count, "1.0")} / ${source(1)})`;
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
     if (op === "sqrt") return `sqrt(${source(1)})`;
     if (NUMERIC_CONVERSIONS[op])
@@ -767,9 +775,10 @@ function expressionFor(program, instruction, write, inputs, bindings)
         const resource = instruction.operands[2];
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         if (!textureBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has an unresolved resinfo resource`);
-        if (textureBinding.texture?.viewDimension !== "2d")
+        const viewDimension = textureBinding.texture?.viewDimension;
+        if (viewDimension !== "2d" && viewDimension !== "3d")
         {
-            throw new Error(`WGSL fragment resinfo instruction ${instruction.index} supports only 2d textures`);
+            throw new Error(`WGSL fragment resinfo instruction ${instruction.index} supports only 2d and 3d textures`);
         }
         const mipOperand = instruction.operands[1];
         const mipBits = mipOperand?.immediateValues?.[0]?.uint32;
@@ -784,8 +793,9 @@ function expressionFor(program, instruction, write, inputs, bindings)
             let value;
             if (component === "x") value = `${dims}.x`;
             else if (component === "y") value = `${dims}.y`;
+            else if (component === "z" && viewDimension === "3d") value = `${dims}.z`;
             else if (component === "w") value = `textureNumLevels(${textureBinding.generatedSymbol})`;
-            else throw new Error(`WGSL fragment resinfo instruction ${instruction.index} cannot report component ${component} for a 2d texture`);
+            else throw new Error(`WGSL fragment resinfo instruction ${instruction.index} cannot report component ${component} for a ${viewDimension} texture`);
             if (modifier === "uint") return value;
             return modifier === "rcpfloat" ? `(1.0 / f32(${value}))` : `f32(${value})`;
         });
@@ -1026,11 +1036,24 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     let expression = expressionFor(program, instruction, write, inputs, bindings);
     if (instruction.saturate)
     {
-        if (instruction.typeInfo.resultType !== "float32")
+        const clampBounds = `${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")}`;
+        if (instruction.typeInfo.resultType === "float32")
+        {
+            expression = `clamp(${expression}, ${clampBounds})`;
+        }
+        else if ([ "mov", "movc" ].includes(instruction.opcodeName)
+            && [ "int32", "uint32", "bitpattern32" ].includes(type.scalarType))
+        {
+            // D3D saturate assumes float data (like source modifiers); on a
+            // bit-preserving mover whose lanes resolved to integer storage,
+            // clamp the float interpretation of the bits and keep the storage.
+            const floatType = fieldType("float32", write.mask.length);
+            expression = `bitcast<${type.wgslType}>(clamp(bitcast<${floatType}>(${expression}), ${clampBounds}))`;
+        }
+        else
         {
             throw new Error(`WGSL fragment instruction ${instruction.index} saturates a non-float result`);
         }
-        expression = `clamp(${expression}, ${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")})`;
     }
     expression = applyResultBitcast(instruction, write, expression, type);
     if (destination.typeName === "output")
