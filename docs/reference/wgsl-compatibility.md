@@ -260,6 +260,25 @@ integer saturate is unhandled, matching "assumes float". Our bitcast-clamp on
 `bitpattern32` mover lanes is the WGSL-specific handling for the float-data-in-
 integer-storage case vkd3d left as a FIXME.
 
+### `rcp` → ordinary f32 division
+
+DXBC `rcp` is a reduced-precision component-wise reciprocal; its maximum
+relative error is 2^-21. It lowers to `1.0 / x`, whose result for a finite,
+normal, non-zero f32 is at least as accurate under WGSL's rounding rules.
+
+The special-value contract is adapted. D3D specifies signed infinities for
+signed-zero and subnormal inputs, signed zero for infinities, and NaN for NaN.
+WGSL permits zero signs to be ignored and makes a runtime result that is
+infinite or NaN indeterminate under its finite-math assumption. Exact behavior
+for those inputs is therefore not portable even though ordinary finite inputs
+match.
+
+*Confirmed against vkd3d-shader:* `spirv_compiler_emit_rcp` (spirv.c) emits
+`SpvOpFDiv` with a `1.0` numerator, the same ordinary floating division used
+here. Its `tests/hlsl/rcp.shader_test` also records the D3D results for positive
+and negative zero and infinity; those expectations identify the non-finite
+WGSL limitation above rather than requiring a different finite-input lowering.
+
 ### Vertex-stage texture sampling → explicit LOD/gradient only
 
 The vertex binding restriction now admits texture and sampler bindings, and the
