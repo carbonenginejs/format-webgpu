@@ -442,6 +442,105 @@ test("SM5.0 and SM5.1 packed vertex math emit identical WGSL", () =>
     );
 });
 
+test("vertex lowering splits a mixed-lane movc into per-component selects", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 3) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "lt", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            instruction(6, "ftoi", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 0, { selected: "x" })
+            ]),
+            instruction(10, "add", [
+                register("temp", 1, { mask: "y" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            instruction(14, "mov", [
+                register("temp", 1, { mask: "z" }),
+                immediate([ 0x3f000000 ])
+            ]),
+            instruction(18, "movc", [
+                register("temp", 2, { mask: "xyz" }),
+                register("temp", 0, { swizzle: "xxxx" }),
+                register("temp", 1, { swizzle: "xyzx", modifierName: "absneg" }),
+                register("temp", 1, { swizzle: "xyzx" })
+            ]),
+            instruction(23, "iadd", [
+                register("temp", 3, { mask: "x" }),
+                register("temp", 2, { selected: "x" }),
+                register("temp", 1, { selected: "x" })
+            ]),
+            instruction(27, "itof", [
+                register("temp", 4, { mask: "x" }),
+                register("temp", 3, { selected: "x" })
+            ]),
+            instruction(31, "add", [
+                register("temp", 5, { mask: "x" }),
+                register("temp", 4, { selected: "x" }),
+                register("temp", 2, { selected: "y" })
+            ]),
+            instruction(35, "mov", [
+                register("temp", 6, { mask: "z" }),
+                register("temp", 2, { selected: "z" })
+            ]),
+            instruction(39, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 5, { selected: "x" })
+            ]),
+            instruction(43, "ret", [])
+        ]
+    };
+    const ir = CjsFormatWebgpu.buildShaderIr(program, { source: "synthetic-vertex-mixed-movc" });
+    const shader = CjsFormatWebgpu.buildWgsl(ir, { source: "synthetic-vertex-mixed-movc" });
+    const movc = ir.instructions.find((entry) => entry.dxbcOffset === 18);
+    const value = ir.values.find((entry) => entry.id === movc.dataflow.writes[0].valueId);
+    const statements = shader.program.statements.filter((entry) => entry.dxbcOffset === 18);
+
+    assert.deepEqual(value.componentTypes, { x: "int32", y: "float32", z: "bitpattern32" });
+    assert.equal(statements.length, 3);
+    assert.deepEqual(statements.map((entry) => entry.type), [ "i32", "f32", "u32" ]);
+    assert(statements.every((entry) => entry.kind === "let"));
+    assert(statements.every((entry) => /^select\(.+, .+, .+ != 0u\)$/u.test(entry.expression.code)));
+    assert.match(statements[0].expression.code, /bitcast<i32>\(\(bitcast<u32>\(.+\) \| 0x80000000u\)\)/u);
+    assert.match(statements[1].expression.code, /-\(abs\(.+\)\)/u);
+    assert.match(statements[2].expression.code, /\| 0x80000000u/u);
+
+    const negCondition = structuredClone(program);
+    negCondition.instructions.find((entry) => entry.opcodeName === "movc").operands[1].modifierName = "neg";
+    const negStatements = CjsFormatWebgpu.buildWgsl(negCondition).program.statements
+        .filter((entry) => entry.dxbcOffset === 18);
+    assert(negStatements.every((entry) => /\(0u - .+\) != 0u\)$/u.test(entry.expression.code)));
+
+    for (const modifierName of [ "abs", "absneg" ])
+    {
+        const invalidCondition = structuredClone(program);
+        invalidCondition.instructions.find((entry) => entry.opcodeName === "movc").operands[1].modifierName = modifierName;
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(invalidCondition),
+            new RegExp(`unsupported ${modifierName} modifier for uint32`, "u")
+        );
+    }
+
+    const malformedRead = structuredClone(ir);
+    const malformedMovc = malformedRead.instructions.find((entry) => entry.dxbcOffset === 18);
+    malformedMovc.dataflow.reads.find((entry) => entry.operandIndex === 2).refs.splice(1);
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(malformedRead),
+        /too few source lanes/u
+    );
+});
+
 test("structured skinning lowers signed indices and typeless SRV words for SM5.0 and SM5.1", () =>
 {
     const dx11 = CjsFormatWebgpu.buildWgsl(structuredSkinningVertex(0));

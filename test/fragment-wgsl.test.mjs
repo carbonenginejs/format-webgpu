@@ -1922,6 +1922,20 @@ test("fragment lowering splits a mixed-lane movc into per-component selects", ()
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-mixed-movc" });
     assert.match(shader.code, /let value\d+_x: u32 = select\(/u);
     assert.match(shader.code, /let value\d+_y: f32 = select\(/u);
+
+    const negCondition = structuredClone(program);
+    negCondition.instructions.find((entry) => entry.opcodeName === "movc").operands[1].modifierName = "neg";
+    assert.match(CjsFormatWebgpu.buildWgsl(negCondition).code, /select\(.+, .+, \(0u - .+\) != 0u\)/u);
+
+    for (const modifierName of [ "abs", "absneg" ])
+    {
+        const invalidCondition = structuredClone(program);
+        invalidCondition.instructions.find((entry) => entry.opcodeName === "movc").operands[1].modifierName = modifierName;
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(invalidCondition),
+            new RegExp(`unsupported ${modifierName} modifier for uint32`, "u")
+        );
+    }
 });
 
 test("fragment lowering treats a fully-returning if/else as terminal and ignores the dead tail", () =>

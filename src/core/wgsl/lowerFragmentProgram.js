@@ -506,7 +506,8 @@ function unsupportedMinPrecision(operand)
     return name !== "default" && name !== "float_16";
 }
 
-function operandLaneExpression(program, instruction, operandIndex, destinationMask, laneIndex, targetType, inputs, bindings)
+function operandLaneExpression(program, instruction, operandIndex, destinationMask, laneIndex, targetType, inputs, bindings,
+    moverData = false)
 {
     const operand = instruction.operands[operandIndex];
     if (!operand) throw new Error(`WGSL fragment instruction ${instruction.index} has no operand ${operandIndex}`);
@@ -517,26 +518,33 @@ function operandLaneExpression(program, instruction, operandIndex, destinationMa
     const read = sourceRead(instruction, operandIndex);
     if (read)
     {
-        const replicated = read.refs.length === 1;
+        const replicated = read.refs.length === 1 && Boolean(operand.selected);
         if (!replicated && laneIndex >= read.refs.length)
         {
             throw new Error(`WGSL fragment instruction ${instruction.index} has too few source lanes`);
         }
         const ref = replicated ? read.refs[0] : read.refs[laneIndex];
         const storage = valueStorageType(program, ref);
-        return applyLaneModifier(reinterpretCode(valueReference(program, ref, inputs), storage, targetType, 1,
-            `instruction ${instruction.index} lane read`), operand, targetType, instruction, operandIndex);
+        const code = reinterpretCode(valueReference(program, ref, inputs), storage, targetType, 1,
+            `instruction ${instruction.index} lane read`);
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
     }
     const component = destinationMask[laneIndex];
     if (operand.typeName === "immediate32")
     {
-        return applyLaneModifier(immediateParts(operand, component, 1, targetType)[0],
-            operand, targetType, instruction, operandIndex);
+        const code = immediateParts(operand, component, 1, targetType)[0];
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
     }
     if (operand.typeName === "constant_buffer")
     {
-        return applyLaneModifier(cbufferParts(program, instruction, operandIndex, operand, component, 1, bindings, targetType, inputs)[0],
-            operand, targetType, instruction, operandIndex);
+        const code = cbufferParts(program, instruction, operandIndex, operand, component, 1, bindings, targetType, inputs)[0];
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
     }
     throw new Error(`WGSL fragment instruction ${instruction.index} cannot lower ${operand.typeName} lane operand ${operandIndex}`);
 }
@@ -1178,8 +1186,8 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
                 {
                     const laneType = mixedTypes[laneIndex];
                     const condition = operandLaneExpression(program, instruction, 1, write.mask, laneIndex, "uint32", inputs, bindings);
-                    const whenTrue = operandLaneExpression(program, instruction, 2, write.mask, laneIndex, laneType, inputs, bindings);
-                    const whenFalse = operandLaneExpression(program, instruction, 3, write.mask, laneIndex, laneType, inputs, bindings);
+                    const whenTrue = operandLaneExpression(program, instruction, 2, write.mask, laneIndex, laneType, inputs, bindings, true);
+                    const whenFalse = operandLaneExpression(program, instruction, 3, write.mask, laneIndex, laneType, inputs, bindings, true);
                     return {
                         kind: "let",
                         instructionIndex: instruction.index,

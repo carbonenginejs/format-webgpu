@@ -162,6 +162,16 @@ dispatched on the operand's data type, the same per-consumer typing — with
 lowering, so it has no separate bit-mover case; our sign-bit-on-raw-bits path is
 the WGSL-specific equivalent for lanes whose type is still `bitpattern32`.)
 
+When a `movc` writes lanes whose inferred storage types differ, both stages
+emit one scalar `select` per lane instead of an unrepresentable mixed-type WGSL
+vector. Each condition and value source is selected with that destination
+lane's original swizzle, modifier, and storage reinterpretation. This path is
+bounded to unsaturated temporary results and register, immediate, or constant-
+buffer lane sources; other mixed mover shapes remain fail-closed. Condition
+modifiers follow the `u32` consumer rules (two's-complement `neg`, with
+`abs`/`absneg` rejected), while the two value operands retain the raw float-
+data mover rules above.
+
 ### `continue`/`continuec` in loops → WGSL `continuing {}` latch
 
 Loop phi-latch updates are emitted in a WGSL `continuing {}` block (which runs

@@ -442,6 +442,20 @@ function applyModifier(parts, operand, expected, storageTypes, instruction, oper
     throw new Error(`WGSL vertex instruction ${instruction?.index} operand ${operandIndex} uses an unsupported ${modifier} modifier for ${expected}`);
 }
 
+function applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+{
+    const modifier = operand.modifierName || "none";
+    if (modifier === "none") return code;
+    if (![ "neg", "abs", "absneg" ].includes(modifier) || !MODIFIER_STORAGE_TYPES.has(targetType))
+    {
+        throw new Error(`WGSL vertex instruction ${instruction.index} lane operand ${operandIndex} uses an unsupported ${modifier} modifier for ${targetType}`);
+    }
+    // The per-lane path is reached only from bit-preserving movc lanes, where
+    // DXBC applies the float modifier semantics to the raw lane bits; the lane
+    // code is already reinterpreted to targetType.
+    return modifierOnStorage(code, targetType, modifier);
+}
+
 function expectedType(instruction, operandIndex)
 {
     return instruction.typeInfo.operandTypes.find((entry) => entry.operandIndex === operandIndex)?.expectedType || "unknown";
@@ -530,6 +544,49 @@ function unsupportedMinPrecision(operand)
     // stay fail-closed until a shader needs them.
     const name = operand.minPrecisionName || "default";
     return name !== "default" && name !== "float_16";
+}
+
+function operandLaneExpression(program, instruction, operandIndex, destinationMask, laneIndex, targetType, inputs, bindings,
+    moverData = false)
+{
+    const operand = instruction.operands[operandIndex];
+    if (!operand) throw new Error(`WGSL vertex instruction ${instruction.index} has no operand ${operandIndex}`);
+    if (unsupportedMinPrecision(operand))
+    {
+        throw new Error(`WGSL vertex instruction ${instruction.index} minimum-precision kind ${operand.minPrecisionName} is not supported`);
+    }
+    const read = sourceRead(instruction, operandIndex);
+    if (read)
+    {
+        const replicated = read.refs.length === 1 && Boolean(operand.selected);
+        if (!replicated && laneIndex >= read.refs.length)
+        {
+            throw new Error(`WGSL vertex instruction ${instruction.index} has too few source lanes`);
+        }
+        const ref = replicated ? read.refs[0] : read.refs[laneIndex];
+        const storage = valueStorageType(program, ref);
+        const code = reinterpretCode(valueReference(program, ref, inputs), storage, targetType, 1,
+            `instruction ${instruction.index} lane read`);
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
+    }
+    const component = destinationMask[laneIndex];
+    if (operand.typeName === "immediate32")
+    {
+        const code = immediateParts(operand, component, 1, targetType)[0];
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
+    }
+    if (operand.typeName === "constant_buffer")
+    {
+        const code = cbufferParts(program, instruction, operandIndex, operand, component, 1, bindings, targetType, inputs)[0];
+        return moverData
+            ? applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+            : applyModifier([ code ], operand, targetType, null, instruction, operandIndex)[0];
+    }
+    throw new Error(`WGSL vertex instruction ${instruction.index} cannot lower ${operand.typeName} lane operand ${operandIndex}`);
 }
 
 function operandExpression(program, instruction, operandIndex, destinationMask, count, inputs, bindings)
@@ -949,6 +1006,27 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
                     });
                 });
                 return statements;
+            }
+            if (instruction.opcodeName === "movc" && destination?.typeName === "temp" && !instruction.saturate)
+            {
+                return Array.from(write.mask).map((component, laneIndex) =>
+                {
+                    const laneType = mixedTypes[laneIndex];
+                    const condition = operandLaneExpression(program, instruction, 1, write.mask, laneIndex, "uint32", inputs, bindings);
+                    const whenTrue = operandLaneExpression(program, instruction, 2, write.mask, laneIndex, laneType, inputs, bindings, true);
+                    const whenFalse = operandLaneExpression(program, instruction, 3, write.mask, laneIndex, laneType, inputs, bindings, true);
+                    return {
+                        kind: "let",
+                        instructionIndex: instruction.index,
+                        dxbcOffset: instruction.dxbcOffset,
+                        name: `${write.valueId}_${component}`,
+                        type: scalarTypeName(laneType),
+                        expression: {
+                            code: `select(${whenFalse}, ${whenTrue}, ${condition} != 0u)`,
+                            type: scalarTypeName(laneType)
+                        }
+                    };
+                });
             }
             const immediateSource = instruction.operands[1];
             if (instruction.opcodeName !== "mov" || instruction.saturate
