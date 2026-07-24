@@ -435,3 +435,15 @@ Every compatibility change requires the package suite and a representative
 `engine-webgpu` browser gate on a real WebGPU device with zero WGSL warnings.
 Format-level qualification cannot detect every WGSL scoping or validator
 failure, so browser validation remains part of the compiler contract.
+
+The browser gate proves the emitted WGSL is *valid and runs*; it does not by
+itself prove the translation is *semantically equivalent to D3D*. Semantic
+decisions (out-of-bounds behavior, source-modifier typing, minimum-precision,
+division-by-zero, atomics) are therefore taken from the Direct3D 11 functional
+specification and independently cross-referenced against
+[vkd3d-shader](https://gitlab.winehq.org/wine/vkd3d), Wine's DXBC→SPIR-V/GLSL
+translator, which is the closest independent implementation of the same
+input. vkd3d is used strictly as a **behavioral reference for verification** —
+no code is derived from it; this compiler is implemented independently from the
+D3D specification. (The reference checkout is kept quarantined outside every
+package, never bundled or published.)
