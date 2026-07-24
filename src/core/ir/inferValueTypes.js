@@ -16,7 +16,7 @@ const INT_OPS = new Set([ "iadd", "imad", "imax", "imin", "imul", "ineg", "ishl"
 const INT_COMPARE = new Set([ "ieq", "ige", "ilt", "ine" ]);
 const UINT_OPS = new Set([
     "countbits", "firstbit_hi", "firstbit_lo", "firstbit_shi", "uaddc",
-    "udiv", "umad", "umax", "umin", "umul", "ushr", "usubb"
+    "ubfe", "udiv", "umad", "umax", "umin", "umul", "ushr", "usubb"
 ]);
 const UINT_COMPARE = new Set([ "uge", "ult" ]);
 const BITWISE_OPS = new Set([ "and", "not", "or", "xor" ]);
@@ -107,6 +107,14 @@ function ruleFor(opcodeName, program, instruction)
     {
         return {
             name: "structured-load",
+            destination: null,
+            sourceByOperand: { 1: "uint32", 2: "uint32" }
+        };
+    }
+    if (opcodeName === "store_structured")
+    {
+        return {
+            name: "structured-store",
             destination: null,
             sourceByOperand: { 1: "uint32", 2: "uint32" }
         };

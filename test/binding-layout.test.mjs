@@ -134,6 +134,35 @@ function computeTypedBuffers()
     };
 }
 
+function computeStructuredUav(stride = 4, {
+    stage = "compute",
+    resourceDimensionName,
+    returnType
+} = {})
+{
+    const programType = { vertex: 1, pixel: 0, compute: 5 }[stage];
+    const operand = {
+        typeName: "uav",
+        registerIndex: 0,
+        indices: [ { relative: false, values: [ 0 ] } ],
+        componentCount: 0
+    };
+    const entry = declaration(3, "dcl_unordered_access_view_structured", "uav", {
+        structureStride: stride,
+        globallyCoherent: false,
+        ...(resourceDimensionName === undefined ? {} : { resourceDimensionName }),
+        ...(returnType === undefined ? {} : { returnType })
+    }, 0);
+    entry.operands = [ operand ];
+    return {
+        program: { programType, programTypeName: stage, majorVersion: 5, minorVersion: 0 },
+        instructions: [
+            entry,
+            { offset: 20, opcode: 62, opcodeName: "ret", isDeclaration: false, operands: [] }
+        ]
+    };
+}
+
 function emitted(stage, bindings)
 {
     return {
@@ -296,6 +325,56 @@ test("compute binding lowering uses the validated scalar-word buffer profile", (
         lowerBindingLayout(ir, plan).map((entry) => [ entry.generatedSymbol, entry.binding ]),
         [ [ "t0", 0 ], [ "u0", 1 ] ]
     );
+});
+
+test("compute structured UAV lowering uses writable raw DWORD storage", () =>
+{
+    const ir = CjsFormatWebgpu.buildShaderIr(computeStructuredUav());
+    assert.deepEqual(lowerBindingLayout(ir), [ {
+        kind: "wgsl-binding",
+        id: "storage-resource:space0:range0",
+        identity: "storage-resource:0:0",
+        scopeIdentity: "storage-resource:0:0@compute",
+        resourceKind: "storage-resource",
+        generatedSymbol: "u0",
+        registerSpace: 0,
+        registerIndex: 0,
+        rangeId: null,
+        group: 0,
+        binding: 0,
+        visibility: "compute",
+        declarationOffset: 3,
+        declaration: "var<storage, read_write>",
+        type: "array<u32>",
+        structureStride: 4,
+        buffer: { type: "storage", hasDynamicOffset: false, minBindingSize: 4 }
+    } ]);
+
+    const stride48 = lowerBindingLayout(
+        CjsFormatWebgpu.buildShaderIr(computeStructuredUav(48)))[0];
+    assert.equal(stride48.structureStride, 48);
+    assert.equal(stride48.buffer.minBindingSize, 48);
+});
+
+test("structured UAV lowering is compute-only and rejects malformed or typed shapes", () =>
+{
+    assert.throws(() => lowerBindingLayout(
+        CjsFormatWebgpu.buildShaderIr(computeStructuredUav(4, { stage: "pixel" }))),
+    /structured storage resource .* is not supported in the pixel stage/u);
+    for (const stride of [ 0, 2, 6, -4 ])
+    {
+        assert.throws(() => lowerBindingLayout(
+            CjsFormatWebgpu.buildShaderIr(computeStructuredUav(stride))),
+        /positive DWORD-aligned stride/u);
+    }
+    assert.throws(() => lowerBindingLayout(CjsFormatWebgpu.buildShaderIr(
+        computeStructuredUav(4, { resourceDimensionName: "buffer" }))),
+    /unexpected typed-resource metadata/u);
+    assert.throws(() => lowerBindingLayout(CjsFormatWebgpu.buildShaderIr(
+        computeStructuredUav(4, { returnType: {
+            returnTypeNames: [ "uint", "uint", "uint", "uint" ]
+        } }))),
+    /unexpected typed-resource metadata/u);
 });
 
 test("pass-global binding planning assigns one dense union across vertex and pixel stages", () =>

@@ -199,9 +199,34 @@ function uavBufferLayout(program, binding)
     {
         throw new Error(`WGSL storage resource ${binding.id} is not supported in the ${program.stage} stage`);
     }
+    if (binding.structureStride !== null && binding.structureStride !== undefined)
+    {
+        const stride = binding.structureStride;
+        if (program.stage !== "compute")
+        {
+            throw new Error(`WGSL structured storage resource ${binding.id} is not supported in the ${program.stage} stage`);
+        }
+        if (!Number.isInteger(stride) || stride < 4 || stride % 4 !== 0)
+        {
+            throw new Error(`WGSL structured storage resource ${binding.id} requires a positive DWORD-aligned stride`);
+        }
+        if (binding.resourceDimension !== null || binding.returnType !== null)
+        {
+            throw new Error(`WGSL structured storage resource ${binding.id} has unexpected typed-resource metadata`);
+        }
+        return {
+            declaration: "var<storage, read_write>",
+            type: "array<u32>",
+            structureStride: stride,
+            buffer: {
+                type: "storage",
+                hasDynamicOffset: false,
+                minBindingSize: stride
+            }
+        };
+    }
     const returns = binding.returnType?.returnTypeNames || [];
     if (binding.resourceDimension !== "buffer"
-        || Number.isInteger(binding.structureStride)
         || returns.length !== 4 || returns.some((entry) => entry !== "uint"))
     {
         throw new Error(`WGSL storage resource ${binding.id} shape is not supported; only typed uint buffer UAVs are supported`);

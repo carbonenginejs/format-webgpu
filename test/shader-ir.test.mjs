@@ -503,3 +503,121 @@ test("type inference derives sampled values from resource return types", () =>
     assert.equal(ir.instructions[0].typeInfo.rule, "sample-resource");
     assert.equal(ir.instructions[0].typeInfo.resultType, "uint32");
 });
+
+test("type inference types ubfe and structured-store addressing without widening store data lanes", () =>
+{
+    const register = (typeName, registerIndex, {
+        componentCount = 4,
+        mask = "",
+        swizzle = "",
+        selected = ""
+    } = {}) => ({
+        typeName,
+        componentCount,
+        mask,
+        swizzle,
+        selected,
+        modifierName: "none",
+        minPrecisionName: "default",
+        nonUniform: false,
+        registerIndex,
+        indices: Number.isInteger(registerIndex)
+            ? [ { values: [ registerIndex ], relative: null } ]
+            : [],
+        immediateValues: []
+    });
+    const immediate = (values) => ({
+        ...register("immediate32", null, { componentCount: values.length }),
+        immediateValues: values.map((uint32) => ({ uint32, float32: uint32 }))
+    });
+    const ir = CjsFormatWebgpu.buildShaderIr({
+        program: { programType: 5, programTypeName: "compute", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [], patch: [] },
+        instructions: [
+            {
+                offset: 2,
+                opcode: 0,
+                opcodeName: "dcl_temps",
+                isDeclaration: true,
+                declaration: { tempCount: 3 },
+                operands: []
+            },
+            {
+                offset: 4,
+                opcode: 0,
+                opcodeName: "mov",
+                isDeclaration: false,
+                operands: [
+                    register("temp", 0, { mask: "xy" }),
+                    immediate([ 17, 3, 0, 0 ])
+                ]
+            },
+            {
+                offset: 8,
+                opcode: 0,
+                opcodeName: "ubfe",
+                isDeclaration: false,
+                operands: [
+                    register("temp", 1, { mask: "x" }),
+                    immediate([ 8, 0, 0, 0 ]),
+                    immediate([ 8, 0, 0, 0 ]),
+                    register("temp", 0, { swizzle: "xxxx" })
+                ]
+            },
+            {
+                offset: 13,
+                opcode: 0,
+                opcodeName: "utof",
+                isDeclaration: false,
+                operands: [
+                    register("temp", 2, { mask: "x" }),
+                    register("temp", 1, { swizzle: "xxxx" })
+                ]
+            },
+            {
+                offset: 17,
+                opcode: 0,
+                opcodeName: "store_structured",
+                isDeclaration: false,
+                operands: [
+                    register("uav", 0, { mask: "x" }),
+                    register("temp", 0, { swizzle: "yyyy" }),
+                    immediate([ 0 ]),
+                    register("temp", 2, { swizzle: "xxxx" })
+                ]
+            },
+            {
+                offset: 22,
+                opcode: 0,
+                opcodeName: "ret",
+                isDeclaration: false,
+                operands: []
+            }
+        ]
+    });
+
+    const bitfield = ir.instructions[1];
+    assert.equal(bitfield.typeInfo.rule, "unsigned-integer");
+    assert.equal(bitfield.typeInfo.resultType, "uint32");
+    assert.deepEqual(
+        bitfield.typeInfo.operandTypes.map((entry) => entry.expectedType),
+        [ "uint32", "uint32", "uint32", "uint32" ]);
+
+    const store = ir.instructions[3];
+    assert.equal(store.typeInfo.rule, "structured-store");
+    assert.equal(store.typeInfo.resultType, "unknown");
+    assert.deepEqual(
+        store.typeInfo.operandTypes.map((entry) => entry.expectedType),
+        [ "unknown", "uint32", "uint32", "unknown" ]);
+    assert.deepEqual(
+        store.dataflow.reads.map((read) => ({
+            operandIndex: read.operandIndex,
+            components: read.components
+        })),
+        [
+            { operandIndex: 1, components: [ "y" ] },
+            { operandIndex: 3, components: [ "x" ] }
+        ]);
+    const stored = ir.values.find((value) => value.instructionIndex === 2);
+    assert.equal(stored.componentTypes.x, "float32");
+});

@@ -58,6 +58,15 @@ export function fixedSourceLanes(instruction, operandIndex, program = null)
     if (instruction.opcodeName === "ld" && operandIndex === 1) return loadAddressLanes(instruction, program);
     if (instruction.opcodeName === "store_uav_typed" && operandIndex === 1) return [ "x" ];
     if (instruction.opcodeName === "ld_structured" && operandIndex === 1) return [ "x" ];
+    if (instruction.opcodeName === "store_structured")
+    {
+        if ([ 1, 2 ].includes(operandIndex)) return [ "x" ];
+        if (operandIndex === 3)
+        {
+            const mask = Array.from(instruction.operands?.[0]?.mask || "");
+            return mask.length ? mask : null;
+        }
+    }
     if ([ "sample", "sample_b", "sample_c", "sample_c_lz", "sample_d", "sample_l", "gather4" ]
         .includes(instruction.opcodeName))
     {

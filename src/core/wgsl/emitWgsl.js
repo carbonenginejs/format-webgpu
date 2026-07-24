@@ -70,6 +70,63 @@ function deepFreeze(value)
 }
 
 /**
+ * Formats the closed compute-builtin subset accepted by the WGSL emitter.
+ *
+ * @param {object} program Typed shader program.
+ * @returns {string} WGSL entry-point parameter list.
+ */
+export function computeEntryPointParameters(program)
+{
+    const inputs = program?.builtinInputs;
+    if (inputs === undefined) return "";
+    if (!Array.isArray(inputs) || inputs.length === 0)
+    {
+        throw new Error("WGSL compute builtinInputs must be a non-empty array");
+    }
+    const names = new Set();
+    const builtins = new Set();
+    for (const input of inputs)
+    {
+        if (!input || typeof input !== "object" || Array.isArray(input))
+        {
+            throw new Error("WGSL compute builtin input must be an object");
+        }
+        const keys = Object.keys(input).sort();
+        if (keys.length !== 3
+            || keys[0] !== "builtin" || keys[1] !== "name" || keys[2] !== "type")
+        {
+            throw new Error("WGSL compute builtin input contains unsupported metadata");
+        }
+        if (typeof input.builtin !== "string" || typeof input.name !== "string"
+            || typeof input.type !== "string")
+        {
+            throw new Error("WGSL compute builtin input fields must be strings");
+        }
+        if (builtins.has(input.builtin))
+        {
+            throw new Error(`WGSL compute builtin input duplicates ${input.builtin}`);
+        }
+        if (names.has(input.name))
+        {
+            throw new Error(`WGSL compute builtin input duplicates parameter ${input.name}`);
+        }
+        builtins.add(input.builtin);
+        names.add(input.name);
+        if (input.builtin !== "global_invocation_id"
+            || input.name !== "dispatch_thread_id"
+            || input.type !== "vec3<u32>")
+        {
+            throw new Error(`WGSL compute builtin input ${input.builtin || "<empty>"} is not supported`);
+        }
+    }
+    if (inputs.length !== 1)
+    {
+        throw new Error("WGSL compute builtinInputs contains unsupported entries");
+    }
+    return "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
+}
+
+/**
  * Builds deterministic WGSL and a DXBC-offset source map for the supported IR.
  *
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView|object} input DXBC or CJS IR.
@@ -91,6 +148,10 @@ export function buildWgsl(input, options = {})
     const lines = [];
     const sourceMap = [];
     const compute = program.stage === "compute";
+    if (!compute && program.builtinInputs !== undefined)
+    {
+        throw new Error("WGSL render lowering cannot emit compute builtinInputs");
+    }
     const prefix = program.stage === "vertex" ? "Vertex" : "Fragment";
     if (program.requiresDerivativeUniformityOptOut)
     {
@@ -122,7 +183,8 @@ export function buildWgsl(input, options = {})
         {
             throw new Error("WGSL compute lowering requires a positive three-dimensional threadGroupSize");
         }
-        lines.push(`@compute @workgroup_size(${size.join(", ")})`, `fn ${program.entryPoint}()`, "{");
+        const parameters = computeEntryPointParameters(program);
+        lines.push(`@compute @workgroup_size(${size.join(", ")})`, `fn ${program.entryPoint}(${parameters})`, "{");
     }
     else
     {

@@ -400,6 +400,50 @@ failed to 506 / 31 / 0: exactly the two programs named above became qualified,
 and SHA-256 comparison confirmed all 504 previously qualified package bytes
 remained identical.
 
+### Bounded 64×1×1 structured skinning compute
+
+A second, separate SM5.0 compute profile is currently exercised by
+`system/raytracing/skinvertices`. Profile selection is structural rather than
+path- or byte-hash-based, and malformed members of the selected declaration
+family fail there instead of falling through to the scalar-word profile. The
+declaration envelope is exactly one immediate `cb3` with three vec4 rows,
+structured SRVs `t0`/`t1` with 48-/4-byte strides, one non-coherent structured
+UAV `u0` with a 4-byte stride, `input_thread_id.x`, ten temporary registers,
+and `dcl_thread_group 64,1,1`. Its bounded body has two nested selections and
+no loops, barriers, atomics, textures, or samplers. CFG, SSA, scalar types,
+bitcasts, live merges, operands, and resource identities are replayed and
+compared before emission.
+
+`input_thread_id.x` maps to
+`@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>` and uses only
+the x component; the workgroup size is not multiplied into that already-global
+identifier. The supported packed-index path treats `ubfe` as unsigned and
+extracts only its observed eight-bit fields. Matrix rows and input words use
+flat `array<u32>` storage so typeless f32/u32 bits survive unchanged.
+Structured loads compute `arrayLength / strideWords`, clamp the eagerly
+evaluated physical word access, and select zero for an out-of-range structure
+index. Each scalar structured store has its own
+`address < arrayLength(&u0)` branch and is dropped when out of range.
+Offset-plus-swizzle accesses beyond a declared stride fail closed.
+
+The DX12 SM5.1 comparison shader remains comparison-only: its unbounded
+space1/space2 descriptor ranges do not provide the fixed WebGPU binding
+contract used by the DX11 profile. The native browser gate validates the
+64×1×1 module, four-entry compute bind-group layout, pipeline layout, and
+compute pipeline without widening the public render-only device API or
+dispatching work.
+
+*Checked against vkd3d-shader:* its compute builtin maps to the global
+invocation identifier, its raw/structured buffers flatten to scalar words, and
+its structured loads/stores use direct backend accesses. Its Vulkan path
+relies on runtime robustness for physical out-of-bounds behavior; the explicit
+WGSL load-zero/store-drop guards above independently preserve the D3D result.
+
+The full corpus transition moved from 506 qualified / 31 unsupported / 0
+failed to 507 / 30 / 0: only `system/raytracing/skinvertices` became
+qualified, and direct byte comparison confirmed all 506 previously qualified
+packages remained identical.
+
 ### `float_16` minimum precision → full-precision f32
 
 D3D minimum precision is a floor, not a format: an implementation that computes

@@ -1,5 +1,9 @@
 import { requireRefactoringAllowed } from "./precisionControls.js";
 import { validateFixedHandleBinding, validateFixedHandleOperand } from "./validateHandleOperand.js";
+import {
+    isSkinVerticesComputeProfile,
+    lowerSkinVerticesComputeProgram
+} from "./lowerSkinVerticesComputeProgram.js";
 
 const COMPONENTS = Object.freeze([ "x", "y", "z", "w" ]);
 const DECLARATION_OPCODES = Object.freeze([
@@ -865,7 +869,7 @@ function validateBlockOutput(program, state)
  * @param {object} [options] Optional exact compute-only binding plan.
  * @returns {object} Frozen typed compute program.
  */
-export function lowerComputeProgram(program, options = {})
+function lowerScalarWordComputeProgram(program, options = {})
 {
     validateProgramShape(program);
     const bindings = lowerComputeBindingLayout(program, options.bindingPlan ?? null);
@@ -1031,4 +1035,22 @@ export function lowerComputeProgram(program, options = {})
         bindings,
         statements
     });
+}
+
+/**
+ * Routes one compute program to an exact declaration-shaped lowering profile.
+ * Once a profile is selected its validation errors are final; malformed input
+ * never falls through to a broader profile.
+ *
+ * @param {object} program Frozen CJS shader IR.
+ * @param {object} [options] Optional exact compute-only binding plan.
+ * @returns {object} Frozen typed compute program.
+ */
+export function lowerComputeProgram(program, options = {})
+{
+    if (isSkinVerticesComputeProfile(program))
+    {
+        return lowerSkinVerticesComputeProgram(program, options);
+    }
+    return lowerScalarWordComputeProgram(program, options);
 }
