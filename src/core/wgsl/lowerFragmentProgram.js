@@ -4,6 +4,7 @@ import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 import { buildSelectionPlans, cloneWritten, terminatesAllPaths } from "./selectionPlans.js";
 import { computeVaryingValues, conditionIsUniform } from "./uniformity.js";
+import { validateFixedHandleBinding, validateFixedHandleOperand } from "./validateHandleOperand.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
 const SUPPORTED_OPCODES = new Set([
@@ -314,10 +315,16 @@ function bindingForOperand(bindings, resourceKind, operand)
         {
             throw new Error(`WGSL fragment ${resourceKind} range ${rangeId} is ambiguous`);
         }
-        return matches[0] || null;
+        const binding = matches[0] || null;
+        return resourceKind === "uniform-buffer"
+            ? binding
+            : validateFixedHandleBinding(operand, binding, "fragment");
     }
-    return bindings.find((entry) =>
+    const binding = bindings.find((entry) =>
         entry.resourceKind === resourceKind && entry.registerIndex === operand.registerIndex) || null;
+    return resourceKind === "uniform-buffer"
+        ? binding
+        : validateFixedHandleBinding(operand, binding, "fragment");
 }
 
 function cbufferVectorIndex(program, instruction, operandIndex, operand, inputs)
@@ -396,11 +403,10 @@ function constTableParts(program, instruction, operandIndex, operand, destinatio
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
-// DXBC source-modifier semantics are exact per consumer type: float consumers
-// use IEEE negate/abs (pure sign-bit operations), integer consumers use
-// two's-complement negation, and bit-preserving movers (unknown expected type)
-// apply the FLOAT semantics to the raw lane bits ("modifiers assume float
-// data"), which is exactly representable as sign-bit arithmetic on the storage.
+// DXBC float source modifiers are selected by the consuming opcode. Integer
+// consumers admit two's-complement negation only. Bit-preserving movers
+// (unknown expected type) apply the FLOAT semantics to raw lane bits
+// ("modifiers assume float data"), represented as sign-bit arithmetic.
 function modifierOnStorage(part, storage, modifier)
 {
     if (storage === "float32")
@@ -425,11 +431,15 @@ function applyModifier(parts, operand, expected, storageTypes, instruction, oper
     {
         throw new Error(`WGSL fragment operand modifier ${modifier} is not supported`);
     }
-    if (expected === "float32" || expected === "int32")
+    if (expected === "float32")
     {
         if (modifier === "neg") return parts.map((part) => `-(${part})`);
         if (modifier === "abs") return parts.map((part) => `abs(${part})`);
         return parts.map((part) => `-(abs(${part}))`);
+    }
+    if (expected === "int32" && modifier === "neg")
+    {
+        return parts.map((part) => `-(${part})`);
     }
     if (expected === "uint32" && modifier === "neg")
     {
@@ -681,13 +691,7 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
     {
         throw new Error(`WGSL fragment structured load ${instruction.index} requires an immediate DWORD byte offset`);
     }
-    const resource = instruction.operands[3];
-    if (resource?.typeName !== "resource" || resource.indices?.some((entry) => entry.relative)
-        || (resource.modifierName || "none") !== "none"
-        || (resource.minPrecisionName || "default") !== "default")
-    {
-        throw new Error(`WGSL fragment structured load ${instruction.index} requires one fixed resource`);
-    }
+    const resource = validateFixedHandleOperand(instruction, 3, "resource", "fragment");
     const binding = bindingForOperand(bindings, "sampled-resource", resource);
     if (!binding?.buffer || !Number.isInteger(binding.structureStride))
     {
@@ -812,7 +816,11 @@ function expressionFor(program, instruction, write, inputs, bindings)
     }
     if (op === "resinfo")
     {
-        const resource = instruction.operands[2];
+        if (instruction.saturate)
+        {
+            throw new Error(`WGSL fragment resinfo instruction ${instruction.index} cannot saturate`);
+        }
+        const resource = validateFixedHandleOperand(instruction, 2, "resource", "fragment");
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         if (!textureBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has an unresolved resinfo resource`);
         const viewDimension = textureBinding.texture?.viewDimension;
@@ -865,7 +873,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
     if (op === "ld_structured") return structuredLoadExpression(program, instruction, write, valueType(program, write), inputs, bindings);
     if (op === "ld")
     {
-        const resource = instruction.operands[2];
+        const resource = validateFixedHandleOperand(instruction, 2, "resource", "fragment");
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         if (!textureBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has an unresolved load resource`);
         let loaded;
@@ -900,8 +908,8 @@ function expressionFor(program, instruction, write, inputs, bindings)
     }
     if (op === "sample" || op === "sample_b" || op === "sample_l" || op === "sample_d")
     {
-        const resource = instruction.operands[2];
-        const sampler = instruction.operands[3];
+        const resource = validateFixedHandleOperand(instruction, 2, "resource", "fragment");
+        const sampler = validateFixedHandleOperand(instruction, 3, "sampler", "fragment");
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         const samplerBinding = bindingForOperand(bindings, "sampler", sampler);
         if (!textureBinding || !samplerBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has unresolved sample bindings`);
@@ -1026,9 +1034,8 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     }
     if (instruction.opcodeName === "atomic_iadd")
     {
-        const uav = instruction.operands[0];
-        if (instruction.operands.length !== 3 || uav?.typeName !== "uav"
-            || (uav.modifierName || "none") !== "none" || instruction.saturate)
+        const uav = validateFixedHandleOperand(instruction, 0, "uav", "fragment");
+        if (instruction.operands.length !== 3 || instruction.saturate)
         {
             throw new Error(`WGSL fragment atomic instruction ${instruction.index} has an unsupported operand shape`);
         }
@@ -1041,7 +1048,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         const address = operandExpression(program, instruction, 1, "x", 1, "uint32", inputs, bindings);
         const value = operandExpression(program, instruction, 2, "x", 1, "uint32", inputs, bindings);
         // D3D defines out-of-bounds typed-UAV atomics as dropped writes; the
-        // bounds guard reproduces that (WGSL would clamp to a live element).
+        // bounds guard reproduces that (WGSL could redirect to a live element).
         return {
             kind: "if",
             instructionIndex: instruction.index,

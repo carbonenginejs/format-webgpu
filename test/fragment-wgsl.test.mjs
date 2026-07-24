@@ -753,6 +753,60 @@ test("fragment lowering preserves absolute and negated-absolute source modifiers
     assert.match(shader.code, /dot\(vec2<f32>\(-\(abs\([^\n]+\)\), -\(abs\([^\n]+\)\)\)/);
 });
 
+test("fragment lowering rejects float-only absolute modifiers on integer consumers", () =>
+{
+    const signedNegate = integerDiscardFragmentFixture();
+    assert.match(CjsFormatWebgpu.buildWgsl(signedNegate).code, /-\(bitcast<i32>/u);
+
+    for (const modifierName of [ "abs", "absneg" ])
+    {
+        const malformed = integerDiscardFragmentFixture();
+        malformed.instructions.find((entry) => entry.opcodeName === "iadd").operands[1].modifierName = modifierName;
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(malformed),
+            new RegExp(`unsupported ${modifierName} modifier for int32`, "u")
+        );
+    }
+
+    const rawMover = bitpatternInputFragmentFixture();
+    rawMover.instructions.find((entry) => entry.offset === 5).operands[1].modifierName = "absneg";
+    assert.match(CjsFormatWebgpu.buildWgsl(rawMover).code, /\| 0x80000000u/u);
+});
+
+test("fragment sampled handles require fixed unmodified default-precision identities", () =>
+{
+    const base = CjsFormatWebgpu.buildShaderIr(fragmentFixture());
+    const sampleAt = (ir) => ir.instructions.find((entry) => entry.dxbcOffset === 39);
+    const malformed = [
+        [ (operand) => { operand.minPrecisionName = "float_16"; }, /default-precision resource handle/u ],
+        [ (operand) => { operand.modifierName = "neg"; }, /unmodified.*resource handle/u ],
+        [ (operand) => { operand.indices[0].relative = {}; }, /fixed.*resource handle/u ],
+        [ (operand) => { operand.resourceReference = { absoluteIndex: { values: [ 0 ], relative: {} } }; },
+            /fixed.*resource handle/u ],
+        [ (operand) => { operand.typeName = "temp"; }, /resource handle/u ]
+    ];
+    for (const [ mutate, pattern ] of malformed)
+    {
+        const ir = structuredClone(base);
+        mutate(sampleAt(ir).operands[2]);
+        assert.throws(() => CjsFormatWebgpu.buildWgsl(ir), pattern);
+    }
+
+    const samplerPrecision = structuredClone(base);
+    sampleAt(samplerPrecision).operands[3].minPrecisionName = "float_16";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(samplerPrecision), /default-precision sampler handle/u);
+
+    const rangeMismatch = structuredClone(base);
+    sampleAt(rangeMismatch).operands[2].resourceReference = {
+        absoluteIndex: { values: [ 1 ], relative: null }
+    };
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(rangeMismatch), /out-of-range fixed handle identity/u);
+
+    const swizzled = structuredClone(base);
+    sampleAt(swizzled).operands[2].swizzle = "wzyx";
+    assert.match(CjsFormatWebgpu.buildWgsl(swizzled).code, /textureSample\([^\n]+\)\.wzyx/u);
+});
+
 test("fragment lowering checks output coverage on each return path", () =>
 {
     const decoded = fragmentFixture();
@@ -1372,6 +1426,11 @@ test("fragment resinfo rejects malformed mip operands and return types", () =>
     program.instructions[2].resinfoReturnTypeName = "return_type_3";
     assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-return-type" }),
         /unsupported return type return_type_3/u);
+
+    program.instructions[2].resinfoReturnTypeName = "float";
+    program.instructions[2].saturate = true;
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-saturate" }),
+        /resinfo instruction \d+ cannot saturate/u);
 });
 
 test("fragment lowering emits a counted loop with carried phis and a conditional break", () =>
@@ -1738,6 +1797,11 @@ test("fragment lowering emits guarded storage atomics for typed uint buffer UAVs
     assert.match(shader.code, /@group\(0\) @binding\(\d+\) var<storage, read_write> u0: array<atomic<u32>>;/u);
     assert.match(shader.code, /if \(0x00000005u < arrayLength\(&u0\)\)/u);
     assert.match(shader.code, /atomicAdd\(&u0\[0x00000005u\], 0x00000001u\);/u);
+
+    const malformed = structuredClone(CjsFormatWebgpu.buildShaderIr(program));
+    malformed.instructions.find((entry) => entry.opcodeName === "atomic_iadd")
+        .operands[0].minPrecisionName = "float_16";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(malformed), /default-precision uav handle/u);
 });
 
 test("fragment lowering fails closed on non-uint typed buffer UAVs", () =>

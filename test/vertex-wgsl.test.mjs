@@ -356,6 +356,32 @@ function dualIndexStructuredVertex()
     };
 }
 
+test("vertex lowering rejects float-only absolute modifiers on integer consumers", () =>
+{
+    const signedNegate = structuredSkinningVertex();
+    signedNegate.instructions.find((entry) => entry.opcodeName === "iadd").operands[1].modifierName = "neg";
+    assert.match(CjsFormatWebgpu.buildWgsl(signedNegate).code, /-\(bitcast<i32>/u);
+
+    for (const modifierName of [ "abs", "absneg" ])
+    {
+        const malformed = structuredSkinningVertex();
+        malformed.instructions.find((entry) => entry.opcodeName === "iadd").operands[1].modifierName = modifierName;
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(malformed),
+            new RegExp(`unsupported ${modifierName} modifier for int32`, "u")
+        );
+    }
+
+});
+
+test("vertex structured-resource handles require default precision", () =>
+{
+    const malformed = structuredClone(CjsFormatWebgpu.buildShaderIr(structuredSkinningVertex()));
+    malformed.instructions.find((entry) => entry.opcodeName === "ld_structured")
+        .operands[3].minPrecisionName = "float_16";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(malformed), /default-precision resource handle/u);
+});
+
 test("vertex lowering emits the bounded arithmetic and uniform-buffer slice", () =>
 {
     const shader = CjsFormatWebgpu.buildWgsl(arithmeticVertex(), { source: "synthetic-arithmetic-vs" });

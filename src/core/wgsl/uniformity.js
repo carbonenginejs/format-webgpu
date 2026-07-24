@@ -6,16 +6,15 @@
  * `textureSampleBias`) — inside NON-UNIFORM control flow (a branch whose
  * condition can differ between the pixels of a 2x2 quad). This module tags each
  * SSA value as "varying" (per-pixel) or uniform so the fragment lowerer can
- * fail those operations closed when an enclosing branch condition is varying,
- * instead of emitting WGSL the browser's uniformity analysis rejects.
+ * identify those operations when an enclosing branch condition is varying and
+ * emit the explicit derivative-uniformity diagnostic opt-out.
  *
  * Soundness note: constant-buffer and immediate operands are NOT represented as
  * SSA values (they are resolved at emit time), so the only varying SEEDS are
- * interpolated fragment inputs (`input[N]`, which includes `SV_Position`) and
- * the results of per-pixel producers (texture sampling/loading and
- * derivatives). A value therefore ends up varying only if it genuinely derives
- * from one of those — there are no false positives, so a branch flagged
- * non-uniform here is non-uniform in fact.
+ * interpolated fragment inputs (`input[N]`, which includes `SV_Position`) and,
+ * conservatively, all texture sampling/loading and derivative results. This
+ * avoids known false negatives but can flag a result that happens to be
+ * dynamically uniform; the only consequence is a broader diagnostic opt-out.
  */
 
 const VARYING_PRODUCERS = new Set([

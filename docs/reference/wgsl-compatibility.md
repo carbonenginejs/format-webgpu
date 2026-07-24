@@ -128,22 +128,27 @@ pre-init. Inputs that neither dominate nor are hoistable (and undefined-register
 inputs on the true edge) still fail closed. Browser-validated on avatar tattoo
 picking selections whose merges inherit a true-arm value through an inner join.
 
-### Source modifiers (`neg`/`abs`/`absneg`) → exact per-consumer-type lowering
+### Source modifiers (`neg`/`abs`/`absneg`) → per-consumer-type lowering
 
 DXBC source-modifier semantics depend on the consuming instruction's type, and
-each case is exactly representable in WGSL:
+the supported cases lower according to that consumer:
 
 - float consumers: IEEE negate/abs (`-(x)`, `abs(x)`, `-(abs(x))`);
 - signed-integer consumers: `neg` is two's-complement negation (`-(x)` on
   `i32`);
 - unsigned-integer consumers: `neg` is two's-complement negation, emitted as
-  the wrapping `(0u - x)` (WGSL has no unary minus on `u32`); `abs` fails
-  closed (undefined on integer sources);
+  the wrapping `(0u - x)` (WGSL has no unary minus on `u32`);
+- integer consumers: `abs`/`absneg` fail closed because the absolute modifier
+  is defined only for floating-point instructions;
 - bit-preserving movers (`mov`/`movc` with unknown or conflicting lane types):
   the modifier applies FLOAT semantics to the raw lane bits, and IEEE
   negate/abs/absneg are pure sign-bit operations, so they lower to
   `^ 0x80000000u` / `& 0x7fffffffu` / `| 0x80000000u` on the `u32` storage
   (with `bitcast` in/out for `i32`-stored lanes).
+
+The ordinary WGSL float operators match finite non-zero inputs; signed-zero
+and non-finite behavior inherits WGSL's floating-point latitude. The
+bit-preserving mover path uses explicit sign-bit arithmetic.
 
 Previously the modifier was applied as a type-blind `-(x)`/`abs(x)`, which was
 invalid WGSL on `u32` lanes (caught by the browser gate) and a silent
@@ -196,12 +201,20 @@ and not lowered. Output-completeness is validated only on reachable `ret`s.
 ### `immediate_constant_buffer` (DXBC icb) → module `const` array
 
 DXBC's inline constant table (`customdata`, dataClass 3) is emitted as a
-module-scope `const icb = array<vec4<f32>, N>(vec4<f32>(...), ...)` with each
-lane a round-tripping f32 decimal literal (non-finite lanes fall back to
-`bitcast<f32>(0x..u)`), and `immediate_constant_buffer` operands lower as
+module-scope `const icb = array<vec4<f32>, N>(vec4<f32>(...), ...)`. Finite
+non-zero lanes use a shortest f32 decimal and non-finite lanes fall back to
+`bitcast<f32>(0x..u)`; negative zero currently serializes as positive zero.
+WGSL does not fix the rounding direction for an inexact decimal-to-f32
+conversion, so readable decimal emission is not a normative raw-bit guarantee;
+guaranteed preservation would require raw-bit literals for every lane. The same
+literal emitter is used for immutable indexable-temp tables.
+`immediate_constant_buffer` operands lower as
 `icb[<index>].<comp>` reusing the dynamic constant-buffer index machinery
 (pure-relative and base+relative indices both supported), with int/uint
-consumers bitcast exactly like uniform cbuffers.
+consumers bitcast exactly like uniform cbuffers. Out-of-bounds dynamic indices
+are an adaptation: D3D constant/ICB reads return zero, while the emitted
+unchecked WGSL array access has implementation-chosen out-of-bounds behavior;
+qualified corpus shaders stay in range.
 
 ### Relative indexable temps → module `const` tables (immutable shape only)
 
@@ -217,9 +230,9 @@ compiler-generated shape for small lookup tables (e.g. the six quad-corner
 UVs in `particles/gpu/quads`). Any other relative indexable-temp use —
 mutable writes, non-immediate initializers, initializers under control flow,
 partial slots — fails closed with a per-reason diagnostic. Out-of-bounds
-dynamic indices follow WGSL's in-bounds guarantee (as with the icb) rather
-than D3D's out-of-bounds register semantics; no corpus shader indexes out of
-bounds.
+dynamic indices retain WGSL's implementation-chosen array-access behavior
+rather than D3D's out-of-bounds register semantics; no qualified corpus shader
+indexes out of bounds.
 
 ### Component-packed varyings → one merged interface field per register
 
@@ -250,7 +263,9 @@ sample variants, and `constant` fail closed.
 D3D `saturate` assumes float data (like source modifiers). When a
 bit-preserving `mov`/`movc` result's lanes resolve to integer storage, the
 saturate lowers as `bitcast<T>(clamp(bitcast<f32-vec>(bits), 0.0, 1.0))` —
-the exact float clamp on the raw lanes, keeping the storage type. Saturate on
+the direct WGSL float clamp on the raw lanes, keeping the storage type. Finite
+values match the D3D clamp; non-finite inputs do not have portable
+D3D-equivalent results in WGSL. Saturate on
 genuinely integer arithmetic results still fails closed.
 
 *Confirmed against vkd3d-shader:* `spirv_compiler_emit_sat` (spirv.c) is
@@ -260,7 +275,7 @@ integer saturate is unhandled, matching "assumes float". Our bitcast-clamp on
 `bitpattern32` mover lanes is the WGSL-specific handling for the float-data-in-
 integer-storage case vkd3d left as a FIXME.
 
-### `rcp` → ordinary f32 division
+### `rcp` (fragment stage) → ordinary f32 division
 
 DXBC `rcp` is a reduced-precision component-wise reciprocal; its maximum
 relative error is 2^-21. It lowers to `1.0 / x`. For a finite, normal,
@@ -271,8 +286,14 @@ The special-value contract is adapted. D3D specifies signed infinities for
 signed-zero and subnormal inputs, signed zero for infinities, and NaN for NaN.
 WGSL permits zero signs to be ignored and makes a runtime result that is
 infinite or NaN indeterminate under its finite-math assumption. Exact behavior
-for those inputs is therefore not portable even though ordinary finite inputs
-match.
+for those inputs is therefore not portable. Finite normal denominators outside
+the stated magnitude range can produce a subnormal reciprocal that D3D flushes
+to signed zero but WGSL may preserve, so only the stated range has the claimed
+accuracy match. When a constant expression would produce infinity or NaN,
+WGSL makes shader creation fail; immediate zero, subnormal, or NaN operands are
+therefore a known fail-closed validation gap rather than a portable adaptation.
+The same signed-zero and non-finite caveats apply to the supported `div`
+opcode in both stages.
 
 *Confirmed against vkd3d-shader:* `spirv_compiler_emit_rcp` (spirv.c) emits
 `SpvOpFDiv` with a `1.0` numerator, the same ordinary floating division used
@@ -291,15 +312,17 @@ WGSL forbids implicit derivatives in a vertex entry point.
 
 A `dcl_unordered_access_view_typed` buffer with a uniform uint return type
 lowers to `var<storage, read_write> uN: array<atomic<u32>>` (fragment stage
-only — WebGPU vertex-stage storage buffers are read-only), and `atomic_iadd`
+only under the current compiler/engine portability contract; vertex writable
+storage is not admitted), and `atomic_iadd`
 becomes a bounds-guarded statement:
 `if (i < arrayLength(&uN)) { atomicAdd(&uN[i], v); }`. The guard reproduces
 D3D's defined behavior — out-of-bounds typed-UAV atomics are dropped — where
 an unguarded WGSL access could target a live element or otherwise raise a
 dynamic error. The result-returning form (`imm_atomic_iadd`), other atomic
-opcodes, and non-uint or non-buffer UAV shapes fail closed. The same engine
-contract as typed SRV buffers applies: the buffer binds as storage, elements
-are raw 4-byte u32 words, and no DXGI view-format conversion is reproduced.
+opcodes, and non-uint or non-buffer UAV shapes fail closed. The engine must
+bind it as storage containing raw 4-byte u32 words (`minBindingSize: 4`);
+unlike typed SRV buffers, this is one scalar word per element. No DXGI
+view-format conversion is reproduced.
 *Checked against vkd3d-shader:* `spirv_compiler_emit_atomic_instruction`
 (spirv.c) emits the corresponding SPIR-V atomic through a directly computed
 buffer/image pointer with no explicit bounds branch. Any out-of-bounds behavior
@@ -312,17 +335,31 @@ guard.
 
 D3D minimum precision is a floor, not a format: an implementation that computes
 `min16float` operands at full 32-bit precision is conforming, and the registers
-are 32-bit regardless of the hint. Operands tagged `float_16` therefore lower
-exactly as ordinary f32 lanes — the hint is dropped, which changes nothing
-observable versus a conforming D3D driver running at full precision. The other
-minimum-precision kinds (`float_2_8`, `sint_16`, `uint_16`) stay fail-closed
-until a shader needs them.
+are 32-bit regardless of the hint. Numeric/value operands tagged `float_16`
+therefore lower as ordinary f32 lanes — the hint is dropped, which changes
+nothing observable versus a conforming D3D driver running at full precision.
+Resource, sampler, and UAV handles are not value lanes and require default
+precision. The other operand minimum-precision kinds (`float_2_8`, `sint_16`,
+`uint_16`) stay fail-closed until a shader needs them.
 
 *Confirmed against vkd3d-shader:* its SPIR-V backend (`spirv.c`) never reads the
 decoded `min_precision` field — arithmetic lowers at full 32-bit width, the same
-promotion. Its GLSL backend fails closed, but only on min-precision *I/O
-signature elements* (a separate axis: varying declarations, not operands), which
-this compiler does not promote either.
+promotion. I/O-signature precision is a separate field. This compiler ignores
+it and emits the signature's base 32-bit component type, so valid 10/16-bit
+float or integer minima are conformingly widened; reserved or unknown
+signature-precision values are not yet rejected.
+
+### Resource handles → fixed, unmodified identities
+
+Every supported resource, sampler, or UAV role requires the declared handle
+type, default minimum precision, no source modifier, and a fixed descriptor
+identity within the admitted singleton binding range. Relative identities fail
+closed before binding lookup; a present fixed absolute identity is checked
+against the resolved singleton binding. Legal resource-result swizzles remain
+supported. *Confirmed against vkd3d-shader:* its register and descriptor
+validation likewise restricts modifier types and verifies descriptor indices
+against their declared ranges. This compiler is stricter about relative member
+indices because its binding layout deliberately supports singleton ranges only.
 
 ### Typed `Buffer` SRVs → read-only storage buffers
 
@@ -333,7 +370,9 @@ fetch:
 `select(vec4<T>(), tN[min(i, arrayLength(&tN) - 1u)], i < arrayLength(&tN))`.
 The in-range clamp makes the eagerly evaluated load valid before zero is
 selected, reproducing D3D's defined out-of-bounds result without triggering
-WGSL's invalid-memory-reference behavior. Both stages support the load (this
+WGSL's invalid-memory-reference behavior. The layout advertises
+`minBindingSize: 16`, so every valid binding has at least one element and
+`arrayLength(&tN) - 1u` cannot underflow. Both stages support the load (this
 is also the first vertex-stage `ld`; texture `ld` remains fragment-only).
 
 The deliberate divergence is the engine contract: D3D typed buffers convert
@@ -358,8 +397,8 @@ fail closed.
   builtin; only the low-half destination is supported.
 - **Dynamic constant-buffer register selection** (`cbX[dynamic][…]` selecting
   the *buffer*) — only the vector index may be dynamic.
-- **Non-immediate mip levels in `resinfo`/`ld`**; both are bounded to the
-  resource shapes listed below.
+- **Non-immediate mip levels in `resinfo`**; texture `ld` accepts a dynamic
+  address/mip but remains bounded to the resource shapes listed below.
 - **Unknown texture dimensions** (`texturecubearray`, MSAA kinds, …) in
   sampled layouts.
 - **Immediate texture offsets** (`sample_controls` / `_aoffimmi`) outside the
@@ -373,9 +412,9 @@ fail closed.
   and compute lowering plus its compute-pipeline browser gate are not built.
   These fail closed per stage kind instead of being misreported as malformed
   records.
-- **Sampler modes other than `default`**, non-`linear` fragment input
-  interpolation, minimum-precision kinds other than `float_16` (which
-  promotes; see Adapted), and vertex system semantics
+- **Sampler modes other than `default`**, fragment input interpolation modes
+  other than `linear` and `linear_noperspective`, minimum-precision operand
+  kinds other than `float_16` (which promotes; see Adapted), and vertex system semantics
   outside `SV_Position`/`SV_VertexID`/`SV_InstanceID` (fragment:
   `SV_Position`/`SV_IsFrontFace`, output `SV_Target`).
 
@@ -414,7 +453,7 @@ sample form and in both stages.
   *Confirmed against vkd3d-shader:* its IR preserves the signed immediate
   offset on sample instructions, and its SPIR-V, GLSL, and MSL backends pass
   those constants through as the target sampling operation's constant offset.
-- **`resinfo`** — 2D and 3D textures, scalar immediate mip, components x/y
+- **`resinfo` (fragment stage)** — 2D and 3D textures, scalar immediate mip, components x/y
   (dimensions), z (depth, 3D only), and w (`textureNumLevels`); z rejected
   for 2D. A non-zero mip is queried through an in-range clamped level and its
   dimensions are selected to zero when the requested level is out of range,
@@ -422,11 +461,14 @@ sample form and in both stages.
   `textureDimensions` result. `_rcpFloat` reciprocates only dimensions, never
   the mip count; its specified infinity for zero dimensions shares the
   non-finite WGSL limitation documented for `rcp` above. Unknown return-type
-  encodings fail closed. D3D's zero result for an unbound resource is outside
+  encodings and the invalid saturate modifier fail closed. D3D's zero result
+  for an unbound resource is outside
   this shader mapping: WebGPU requires every declared binding, and the engine
-  rejects a missing caller resource; callers must bind an explicit fallback
-  texture when that behavior is needed. Widen per dimension when a shader
-  needs it.
+  rejects a missing caller resource. A fallback texture cannot reproduce the
+  exact result because WebGPU textures cannot have zero dimensions (and
+  `_rcpFloat` requires infinity for applicable zero dimensions); exact
+  emulation would need explicit bound-state metadata and a selected result.
+  Widen per dimension when a shader needs it.
   *Confirmed against vkd3d-shader:* `spirv_compiler_emit_resinfo` (spirv.c)
   emits image-size and mip-level-count queries, pads missing dimension
   components with zero, and converts the uint vector to float for the ordinary
@@ -443,9 +485,9 @@ sample form and in both stages.
   permitted live in-bounds texel result for an invalid logical texel address.
   The zero vector is exact under the current engine contract that these
   bindings use four-component views (`rgba8unorm` or `rgba8unorm-srgb` today).
-  DXBC's resource declaration does not encode the bound view's channel count;
-  supporting a future one- or two-component view would require view-format
-  metadata to reproduce D3D's missing-component defaults (normally alpha one).
+  A future one- or two-component view would require view-channel metadata so
+  the explicit out-of-bounds replacement can reproduce D3D's missing-component
+  defaults (normally alpha one).
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar
   address, fixed (non-relative) resource operands. Every word fetch is clamped
   to valid storage-buffer memory and selected to zero when the structure index
@@ -461,8 +503,14 @@ sample form and in both stages.
   runtime, which does not itself confirm D3D's exact zero result. The explicit
   WGSL clamps and selects above implement that D3D result independently,
   without relying on an implementation-chosen invalid-access outcome.
-- **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`;
-  `f32tof16` keeps only the low 16 bits (DXBC contract).
+- **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`.
+  `f16tof32` is exact for finite normal inputs, but WGSL may flush binary16
+  subnormals and ignore zero sign. `f32tof16` keeps only the low 16 result bits
+  and is exact for finite non-zero inputs representable as normal binary16.
+  Subnormal and zero-sign behavior shares the preceding caveat. For other
+  finite normal-range values D3D requires round-toward-zero while WGSL does not
+  fix a rounding direction; on finite overflow D3D yields signed max-f16 while
+  WGSL permits an indeterminate result. Those inputs are an adapted boundary.
 - **`udiv` (both stages)** — quotient and remainder lower to WGSL `u32`
   division and remainder only when every divisor lane is an immediate non-zero
   value; both destinations may be written by one instruction (with independent
@@ -500,6 +548,21 @@ sample form and in both stages.
   edge kind; guaranteed-output tracking intersects arms.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
+Unless a mapping states otherwise, ordinary WGSL floating-point operations
+inherit WGSL's permitted rounding, denormal, and zero-sign behavior plus its
+finite-math assumption. D3D's prescribed NaN/infinity tables are therefore not
+portable on those edge inputs.
+
+## Adapted — numeric conversion edges
+
+`ftoi`/`ftou` lower to WGSL `i32(x)`/`u32(x)`. Finite inputs within the target
+integer range match D3D's truncation toward zero. NaN and positive overflow do
+not: D3D specifies zero for NaN and the full integer maximum for overflow,
+whereas WGSL makes the NaN conversion indeterminate and clamps positive
+overflow to the largest target integer exactly representable by f32
+(`2147483520` for i32 and `4294967040` for u32). These inputs are an adapted
+boundary.
+
 ## Adapted — uniformity
 
 ### Derivatives / implicit-LOD samples in non-uniform control flow → `diagnostic(off, derivative_uniformity)`
@@ -518,9 +581,10 @@ rejecting the shader.
 
 Why the directive and not gradient hoisting: the DXBC came from HLSL that relied
 on **D3D11's permissive divergent-derivative behavior** (non-participating quad
-lanes yield undefined derivatives). The directive reproduces exactly that — the
-hardware still computes the implicit derivative in place, so there is no gradient
-recomputation. Converting to `textureSampleGrad` with a gradient computed in
+lanes yield undefined derivatives). The directive keeps the operation at its
+original source-level control-flow point; both APIs leave the divergent result
+nonportable or undefined, and WGSL does not guarantee a particular hardware
+evaluation strategy. Converting to `textureSampleGrad` with a gradient computed in
 uniform control flow (hoisting) would substitute a *different* gradient than the
 one D3D11 used, i.e. be less faithful. The directive is emitted only when the
 analysis actually detects a non-uniform derivative/sample, and it is visible in
@@ -528,10 +592,11 @@ the WGSL (with an explanatory comment) plus flagged on the typed program, so the
 reliance on the opt-out is never silent.
 
 Soundness of the trigger: constant-buffer and immediate operands are not SSA
-values, so the only varying SEEDS are interpolated fragment inputs (`input[N]`,
-incl. `SV_Position`) and per-pixel producers (texture sampling/loading,
-derivatives). A value is varying only if it genuinely derives from one of those
-— **no false positives**, so the directive is added only where truly needed.
+values. Varying seeds are interpolated fragment inputs (`input[N]`, including
+`SV_Position`) and, conservatively, all texture sampling/loading and derivative
+results. This avoids known false negatives but may add the opt-out for a branch
+whose producer happens to be dynamically uniform; that only broadens where the
+diagnostic is disabled.
 
 Loop-exit uniformity **is** modelled: `loopHasNonUniformExit` flags a loop whose
 exit is non-uniform — a `breakc`/`continuec` with a varying condition, or an

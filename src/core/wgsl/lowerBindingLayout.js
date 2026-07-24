@@ -176,7 +176,8 @@ function sampledResourceLayout(binding)
 
 function uavBufferLayout(program, binding)
 {
-    // Fragment-only: WebGPU vertex-stage storage buffers are read-only.
+    // Fragment-only under the current compiler/engine portability contract.
+    // Vertex-stage writable storage is deliberately not admitted.
     if (program.stage !== "pixel")
     {
         throw new Error(`WGSL storage resource ${binding.id} is not supported in the ${program.stage} stage`);

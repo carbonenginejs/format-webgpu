@@ -3,6 +3,7 @@ import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 import { buildSelectionPlans, cloneWritten, terminatesAllPaths } from "./selectionPlans.js";
+import { validateFixedHandleBinding, validateFixedHandleOperand } from "./validateHandleOperand.js";
 
 function containsOutputAssignment(statements)
 {
@@ -275,10 +276,16 @@ function bindingForOperand(bindings, resourceKind, operand)
     {
         const matches = bindings.filter((entry) => entry.resourceKind === resourceKind && entry.rangeId === rangeId);
         if (matches.length > 1) throw new Error(`WGSL vertex ${resourceKind} range ${rangeId} is ambiguous`);
-        return matches[0] || null;
+        const binding = matches[0] || null;
+        return resourceKind === "uniform-buffer"
+            ? binding
+            : validateFixedHandleBinding(operand, binding, "vertex");
     }
-    return bindings.find((entry) =>
+    const binding = bindings.find((entry) =>
         entry.resourceKind === resourceKind && entry.registerIndex === operand.registerIndex) || null;
+    return resourceKind === "uniform-buffer"
+        ? binding
+        : validateFixedHandleBinding(operand, binding, "vertex");
 }
 
 function cbufferVectorIndex(program, instruction, operandIndex, operand, inputs)
@@ -357,11 +364,10 @@ function constTableParts(program, instruction, operandIndex, operand, destinatio
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
-// DXBC source-modifier semantics are exact per consumer type: float consumers
-// use IEEE negate/abs (pure sign-bit operations), integer consumers use
-// two's-complement negation, and bit-preserving movers (unknown expected type)
-// apply the FLOAT semantics to the raw lane bits ("modifiers assume float
-// data"), which is exactly representable as sign-bit arithmetic on the storage.
+// DXBC float source modifiers are selected by the consuming opcode. Integer
+// consumers admit two's-complement negation only. Bit-preserving movers
+// (unknown expected type) apply the FLOAT semantics to raw lane bits
+// ("modifiers assume float data"), represented as sign-bit arithmetic.
 function modifierOnStorage(part, storage, modifier)
 {
     if (storage === "float32")
@@ -386,11 +392,15 @@ function applyModifier(parts, operand, expected, storageTypes, instruction, oper
     {
         throw new Error(`WGSL vertex operand modifier ${modifier} is not supported`);
     }
-    if (expected === "float32" || expected === "int32")
+    if (expected === "float32")
     {
         if (modifier === "neg") return parts.map((part) => `-(${part})`);
         if (modifier === "abs") return parts.map((part) => `abs(${part})`);
         return parts.map((part) => `-(abs(${part}))`);
+    }
+    if (expected === "int32" && modifier === "neg")
+    {
+        return parts.map((part) => `-(${part})`);
     }
     if (expected === "uint32" && modifier === "neg")
     {
@@ -603,13 +613,7 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
     {
         throw new Error(`WGSL vertex structured load ${instruction.index} requires an immediate byte offset`);
     }
-    const resource = instruction.operands[3];
-    if (resource?.typeName !== "resource" || resource.indices?.some((entry) => entry.relative)
-        || (resource.modifierName || "none") !== "none"
-        || (resource.minPrecisionName || "default") !== "default")
-    {
-        throw new Error(`WGSL vertex structured load ${instruction.index} requires one fixed resource`);
-    }
+    const resource = validateFixedHandleOperand(instruction, 3, "resource", "vertex");
     const binding = bindingForOperand(bindings, "sampled-resource", resource);
     if (!binding?.buffer || !Number.isInteger(binding.structureStride))
     {
@@ -722,7 +726,7 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     if (op === "ld_structured") return structuredLoadExpression(program, instruction, write, type, inputs, bindings);
     if (op === "ld")
     {
-        const resource = instruction.operands[2];
+        const resource = validateFixedHandleOperand(instruction, 2, "resource", "vertex");
         const bufferBinding = bindingForOperand(bindings, "sampled-resource", resource);
         if (!bufferBinding) throw new Error(`WGSL vertex instruction ${instruction.index} has an unresolved load resource`);
         if (!bufferBinding.buffer || Number.isInteger(bufferBinding.structureStride))
@@ -742,8 +746,8 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     }
     if (op === "sample_l" || op === "sample_d")
     {
-        const resource = instruction.operands[2];
-        const sampler = instruction.operands[3];
+        const resource = validateFixedHandleOperand(instruction, 2, "resource", "vertex");
+        const sampler = validateFixedHandleOperand(instruction, 3, "sampler", "vertex");
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         const samplerBinding = bindingForOperand(bindings, "sampler", sampler);
         if (!textureBinding || !samplerBinding) throw new Error(`WGSL vertex instruction ${instruction.index} has unresolved sample bindings`);
