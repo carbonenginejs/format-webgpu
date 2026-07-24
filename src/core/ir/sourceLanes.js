@@ -7,21 +7,7 @@ const DOT_LANES = Object.freeze({
 const XY = Object.freeze([ "x", "y" ]);
 const XYZ = Object.freeze([ "x", "y", "z" ]);
 
-function sampleCoordinateLanes(instruction, program)
-{
-    const resource = instruction.operands?.[2];
-    if (!program || !resource) return XY;
-    const reference = resource.resourceReference;
-    const binding = (program.bindings || []).find((entry) => entry.resourceKind === "sampled-resource"
-        && (reference?.rangeId !== null && reference?.rangeId !== undefined
-            ? entry.range?.rangeId === reference.rangeId
-            : entry.registerIndex === resource.registerIndex));
-    return [ "texturecube", "texture3d", "texture2darray" ].includes(binding?.resourceDimension)
-        ? XYZ
-        : XY;
-}
-
-function loadAddressLanes(instruction, program)
+function sampledResourceDimension(instruction, program)
 {
     const resource = instruction.operands?.[2];
     if (!program || !resource) return null;
@@ -30,8 +16,29 @@ function loadAddressLanes(instruction, program)
         && (reference?.rangeId !== null && reference?.rangeId !== undefined
             ? entry.range?.rangeId === reference.rangeId
             : entry.registerIndex === resource.registerIndex));
-    if (binding?.resourceDimension === "buffer") return [ "x" ];
-    if (binding?.resourceDimension === "texture2d") return [ "x", "y", "w" ];
+    return binding?.resourceDimension || null;
+}
+
+function sampleCoordinateLanes(instruction, program)
+{
+    return [ "texturecube", "texture3d", "texture2darray" ]
+        .includes(sampledResourceDimension(instruction, program))
+        ? XYZ
+        : XY;
+}
+
+function sampleGradientLanes(instruction, program)
+{
+    return [ "texturecube", "texture3d" ].includes(sampledResourceDimension(instruction, program))
+        ? XYZ
+        : XY;
+}
+
+function loadAddressLanes(instruction, program)
+{
+    const dimension = sampledResourceDimension(instruction, program);
+    if (dimension === "buffer") return [ "x" ];
+    if (dimension === "texture2d") return [ "x", "y", "w" ];
     return null;
 }
 
@@ -54,7 +61,10 @@ export function fixedSourceLanes(instruction, operandIndex, program = null)
         .includes(instruction.opcodeName))
     {
         if (operandIndex === 1) return sampleCoordinateLanes(instruction, program);
-        if (instruction.opcodeName === "sample_d" && [ 4, 5 ].includes(operandIndex)) return XY;
+        if (instruction.opcodeName === "sample_d" && [ 4, 5 ].includes(operandIndex))
+        {
+            return sampleGradientLanes(instruction, program);
+        }
         if ([ "sample_b", "sample_c", "sample_l" ].includes(instruction.opcodeName) && operandIndex === 4) return [ "x" ];
     }
     return null;

@@ -384,11 +384,22 @@ fail closed.
 ### `sample_d` gradient sampling and integer/rounding opcodes
 
 `sample_d` lowers to `textureSampleGrad(t, s, coord, ddx, ddy)` (2/3-component
-gradients by dimension). Added `imax/imin/umax/umin` (WGSL overloaded
+spatial gradients by dimension). A 2D-array address consumes three source
+lanes (xy coordinate plus array layer) but its gradients consume only xy;
+3D/cube addresses and gradients consume xyz. Added `imax/imin/umax/umin` (WGSL overloaded
 `max`/`min`), `ishl`/`ishr` (`<< u32(...)` / `>> u32(...)` — DXBC shift counts
 cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
 (`round`, ties to even), `round_pi` (`ceil`), and the previously handler-only
 `ult`/`uge` to the applicable stage support sets.
+
+### 2D-array sample layers → round-to-nearest-even
+
+DXBC sampling rounds a floating Texture2DArray layer coordinate to the nearest
+integer with ties to even, then clamps it to the available layer range. The
+layer argument therefore lowers as `i32(round(layer))`; WGSL `round` has the
+same tie rule and WGSL sampling clamps the resulting array index. The spatial
+xy coordinate stays separate from that layer argument in every supported
+sample form and in both stages.
 
 ## Bounded / temporary
 

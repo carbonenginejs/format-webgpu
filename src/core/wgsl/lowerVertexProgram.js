@@ -749,13 +749,14 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
         if (!textureBinding || !samplerBinding) throw new Error(`WGSL vertex instruction ${instruction.index} has unresolved sample bindings`);
         const viewDimension = textureBinding.texture?.viewDimension;
         const coordComponents = viewDimension === "2d" ? 2 : 3;
+        const gradientComponents = [ "2d", "2d-array" ].includes(viewDimension) ? 2 : 3;
         let coord;
         let arrayArg = "";
         if (viewDimension === "2d-array")
         {
             const coord3 = source(1, 3);
             coord = `${coord3}.xy`;
-            arrayArg = `, i32(${coord3}.z)`;
+            arrayArg = `, i32(round(${coord3}.z))`;
         }
         else
         {
@@ -765,7 +766,7 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
         const offsetArg = sampleOffsetArgument(instruction, viewDimension);
         const sampled = op === "sample_l"
             ? `textureSampleLevel(${tex}, ${coord}${arrayArg}, ${source(4, 1)}${offsetArg})`
-            : `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, coordComponents)}, ${source(5, coordComponents)}${offsetArg})`;
+            : `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, gradientComponents)}, ${source(5, gradientComponents)}${offsetArg})`;
         const components = sourceComponents(resource, write.mask, count);
         return count === 4 && components.join("") === "xyzw" ? sampled : `${sampled}.${components.join("")}`;
     }

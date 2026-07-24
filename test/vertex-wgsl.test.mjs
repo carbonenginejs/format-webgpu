@@ -1061,6 +1061,42 @@ test("vertex lowering samples a texture with an explicit level of detail", () =>
     assert.match(shader.code, /textureSampleLevel\(t0, s0, vec2<f32>\([^)]+\), [^)]+\)/u);
     assert.match(shader.code, /@group\(0\) @binding\(\d+\) var t0: texture_2d<f32>;/u);
 
+    const arrayProgram = structuredClone(program);
+    arrayProgram.instructions.find((entry) => entry.opcodeName === "dcl_resource")
+        .declaration.resourceDimensionName = "texture2darray";
+    const arraySample = arrayProgram.instructions.find((entry) => entry.opcodeName === "sample_l");
+    arraySample.operands[1] = register("input", 0, { swizzle: "xyzx" });
+    const arrayShader = CjsFormatWebgpu.buildWgsl(arrayProgram, {
+        source: "synthetic-vertex-array-sample-l"
+    });
+    assert.match(arrayShader.code,
+        /textureSampleLevel\(.*\.xy, i32\(round\(.*\.z\)\), [^)]+\)/u);
+
+    const arrayGradientProgram = structuredClone(arrayProgram);
+    const arrayGradientSample = arrayGradientProgram.instructions.find((entry) => entry.opcodeName === "sample_l");
+    arrayGradientSample.opcodeName = "sample_d";
+    arrayGradientSample.operands[4] = register("input", 0, { swizzle: "xyxx" });
+    arrayGradientSample.operands.push(register("input", 0, { swizzle: "yxyy" }));
+    const arrayGradientShader = CjsFormatWebgpu.buildWgsl(arrayGradientProgram, {
+        source: "synthetic-vertex-array-sample-d"
+    });
+    assert.match(arrayGradientShader.code,
+        /textureSampleGrad\(.*\.xy, i32\(round\(.*\.z\)\), vec2<f32>\([^)]+\), vec2<f32>\([^)]+\)\)/u);
+
+    const volumeGradientProgram = structuredClone(program);
+    volumeGradientProgram.instructions.find((entry) => entry.opcodeName === "dcl_resource")
+        .declaration.resourceDimensionName = "texture3d";
+    const volumeGradientSample = volumeGradientProgram.instructions.find((entry) => entry.opcodeName === "sample_l");
+    volumeGradientSample.opcodeName = "sample_d";
+    volumeGradientSample.operands[1] = register("input", 0, { swizzle: "xyzx" });
+    volumeGradientSample.operands[4] = register("input", 0, { swizzle: "yzxy" });
+    volumeGradientSample.operands.push(register("input", 0, { swizzle: "zxyz" }));
+    const volumeGradientShader = CjsFormatWebgpu.buildWgsl(volumeGradientProgram, {
+        source: "synthetic-vertex-volume-sample-d"
+    });
+    assert.match(volumeGradientShader.code,
+        /textureSampleGrad\(.*vec3<f32>\([^)]+\), vec3<f32>\([^)]+\), vec3<f32>\([^)]+\)\)/u);
+
     const sample = program.instructions.find((entry) => entry.opcodeName === "sample_l");
     sample.extensions = [ {
         token: 1,

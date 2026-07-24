@@ -1113,6 +1113,15 @@ test("fragment lowering samples a cube texture with a three-component coordinate
     const cube = shader.program.bindings.find((entry) => entry.resourceKind === "sampled-resource");
     assert.equal(cube.type, "texture_cube<f32>");
     assert.match(shader.code, /textureSample\([^,]+, [^,]+, vec3<f32>\(/u);
+
+    program.instructions.find((entry) => entry.opcodeName === "sample").extensions = [ {
+        typeName: "sample_controls",
+        sampleOffsets: { u: 1, v: 0, w: 0 }
+    } ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-cube-offset" }),
+        /immediate sample offsets support only 2d textures/u
+    );
 });
 
 test("fragment lowering samples a 2d-array texture with a split coordinate and array index", () =>
@@ -1145,7 +1154,20 @@ test("fragment lowering samples a 2d-array texture with a split coordinate and a
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-2d-array-sample" });
     const array = shader.program.bindings.find((entry) => entry.resourceKind === "sampled-resource");
     assert.equal(array.type, "texture_2d_array<f32>");
-    assert.match(shader.code, /textureSample\(.*\.xy, i32\(.*\.z\)\)/u);
+    assert.match(shader.code, /textureSample\(.*\.xy, i32\(round\(.*\.z\)\)\)/u);
+
+    const gradientProgram = structuredClone(program);
+    const gradientSample = gradientProgram.instructions.find((entry) => entry.opcodeName === "sample");
+    gradientSample.opcodeName = "sample_d";
+    gradientSample.operands.push(
+        register("input", 1, { swizzle: "xyxx" }),
+        register("input", 1, { swizzle: "yxyy" })
+    );
+    const gradientShader = CjsFormatWebgpu.buildWgsl(gradientProgram, {
+        source: "synthetic-2d-array-gradient-sample"
+    });
+    assert.match(gradientShader.code,
+        /textureSampleGrad\(.*\.xy, i32\(round\(.*\.z\)\), vec2<f32>\([^)]+\), vec2<f32>\([^)]+\)\)/u);
 
     program.instructions.find((entry) => entry.opcodeName === "sample").extensions = [ {
         typeName: "sample_controls",
@@ -1155,6 +1177,40 @@ test("fragment lowering samples a 2d-array texture with a split coordinate and a
         () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-2d-array-offset" }),
         /immediate sample offsets support only 2d textures/u
     );
+});
+
+test("fragment sample_d keeps three spatial gradients for 3d textures", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 7) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_sampler", "sampler", { samplerModeName: "default" }),
+            declaration(4, "dcl_resource", "resource", {
+                resourceDimensionName: "texture3d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(9, "sample_d", [
+                register("temp", 0, { mask: "xyzw" }),
+                register("input", 1, { swizzle: "xyzx" }),
+                register("resource", 0, { swizzle: "xyzw" }),
+                register("sampler", 0),
+                register("input", 1, { swizzle: "yzxy" }),
+                register("input", 1, { swizzle: "zxyz" })
+            ]),
+            instruction(16, "mov", [ register("output", 0, { mask: "xyzw" }), register("temp", 0, { swizzle: "xyzw" }) ]),
+            instruction(20, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-3d-gradient-sample" });
+    assert.match(shader.code,
+        /textureSampleGrad\(.*vec3<f32>\([^)]+\), vec3<f32>\([^)]+\), vec3<f32>\([^)]+\)\)/u);
 });
 
 test("fragment lowering emits an if/else selection with a scalar float merge", () =>
