@@ -253,6 +253,13 @@ saturate lowers as `bitcast<T>(clamp(bitcast<f32-vec>(bits), 0.0, 1.0))` —
 the exact float clamp on the raw lanes, keeping the storage type. Saturate on
 genuinely integer arithmetic results still fails closed.
 
+*Confirmed against vkd3d-shader:* `spirv_compiler_emit_sat` (spirv.c) is
+`nclamp(x, 0.0, 1.0)` with float constants for floating-point data and a
+`FIXME("Unhandled data type")` for non-float — saturate is a float clamp and
+integer saturate is unhandled, matching "assumes float". Our bitcast-clamp on
+`bitpattern32` mover lanes is the WGSL-specific handling for the float-data-in-
+integer-storage case vkd3d left as a FIXME.
+
 ### Vertex-stage texture sampling → explicit LOD/gradient only
 
 The vertex binding restriction now admits texture and sampler bindings, and the
