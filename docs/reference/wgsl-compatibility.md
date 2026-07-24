@@ -272,7 +272,7 @@ integer saturate is unhandled, matching "assumes float". Our bitcast-clamp on
 `bitpattern32` mover lanes is the WGSL-specific handling for the float-data-in-
 integer-storage case vkd3d left as a FIXME.
 
-### `rcp` (fragment stage) → ordinary f32 division
+### `rcp` (both stages) → ordinary f32 division
 
 DXBC `rcp` is a reduced-precision component-wise reciprocal; its maximum
 relative error is 2^-21. It lowers to `1.0 / x`. For a finite, normal,
@@ -286,11 +286,14 @@ infinite or NaN indeterminate under its finite-math assumption. Exact behavior
 for those inputs is therefore not portable. Finite normal denominators outside
 the stated magnitude range can produce a subnormal reciprocal that D3D flushes
 to signed zero but WGSL may preserve, so only the stated range has the claimed
-accuracy match. When a constant expression would produce infinity or NaN,
-WGSL makes shader creation fail; immediate zero, subnormal, or NaN operands are
-therefore a known fail-closed validation gap rather than a portable adaptation.
-The same signed-zero and non-finite caveats apply to the supported `div`
-opcode in both stages.
+accuracy match. Immediate operands are a fail-closed portability boundary:
+each consumed lane whose raw f32 exponent is zero (signed zero or subnormal) or
+255 (infinity or NaN) is rejected before modifiers and result saturation.
+Unused immediate lanes are ignored, one-word immediates replicate normally,
+and finite normal lanes remain accepted. Dynamic operands remain supported
+with the signed-zero, subnormal, and non-finite caveats above. The same
+signed-zero and non-finite caveats apply to the supported `div` opcode in both
+stages.
 
 *Confirmed against vkd3d-shader:* `spirv_compiler_emit_rcp` (spirv.c) emits
 `SpvOpFDiv` with a `1.0` numerator, the same ordinary floating division used

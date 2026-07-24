@@ -289,7 +289,7 @@ function rawSelectedComponents(operand, destinationMask, count, activeComponents
     return mask.slice(0, count).map((component) => swizzle[COMPONENTS.indexOf(component)] || swizzle[0]);
 }
 
-function immediateParts(operand, destinationMask, count, expectedType, activeComponents = null)
+function immediateRawBits(operand, destinationMask, count, activeComponents = null)
 {
     const values = operand.immediateValues || [];
     const components = rawSelectedComponents(operand, destinationMask, count, activeComponents);
@@ -298,11 +298,35 @@ function immediateParts(operand, destinationMask, count, expectedType, activeCom
         const sourceIndex = values.length === 1 ? 0 : COMPONENTS.indexOf(component);
         const bits = values[sourceIndex]?.uint32 ?? values[index]?.uint32;
         if (!Number.isInteger(bits)) throw new Error("WGSL fragment immediate has no raw uint32 bits");
+        return bits >>> 0;
+    });
+}
+
+function immediateParts(operand, destinationMask, count, expectedType, activeComponents = null)
+{
+    return immediateRawBits(operand, destinationMask, count, activeComponents).map((bits) =>
+    {
         const hex = `0x${(bits >>> 0).toString(16).padStart(8, "0")}u`;
         if (expectedType === "float32") return `bitcast<f32>(${hex})`;
         if (expectedType === "int32") return `bitcast<i32>(${hex})`;
         return hex;
     });
+}
+
+function validateRcpImmediate(program, instruction, write)
+{
+    const operand = instruction.operands[1];
+    if (operand?.typeName !== "immediate32") return;
+    const activeComponents = fixedSourceLanes(instruction, 1, program);
+    const bits = immediateRawBits(operand, write.mask, write.mask.length, activeComponents);
+    if (bits.some((value) =>
+    {
+        const exponent = (value >>> 23) & 0xff;
+        return exponent === 0 || exponent === 0xff;
+    }))
+    {
+        throw new Error(`WGSL fragment rcp instruction ${instruction.index} requires finite normal immediate source lanes`);
+    }
 }
 
 function bindingForOperand(bindings, resourceKind, operand)
@@ -795,7 +819,11 @@ function expressionFor(program, instruction, write, inputs, bindings)
     if (op === "round_pi") return `ceil(${source(1)})`;
     if (op === "round_z") return `trunc(${source(1)})`;
     if (DERIVATIVES[op]) return `${DERIVATIVES[op]}(${source(1)})`;
-    if (op === "rcp") return `(${floatBound(count, "1.0")} / ${source(1)})`;
+    if (op === "rcp")
+    {
+        validateRcpImmediate(program, instruction, write);
+        return `(${floatBound(count, "1.0")} / ${source(1)})`;
+    }
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
     if (op === "sqrt") return `sqrt(${source(1)})`;
     if (NUMERIC_CONVERSIONS[op])

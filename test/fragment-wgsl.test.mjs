@@ -1067,6 +1067,104 @@ test("fragment sincos excludes a null destination from active source lanes", () 
     assert.doesNotMatch(shader.code, /sin\(/u);
 });
 
+function fragmentRcpProgram(sourceOperand, { mask = "xyzw", saturate = false } = {})
+{
+    const rcp = instruction(4, "rcp", [ register("output", 0, { mask }), sourceOperand ]);
+    rcp.saturate = saturate;
+    const missing = Array.from("xyzw").filter((component) => !mask.includes(component)).join("");
+    return {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 1, 15) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            rcp,
+            ...(missing
+                ? [ instruction(8, "mov", [ register("output", 0, { mask: missing }), immediate([ 0 ]) ]) ]
+                : []),
+            instruction(12, "ret", [])
+        ]
+    };
+}
+
+test("fragment rcp lowers dynamic values with modifiers before result saturation", () =>
+{
+    const source = register("input", 1, { selected: "x", modifierName: "absneg" });
+    const shader = CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(source, { saturate: true }), {
+        source: "synthetic-fragment-rcp-dynamic"
+    });
+    const expression = shader.program.statements.find((entry) => entry.dxbcOffset === 4)?.expression.code;
+    assert.equal(expression,
+        "clamp((vec4<f32>(1.0) / vec4<f32>(-(abs(input.input1.x)), -(abs(input.input1.x)), -(abs(input.input1.x)), -(abs(input.input1.x)))), vec4<f32>(0.0), vec4<f32>(1.0))");
+});
+
+test("fragment rcp validates only consumed immediate lanes", () =>
+{
+    const source = immediate([ 0x00000000, 0x00800000, 0x7f800000, 0x7f7fffff ]);
+    source.swizzle = "yxwx";
+    const shader = CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(source, { mask: "xz" }), {
+        source: "synthetic-fragment-rcp-consumed-lanes"
+    });
+    const expression = shader.program.statements.find((entry) => entry.dxbcOffset === 4)?.expression.code;
+    assert.equal(expression,
+        "(vec2<f32>(1.0) / vec2<f32>(bitcast<f32>(0x00800000u), bitcast<f32>(0x7f7fffffu)))");
+
+    const replicated = CjsFormatWebgpu.buildWgsl(
+        fragmentRcpProgram(immediate([ 0x3f000000 ]), { mask: "xyz" })
+    );
+    const replicatedExpression = replicated.program.statements
+        .find((entry) => entry.dxbcOffset === 4)?.expression.code;
+    assert.equal(replicatedExpression,
+        "(vec3<f32>(1.0) / vec3<f32>(bitcast<f32>(0x3f000000u), bitcast<f32>(0x3f000000u), bitcast<f32>(0x3f000000u)))");
+
+    const invalid = immediate([ 0x00000000, 0x00800000, 0x7f800000, 0x7f7fffff ]);
+    invalid.swizzle = "xywx";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(invalid, { mask: "xz" })),
+        /rcp instruction \d+ requires finite normal immediate source lanes/u
+    );
+});
+
+test("fragment rcp rejects non-portable immediate exponent classes", () =>
+{
+    for (const bits of [
+        0x00000000, 0x80000000, 0x00000001, 0x807fffff,
+        0x7f800000, 0xff800000, 0x7fc00000, 0xff800001
+    ])
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(immediate([ bits ]))),
+            /rcp instruction \d+ requires finite normal immediate source lanes/u
+        );
+    }
+
+    const modified = immediate([ 0x7fc00000 ]);
+    modified.modifierName = "absneg";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(modified, { saturate: true })),
+        /rcp instruction \d+ requires finite normal immediate source lanes/u
+    );
+});
+
+test("fragment rcp accepts positive and negative finite normal boundaries", () =>
+{
+    const shader = CjsFormatWebgpu.buildWgsl(fragmentRcpProgram(
+        immediate([ 0x00800000, 0x7f7fffff, 0x80800000, 0xff7fffff ])
+    ));
+    const expression = shader.program.statements.find((entry) => entry.dxbcOffset === 4)?.expression.code;
+    for (const bits of [ "0x00800000u", "0x7f7fffffu", "0x80800000u", "0xff7fffffu" ])
+    {
+        assert.match(expression, new RegExp(bits, "u"));
+    }
+});
+
 function udivProgram(quotientOperand, divisorOperand)
 {
     return {

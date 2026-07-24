@@ -27,7 +27,7 @@ const SUPPORTED_OPCODES = new Set([
     "f32tof16", "frc", "ftoi", "ftou",
     "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul", "ine",
     "ishl", "ishr", "itof", "ld", "ld_structured", "log", "lt", "mad", "max", "min",
-    "mov", "movc", "mul", "ne", "or", "round_ni", "round_pi", "round_z", "rsq",
+    "mov", "movc", "mul", "ne", "or", "rcp", "round_ni", "round_pi", "round_z", "rsq",
     "sample_d", "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax",
     "umin", "ushr", "utof", "xor", "ret"
 ]);
@@ -253,7 +253,7 @@ function sourceComponents(operand, destinationMask, count, activeComponents = nu
     return positions.map((component) => swizzle[COMPONENTS.indexOf(component)] || swizzle[0]);
 }
 
-function immediateParts(operand, destinationMask, count, expectedType, activeComponents = null)
+function immediateRawBits(operand, destinationMask, count, activeComponents = null)
 {
     const values = operand.immediateValues || [];
     const components = sourceComponents(operand, destinationMask, count, activeComponents);
@@ -262,11 +262,35 @@ function immediateParts(operand, destinationMask, count, expectedType, activeCom
         const sourceIndex = values.length === 1 ? 0 : COMPONENTS.indexOf(component);
         const bits = values[sourceIndex]?.uint32 ?? values[index]?.uint32;
         if (!Number.isInteger(bits)) throw new Error("WGSL vertex immediate has no raw uint32 bits");
+        return bits >>> 0;
+    });
+}
+
+function immediateParts(operand, destinationMask, count, expectedType, activeComponents = null)
+{
+    return immediateRawBits(operand, destinationMask, count, activeComponents).map((bits) =>
+    {
         const hex = `0x${(bits >>> 0).toString(16).padStart(8, "0")}u`;
         if (expectedType === "float32") return `bitcast<f32>(${hex})`;
         if (expectedType === "int32") return `bitcast<i32>(${hex})`;
         return hex;
     });
+}
+
+function validateRcpImmediate(program, instruction, write)
+{
+    const operand = instruction.operands[1];
+    if (operand?.typeName !== "immediate32") return;
+    const activeComponents = fixedSourceLanes(instruction, 1, program);
+    const bits = immediateRawBits(operand, write.mask, write.mask.length, activeComponents);
+    if (bits.some((value) =>
+    {
+        const exponent = (value >>> 23) & 0xff;
+        return exponent === 0 || exponent === 0xff;
+    }))
+    {
+        throw new Error(`WGSL vertex rcp instruction ${instruction.index} requires finite normal immediate source lanes`);
+    }
 }
 
 function bindingForOperand(bindings, resourceKind, operand)
@@ -710,6 +734,11 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     if (op === "movc") return `select(${source(3)}, ${source(2)}, ${source(1)} != ${zeroMask(count)})`;
     if (op === "exp") return `exp2(${source(1)})`;
     if (op === "log") return `log2(${source(1)})`;
+    if (op === "rcp")
+    {
+        validateRcpImmediate(program, instruction, write);
+        return `(${floatBound(count, "1.0")} / ${source(1)})`;
+    }
     if (op === "rsq") return `inverseSqrt(${source(1)})`;
     if (op === "sqrt") return `sqrt(${source(1)})`;
     if ([ "max", "imax", "umax" ].includes(op)) return `max(${source(1)}, ${source(2)})`;
