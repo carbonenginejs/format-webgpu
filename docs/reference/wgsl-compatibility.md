@@ -96,6 +96,36 @@ removed for selections; the genuine "terminates before merge assignments"
 This shape is covered by browser validation across vertex selections and live
 merges.
 
+The fragment stage kept this guard longer than the vertex stage even though its
+surrounding machinery (per-arm written-component cloning, post-branch
+intersection, merge-var appends) is identical; the fragment guard is now
+removed too, browser-validated across fragment selections with live merges.
+
+### Source modifiers (`neg`/`abs`/`absneg`) → exact per-consumer-type lowering
+
+DXBC source-modifier semantics depend on the consuming instruction's type, and
+each case is exactly representable in WGSL:
+
+- float consumers: IEEE negate/abs (`-(x)`, `abs(x)`, `-(abs(x))`);
+- signed-integer consumers: `neg` is two's-complement negation (`-(x)` on
+  `i32`);
+- unsigned-integer consumers: `neg` is two's-complement negation, emitted as
+  the wrapping `(0u - x)` (WGSL has no unary minus on `u32`); `abs` fails
+  closed (undefined on integer sources);
+- bit-preserving movers (`mov`/`movc` with unknown or conflicting lane types):
+  the modifier applies FLOAT semantics to the raw lane bits, and IEEE
+  negate/abs/absneg are pure sign-bit operations, so they lower to
+  `^ 0x80000000u` / `& 0x7fffffffu` / `| 0x80000000u` on the `u32` storage
+  (with `bitcast` in/out for `i32`-stored lanes).
+
+Previously the modifier was applied as a type-blind `-(x)`/`abs(x)`, which was
+invalid WGSL on `u32` lanes (caught by the browser gate) and a silent
+miscompile on integer-stored mover lanes (two's-complement where the contract
+is a sign-bit flip). The corpus-wide rebuild confirmed every previously
+qualified package is byte-identical under the typed lowering: no already
+qualified shader used the changed paths. Both stages; per-lane (mixed-type
+`movc`) reads share the same storage-typed rules.
+
 ### `continue`/`continuec` in loops → WGSL `continuing {}` latch
 
 Loop phi-latch updates are emitted in a WGSL `continuing {}` block (which runs

@@ -994,14 +994,14 @@ test("fragment udiv rejects a dynamic divisor", () =>
 {
     const program = udivProgram(register("null", null), register("temp", 1, { selected: "x" }));
     assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-dynamic" }),
-        /udiv instruction \d+ requires an immediate non-zero divisor/u);
+        /udiv instruction \d+ requires an immediate non-zero divisor; dynamic or zero divisors are not supported/u);
 });
 
 test("fragment udiv rejects an immediate zero divisor", () =>
 {
     const program = udivProgram(register("null", null), immediate([ 0 ]));
     assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-zero" }),
-        /udiv instruction \d+ requires an immediate non-zero divisor/u);
+        /udiv instruction \d+ requires an immediate non-zero divisor; dynamic or zero divisors are not supported/u);
 });
 
 test("fragment lowering samples a cube texture with a three-component coordinate", () =>

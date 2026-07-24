@@ -687,7 +687,7 @@ function expressionFor(program, instruction, write, inputs, bindings)
         if (divisor?.typeName !== "immediate32" || (divisor.modifierName || "none") !== "none"
             || !lanes.length || lanes.some((value) => !Number.isInteger(value) || value === 0))
         {
-            throw new Error(`WGSL fragment udiv instruction ${instruction.index} requires an immediate non-zero divisor`);
+            throw new Error(`WGSL fragment udiv instruction ${instruction.index} requires an immediate non-zero divisor; dynamic or zero divisors are not supported`);
         }
         const operator = write.operandIndex === 0 ? "/" : write.operandIndex === 1 ? "%" : null;
         if (!operator) throw new Error(`WGSL fragment udiv instruction ${instruction.index} has an unexpected destination operand`);
