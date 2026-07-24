@@ -136,8 +136,39 @@ function structuredBufferLayout(binding)
     };
 }
 
+const TYPED_BUFFER_ELEMENTS = Object.freeze({
+    float: "vec4<f32>",
+    uint: "vec4<u32>"
+});
+
+function typedBufferLayout(binding)
+{
+    if (binding.structureStride !== null && binding.structureStride !== undefined)
+    {
+        throw new Error(`WGSL typed buffer resource ${binding.id} has unexpected structured-resource metadata`);
+    }
+    const returns = binding.returnType?.returnTypeNames || [];
+    const element = returns.length === 4 && returns.every((entry) => entry === returns[0])
+        ? TYPED_BUFFER_ELEMENTS[returns[0]]
+        : null;
+    if (!element)
+    {
+        throw new Error(`WGSL typed buffer resource ${binding.id} return type [${returns.join(",")}] is not supported; only uniform float4 and uint4 elements are supported`);
+    }
+    return {
+        declaration: "var<storage, read>",
+        type: `array<${element}>`,
+        buffer: {
+            type: "read-only-storage",
+            hasDynamicOffset: false,
+            minBindingSize: 16
+        }
+    };
+}
+
 function sampledResourceLayout(binding)
 {
+    if (binding.resourceDimension === "buffer") return typedBufferLayout(binding);
     return binding.structureStride === null || binding.structureStride === undefined
         ? textureLayout(binding)
         : structuredBufferLayout(binding);

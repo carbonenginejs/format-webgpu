@@ -807,12 +807,25 @@ function expressionFor(program, instruction, write, inputs, bindings)
         const resource = instruction.operands[2];
         const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
         if (!textureBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has an unresolved load resource`);
-        if (textureBinding.texture?.viewDimension !== "2d")
+        let loaded;
+        if (textureBinding.buffer && !Number.isInteger(textureBinding.structureStride))
         {
-            throw new Error(`WGSL fragment load instruction ${instruction.index} supports only 2d textures`);
+            // Typed Buffer SRV: storage-array element fetch. D3D ld returns
+            // zero out of bounds; select reproduces that exactly (WGSL clamps).
+            const element = textureBinding.type.slice("array<".length, -1);
+            const address = source(1, 1);
+            const symbol = textureBinding.generatedSymbol;
+            loaded = `select(${element}(), ${symbol}[${address}], ${address} < arrayLength(&${symbol}))`;
         }
-        const address = source(1, 3);
-        const loaded = `textureLoad(${textureBinding.generatedSymbol}, ${address}.xy, ${address}.z)`;
+        else if (textureBinding.texture?.viewDimension === "2d")
+        {
+            const address = source(1, 3);
+            loaded = `textureLoad(${textureBinding.generatedSymbol}, ${address}.xy, ${address}.z)`;
+        }
+        else
+        {
+            throw new Error(`WGSL fragment load instruction ${instruction.index} resource shape is not supported; only 2d textures and typed buffers are supported`);
+        }
         const components = rawSelectedComponents(resource, mask, count);
         return count === 4 && components.join("") === "xyzw" ? loaded : `${loaded}.${components.join("")}`;
     }

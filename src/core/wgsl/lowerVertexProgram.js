@@ -25,7 +25,7 @@ const SUPPORTED_OPCODES = new Set([
     "add", "and", "div", "dp2", "dp3", "dp4", "eq", "exp", "f16tof32",
     "f32tof16", "frc", "ftoi", "ftou",
     "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul", "ine",
-    "ishl", "ishr", "itof", "ld_structured", "log", "lt", "mad", "max", "min",
+    "ishl", "ishr", "itof", "ld", "ld_structured", "log", "lt", "mad", "max", "min",
     "mov", "movc", "mul", "ne", "or", "round_ni", "round_pi", "round_z", "rsq",
     "sample_d", "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax",
     "umin", "ushr", "utof", "xor", "ret"
@@ -680,6 +680,24 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
         return `${fn}(${source(2)})`;
     }
     if (op === "ld_structured") return structuredLoadExpression(program, instruction, write, type, inputs, bindings);
+    if (op === "ld")
+    {
+        const resource = instruction.operands[2];
+        const bufferBinding = bindingForOperand(bindings, "sampled-resource", resource);
+        if (!bufferBinding) throw new Error(`WGSL vertex instruction ${instruction.index} has an unresolved load resource`);
+        if (!bufferBinding.buffer || Number.isInteger(bufferBinding.structureStride))
+        {
+            throw new Error(`WGSL vertex load instruction ${instruction.index} resource shape is not supported; only typed buffers are supported`);
+        }
+        // Typed Buffer SRV: storage-array element fetch. D3D ld returns
+        // zero out of bounds; select reproduces that exactly (WGSL clamps).
+        const element = bufferBinding.type.slice("array<".length, -1);
+        const address = source(1, 1);
+        const symbol = bufferBinding.generatedSymbol;
+        const loaded = `select(${element}(), ${symbol}[${address}], ${address} < arrayLength(&${symbol}))`;
+        const components = sourceComponents(resource, write.mask, count);
+        return count === 4 && components.join("") === "xyzw" ? loaded : `${loaded}.${components.join("")}`;
+    }
     if (op === "sample_l" || op === "sample_d")
     {
         const resource = instruction.operands[2];

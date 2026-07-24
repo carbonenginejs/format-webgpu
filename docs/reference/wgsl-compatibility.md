@@ -226,6 +226,25 @@ vertex stage lowers `sample_l` (`textureSampleLevel`) and `sample_d`
 (`textureSampleGrad`). Implicit-LOD `sample`/`sample_b` stay fragment-only —
 WGSL forbids implicit derivatives in a vertex entry point.
 
+### Typed `Buffer` SRVs → read-only storage buffers
+
+WGSL has no texel-buffer type, so a `dcl_resource` with dimension `buffer`
+lowers to `var<storage, read> tN: array<vec4<f32>>` (float4 elements) or
+`array<vec4<u32>>` (uint4 elements), and `ld` on it becomes a guarded element
+fetch: `select(vec4<T>(), tN[i], i < arrayLength(&tN))` — reproducing D3D's
+defined out-of-bounds-returns-zero exactly instead of inheriting WGSL's
+clamped-index behavior. Both stages support the load (this is also the first
+vertex-stage `ld`; texture `ld` remains fragment-only).
+
+The deliberate divergence is the engine contract: D3D typed buffers convert
+through the *bound view's* DXGI format in hardware (an `R8G8B8A8_UNORM` view
+would yield normalized floats). That conversion is not reproduced — the engine
+must bind the underlying buffer as storage containing 16-byte elements already
+matching the declared component type. The element type is recorded in the
+binding's WGSL `type` (a typed buffer is distinguishable from a structured one
+by `structureStride: null`). Element types other than uniform float4/uint4
+fail closed.
+
 ## Not supported (fail closed)
 
 - **Globally non-refactorable shaders** (`dcl_global_flags` without
@@ -239,8 +258,8 @@ WGSL forbids implicit derivatives in a vertex entry point.
   builtin; only the low-half destination is supported.
 - **Dynamic constant-buffer register selection** (`cbX[dynamic][…]` selecting
   the *buffer*) — only the vector index may be dynamic.
-- **Non-immediate mip levels in `resinfo`/`ld`**, and both are bounded to 2D
-  textures (below).
+- **Non-immediate mip levels in `resinfo`/`ld`**; both are bounded to the
+  resource shapes listed below.
 - **Unknown texture dimensions** (`texturecubearray`, MSAA kinds, …) in
   sampled layouts.
 - **Mutable relative `indexable_temp` registers** (any shape outside the
@@ -272,7 +291,8 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
 - **`resinfo`** — 2D and 3D textures, immediate mip, components x/y
   (dimensions), z (depth, 3D only), and w (`textureNumLevels`); z rejected
   for 2D. Widen per dimension when a shader needs it.
-- **`ld`** — 2D textures, address layout xy=texel/z=mip, u32 coordinates.
+- **`ld`** — 2D textures (fragment only; address layout xy=texel/z=mip, u32
+  coordinates) and typed buffers (both stages; scalar u32 element index).
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar
   address, fixed (non-relative) resource operands.
 - **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`;
