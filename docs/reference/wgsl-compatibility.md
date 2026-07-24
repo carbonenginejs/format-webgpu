@@ -512,16 +512,22 @@ sample form and in both stages.
   fix a rounding direction; on finite overflow D3D yields signed max-f16 while
   WGSL permits an indeterminate result. Those inputs are an adapted boundary.
 - **`udiv` (both stages)** — quotient and remainder lower to WGSL `u32`
-  division and remainder only when every divisor lane is an immediate non-zero
-  value; both destinations may be written by one instruction (with independent
-  masks). Dynamic or zero divisors fail closed because DXBC and WGSL define
-  divide-by-zero results differently. *Confirmed against vkd3d-shader:* its
+  division and remainder. Immediate divisors whose lanes are all non-zero keep
+  the direct byte-stable `/` or `%` form. Dynamic or possibly-zero divisors use
+  `select(0xffffffffu, a / max(b, 1u), b != 0u)` (and the corresponding `%`
+  form); clamping the eagerly evaluated operation is necessary because WGSL
+  evaluates both `select` alternatives. Both destinations may be written by
+  one instruction when their masks match; mismatched live masks fail closed.
+  A `null` destination does not contribute active source lanes. That shared
+  multi-destination rule also corrects partial-mask `sincos` source lanes:
+  the full-corpus rebuild intentionally changes only the affected WGSL lines
+  in `beaconfx`, `raymarcher`, and `scannerbackground`; the other 494
+  previously qualified packages remain byte-identical.
+  *Confirmed against vkd3d-shader:* its
   `vsir_program_lower_udiv` comments that "division by zero is well-defined for
   … UDIV, and returns UINT_MAX", and it emits a `MOVC` selecting `0xffffffff`
-  for both quotient and remainder when the divisor is zero — exactly the D3D
-  semantic WGSL does not provide. (A dynamic divisor could be supported later by
-  emitting the same `select(0xffffffffu, a / max(b,1u), b != 0u)` guard;
-  fail-closed is correct until then.)
+  for both quotient and remainder when the divisor is zero — the same semantic
+  reproduced by the eager-safe WGSL guard.
 - **Loop merges** — scalar phis with exactly one entry and one backedge
   incoming; multi-exit loops (several `break` sites feeding distinct post-loop
   merges) are not validated beyond the single-`breakc` shape.

@@ -129,7 +129,7 @@ function analyzeBlock(program, block, values)
         const instruction = program.instructions[instructionIndex];
         const roles = operandRoles(instruction);
         const destinationComponents = Array.from(new Set(roles
-            .filter((entry) => entry.role === "destination")
+            .filter((entry) => entry.role === "destination" && entry.operand.typeName !== "null")
             .flatMap((entry) => operandComponents(entry.operand, true))));
         const activeSourceComponents = destinationComponents.length && !FULL_SOURCE_LANES.has(instruction.opcodeName)
             ? destinationComponents

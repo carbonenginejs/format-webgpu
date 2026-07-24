@@ -660,6 +660,11 @@ function fullMask(count)
     return count === 1 ? "0xffffffffu" : `vec${count}<u32>(0xffffffffu)`;
 }
 
+function oneMask(count)
+{
+    return count === 1 ? "1u" : `vec${count}<u32>(1u)`;
+}
+
 function floatBound(count, value)
 {
     return count === 1 ? value : `vec${count}<f32>(${value})`;
@@ -753,20 +758,18 @@ function expressionFor(program, instruction, write, inputs, bindings)
     }
     if (op === "udiv")
     {
-        // Bounded support: WGSL u32 `/` and `%` match D3D udiv bit-for-bit only
-        // when the divisor cannot be zero (D3D defines divide-by-zero results as
-        // 0xffffffff; WGSL defines them differently), so require a provably
-        // non-zero immediate divisor and fail closed on anything dynamic.
         const divisor = instruction.operands[3];
         const lanes = (divisor?.immediateValues || []).map((value) => value.uint32);
-        if (divisor?.typeName !== "immediate32" || (divisor.modifierName || "none") !== "none"
-            || !lanes.length || lanes.some((value) => !Number.isInteger(value) || value === 0))
-        {
-            throw new Error(`WGSL fragment udiv instruction ${instruction.index} requires an immediate non-zero divisor; dynamic or zero divisors are not supported`);
-        }
         const operator = write.operandIndex === 0 ? "/" : write.operandIndex === 1 ? "%" : null;
         if (!operator) throw new Error(`WGSL fragment udiv instruction ${instruction.index} has an unexpected destination operand`);
-        return `(${source(2)} ${operator} ${source(3)})`;
+        if (divisor?.typeName === "immediate32" && (divisor.modifierName ?? "none") === "none" && lanes.length
+            && lanes.every((value) => Number.isInteger(value) && value !== 0))
+        {
+            return `(${source(2)} ${operator} ${source(3)})`;
+        }
+        const dividendCode = source(2);
+        const divisorCode = source(3);
+        return `select(${fullMask(count)}, (${dividendCode} ${operator} max(${divisorCode}, ${oneMask(count)})), ${divisorCode} != ${zeroMask(count)})`;
     }
     if ([ "max", "imax", "umax" ].includes(op)) return `max(${source(1)}, ${source(2)})`;
     if ([ "min", "imin", "umin" ].includes(op)) return `min(${source(1)}, ${source(2)})`;
@@ -1064,6 +1067,23 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     }
     const writes = instruction.dataflow.writes;
     if (!writes.length) throw new Error(`WGSL fragment instruction ${instruction.index} has no result write`);
+    if (instruction.opcodeName === "sincos" || instruction.opcodeName === "udiv")
+    {
+        const destinationOperands = writes.map((write) => write.operandIndex);
+        if (writes.length > 2 || new Set(destinationOperands).size !== writes.length
+            || destinationOperands.some((operandIndex) => ![ 0, 1 ].includes(operandIndex)))
+        {
+            throw new Error(`WGSL fragment ${instruction.opcodeName} instruction ${instruction.index} has unsupported result writes`);
+        }
+        if (writes.length === 2 && writes[0].mask !== writes[1].mask)
+        {
+            throw new Error(`WGSL fragment ${instruction.opcodeName} instruction ${instruction.index} requires matching destination masks`);
+        }
+    }
+    else if (writes.length !== 1)
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} has unsupported multiple result writes`);
+    }
     const lowerWrite = (write) =>
     {
     if (isDeadUntypedWrite(program, instruction, write, readValueIds)) return [];

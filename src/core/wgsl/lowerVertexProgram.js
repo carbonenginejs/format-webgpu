@@ -587,6 +587,11 @@ function fullMask(count)
     return count === 1 ? "0xffffffffu" : `vec${count}<u32>(0xffffffffu)`;
 }
 
+function oneMask(count)
+{
+    return count === 1 ? "1u" : `vec${count}<u32>(1u)`;
+}
+
 function splatScalar(code, count)
 {
     return count === 1 ? code : `vec${count}<f32>(${code})`;
@@ -679,20 +684,18 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
     }
     if (op === "udiv")
     {
-        // Bounded support: WGSL u32 `/` and `%` match D3D udiv bit-for-bit only
-        // when the divisor cannot be zero (D3D defines divide-by-zero results as
-        // 0xffffffff; WGSL defines them differently), so require a provably
-        // non-zero immediate divisor and fail closed on anything dynamic.
         const divisor = instruction.operands[3];
         const lanes = (divisor?.immediateValues || []).map((value) => value.uint32);
-        if (divisor?.typeName !== "immediate32" || (divisor.modifierName || "none") !== "none"
-            || !lanes.length || lanes.some((value) => !Number.isInteger(value) || value === 0))
-        {
-            throw new Error(`WGSL vertex udiv instruction ${instruction.index} requires an immediate non-zero divisor; dynamic or zero divisors are not supported`);
-        }
         const operator = write.operandIndex === 0 ? "/" : write.operandIndex === 1 ? "%" : null;
         if (!operator) throw new Error(`WGSL vertex udiv instruction ${instruction.index} has an unexpected destination operand`);
-        return `(${source(2)} ${operator} ${source(3)})`;
+        if (divisor?.typeName === "immediate32" && (divisor.modifierName ?? "none") === "none" && lanes.length
+            && lanes.every((value) => Number.isInteger(value) && value !== 0))
+        {
+            return `(${source(2)} ${operator} ${source(3)})`;
+        }
+        const dividendCode = source(2);
+        const divisorCode = source(3);
+        return `select(${fullMask(count)}, (${dividendCode} ${operator} max(${divisorCode}, ${oneMask(count)})), ${divisorCode} != ${zeroMask(count)})`;
     }
     if (op === "and") return `(${source(1)} & ${source(2)})`;
     if (op === "or") return `(${source(1)} | ${source(2)})`;
@@ -859,9 +862,9 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         {
             throw new Error(`WGSL vertex ${instruction.opcodeName} instruction ${instruction.index} has unsupported result writes`);
         }
-        if (instruction.opcodeName === "sincos" && writes.length === 2 && writes[0].mask !== writes[1].mask)
+        if (writes.length === 2 && writes[0].mask !== writes[1].mask)
         {
-            throw new Error(`WGSL vertex sincos instruction ${instruction.index} requires matching destination masks`);
+            throw new Error(`WGSL vertex ${instruction.opcodeName} instruction ${instruction.index} requires matching destination masks`);
         }
     }
     else if (writes.length !== 1)

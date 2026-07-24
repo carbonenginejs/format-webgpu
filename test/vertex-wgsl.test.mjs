@@ -592,6 +592,37 @@ test("packed vertex sincos rejects independently masked destination lanes", () =
     assert.throws(() => CjsFormatWebgpu.buildWgsl(ir), /requires matching destination masks/u);
 });
 
+test("vertex sincos excludes a null destination from active source lanes", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 15) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "sincos", [
+                register("null", null),
+                register("temp", 0, { mask: "xz" }),
+                register("input", 0, { swizzle: "wzyx" })
+            ]),
+            instruction(7, "mov", [
+                register("output", 0, { mask: "xy" }),
+                register("temp", 0, { swizzle: "xzzz" })
+            ]),
+            instruction(11, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0x3f800000, 0x3f800000 ])
+            ]),
+            instruction(16, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-sincos-null-lanes" });
+    assert.match(shader.code, /cos\(vec2<f32>\(input\.input0\.w, input\.input0\.y\)\)/u);
+    assert.doesNotMatch(shader.code, /sin\(/u);
+});
+
 test("BuildWgsl applies an explicit pass-global binding plan", () =>
 {
     const ir = CjsFormatWebgpu.buildShaderIr(arithmeticVertex());
@@ -1018,6 +1049,27 @@ test("vertex lowering emits udiv quotient and remainder for an immediate divisor
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-udiv" });
     assert.match(shader.code, / \/ 0x00000006u\)/u);
     assert.match(shader.code, / % 0x00000006u\)/u);
+
+    const dynamic = structuredClone(program);
+    dynamic.instructions.find((entry) => entry.opcodeName === "udiv")
+        .operands[3] = register("temp", 0, { selected: "x" });
+    assert.match(
+        CjsFormatWebgpu.buildWgsl(dynamic, { source: "synthetic-vertex-udiv-dynamic" }).code,
+        /select\(0xffffffffu, \(value\d+ \/ max\(value\d+, 1u\)\), value\d+ != 0u\)/u
+    );
+    assert.match(
+        CjsFormatWebgpu.buildWgsl(dynamic, { source: "synthetic-vertex-udiv-dynamic" }).code,
+        /select\(0xffffffffu, \(value\d+ % max\(value\d+, 1u\)\), value\d+ != 0u\)/u
+    );
+
+    const mismatched = structuredClone(CjsFormatWebgpu.buildShaderIr(program));
+    const mismatchedUdiv = mismatched.instructions.find((entry) => entry.opcodeName === "udiv");
+    mismatchedUdiv.operands[1].mask = "y";
+    mismatchedUdiv.dataflow.writes.find((entry) => entry.operandIndex === 1).mask = "y";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(mismatched),
+        /udiv instruction \d+ requires matching destination masks/u
+    );
 });
 
 test("vertex switch merges accept a pass-through incoming for clauses that keep the prior value", () =>

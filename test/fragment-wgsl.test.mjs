@@ -1022,6 +1022,39 @@ test("fragment lowering emits both sincos destinations and min", () =>
     assert.match(shader.code, /min\(/u);
 });
 
+test("fragment sincos excludes a null destination from active source lanes", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 15) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(4, "sincos", [
+                register("null", null),
+                register("temp", 0, { mask: "yw" }),
+                register("input", 1, { swizzle: "xyzw" })
+            ]),
+            instruction(8, "mov", [
+                register("output", 0, { mask: "xy" }),
+                register("temp", 0, { swizzle: "ywww" })
+            ]),
+            instruction(12, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0, 0 ])
+            ]),
+            instruction(16, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-sincos-null-lanes" });
+    assert.match(shader.code, /cos\(vec2<f32>\(input\.input1\.y, input\.input1\.w\)\)/u);
+    assert.doesNotMatch(shader.code, /sin\(/u);
+});
+
 function udivProgram(quotientOperand, divisorOperand)
 {
     return {
@@ -1122,18 +1155,80 @@ test("fragment lowering emits udiv remainder alone when the quotient destination
     assert.doesNotMatch(shader.code, / \/ 0x00000003u\)/u);
 });
 
-test("fragment udiv rejects a dynamic divisor", () =>
+test("fragment udiv guards a dynamic divisor without evaluating divide by zero", () =>
 {
     const program = udivProgram(register("null", null), register("temp", 1, { selected: "x" }));
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-dynamic" }),
-        /udiv instruction \d+ requires an immediate non-zero divisor; dynamic or zero divisors are not supported/u);
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-dynamic" });
+    assert.match(shader.code,
+        /select\(0xffffffffu, \(value\d+ % max\(value\d+, 1u\)\), value\d+ != 0u\)/u);
 });
 
-test("fragment udiv rejects an immediate zero divisor", () =>
+test("fragment udiv guards an immediate zero divisor", () =>
 {
     const program = udivProgram(register("null", null), immediate([ 0 ]));
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-zero" }),
-        /udiv instruction \d+ requires an immediate non-zero divisor; dynamic or zero divisors are not supported/u);
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-zero" });
+    assert.match(shader.code,
+        /select\(0xffffffffu, \(value\d+ % max\(0x00000000u, 1u\)\), 0x00000000u != 0u\)/u);
+});
+
+test("fragment udiv excludes null destinations from active source lanes", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 15) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 0, interpolationModeName: "linear" },
+                operands: [ register("input", 0) ]
+            },
+            instruction(4, "ftou", [
+                register("temp", 0, { mask: "yz" }),
+                register("input", 0, { swizzle: "xyzw" })
+            ]),
+            instruction(8, "udiv", [
+                register("null", null),
+                register("temp", 1, { mask: "yz" }),
+                register("temp", 0),
+                immediate([ 2, 0, 4, 5 ])
+            ]),
+            instruction(12, "utof", [
+                register("output", 0, { mask: "yz" }),
+                register("temp", 1, { swizzle: "xyzw" })
+            ]),
+            instruction(16, "mov", [
+                register("output", 0, { mask: "xw" }),
+                immediate([ 0, 0, 0, 0 ])
+            ]),
+            instruction(20, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-null-lanes" });
+    assert.match(shader.code, /vec2<u32>\(vec2<f32>\(input\.input0\.y, input\.input0\.z\)\)/u);
+    assert.match(shader.code, /select\(vec2<u32>\(0xffffffffu\), \(vec2<u32>\(value\d+\.x, value\d+\.y\) % max\(/u);
+    assert.match(shader.code, /vec2<u32>\(0x00000000u, 0x00000004u\), vec2<u32>\(1u\)\)/u);
+    assert.doesNotMatch(shader.code, /input\.input0\.[xw]/u);
+});
+
+test("fragment udiv guards modified divisors and rejects mismatched live destination masks", () =>
+{
+    const modified = udivProgram(register("null", null), immediate([ 2 ]));
+    modified.instructions.find((entry) => entry.opcodeName === "udiv").operands[3].modifierName = "neg";
+    assert.match(
+        CjsFormatWebgpu.buildWgsl(modified).code,
+        /max\(\(0u - 0x00000002u\), 1u\).*\(0u - 0x00000002u\) != 0u/u
+    );
+
+    const mismatched = structuredClone(CjsFormatWebgpu.buildShaderIr(
+        udivProgram(register("temp", 2, { mask: "x" }), immediate([ 2 ]))));
+    const mismatchedUdiv = mismatched.instructions.find((entry) => entry.opcodeName === "udiv");
+    mismatchedUdiv.operands[1].mask = "y";
+    mismatchedUdiv.dataflow.writes.find((entry) => entry.operandIndex === 1).mask = "y";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(mismatched), /udiv instruction \d+ requires matching destination masks/u);
 });
 
 test("fragment lowering samples a cube texture with a three-component coordinate", () =>
