@@ -312,14 +312,55 @@ function icbParts(program, instruction, operandIndex, operand, destinationMask, 
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
-function applyModifier(parts, operand)
+// DXBC source-modifier semantics are exact per consumer type: float consumers
+// use IEEE negate/abs (pure sign-bit operations), integer consumers use
+// two's-complement negation, and bit-preserving movers (unknown expected type)
+// apply the FLOAT semantics to the raw lane bits ("modifiers assume float
+// data"), which is exactly representable as sign-bit arithmetic on the storage.
+function modifierOnStorage(part, storage, modifier)
+{
+    if (storage === "float32")
+    {
+        if (modifier === "neg") return `-(${part})`;
+        if (modifier === "abs") return `abs(${part})`;
+        return `-(abs(${part}))`;
+    }
+    const bit = modifier === "neg" ? "^ 0x80000000u" : modifier === "abs" ? "& 0x7fffffffu" : "| 0x80000000u";
+    const raw = storage === "int32" ? `bitcast<u32>(${part})` : part;
+    const masked = `(${raw} ${bit})`;
+    return storage === "int32" ? `bitcast<i32>(${masked})` : masked;
+}
+
+const MODIFIER_STORAGE_TYPES = new Set([ "float32", "int32", "uint32", "bitpattern32" ]);
+
+function applyModifier(parts, operand, expected, storageTypes, instruction, operandIndex)
 {
     const modifier = operand.modifierName || "none";
     if (modifier === "none") return parts;
-    if (modifier === "neg") return parts.map((part) => `-(${part})`);
-    if (modifier === "abs") return parts.map((part) => `abs(${part})`);
-    if (modifier === "absneg") return parts.map((part) => `-(abs(${part}))`);
-    throw new Error(`WGSL vertex operand modifier ${modifier} is not supported`);
+    if (![ "neg", "abs", "absneg" ].includes(modifier))
+    {
+        throw new Error(`WGSL vertex operand modifier ${modifier} is not supported`);
+    }
+    if (expected === "float32" || expected === "int32")
+    {
+        if (modifier === "neg") return parts.map((part) => `-(${part})`);
+        if (modifier === "abs") return parts.map((part) => `abs(${part})`);
+        return parts.map((part) => `-(abs(${part}))`);
+    }
+    if (expected === "uint32" && modifier === "neg")
+    {
+        return parts.map((part) => `(0u - ${part})`);
+    }
+    if (expected === "bitpattern32")
+    {
+        return parts.map((part) => modifierOnStorage(part, "bitpattern32", modifier));
+    }
+    if (expected === "unknown" && storageTypes?.length === parts.length
+        && storageTypes.every((storage) => MODIFIER_STORAGE_TYPES.has(storage)))
+    {
+        return parts.map((part, index) => modifierOnStorage(part, storageTypes[index], modifier));
+    }
+    throw new Error(`WGSL vertex instruction ${instruction?.index} operand ${operandIndex} uses an unsupported ${modifier} modifier for ${expected}`);
 }
 
 function expectedType(instruction, operandIndex)
@@ -414,6 +455,7 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     const read = sourceRead(instruction, operandIndex);
     const activeComponents = fixedSourceLanes(instruction, operandIndex, program);
     let parts;
+    let modifierStorageTypes = null;
     if (read)
     {
         if (read.refs.length < count && !(read.refs.length === 1 && operand.selected))
@@ -423,6 +465,10 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
         const refs = read.refs.length === 1 && operand.selected
             ? Array.from({ length: count }, () => read.refs[0])
             : read.refs.slice(0, count);
+        if ((operand.modifierName || "none") !== "none" && type === "unknown")
+        {
+            modifierStorageTypes = refs.map((ref) => valueStorageType(program, ref));
+        }
         const replicatedSelected = read.refs.length === 1 && Boolean(operand.selected);
         parts = refs.map((ref, componentIndex) =>
         {
@@ -454,7 +500,7 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     {
         throw new Error(`WGSL vertex instruction ${instruction.index} cannot lower ${operand.typeName} operand ${operandIndex}`);
     }
-    return vectorCode(applyModifier(parts, operand), type);
+    return vectorCode(applyModifier(parts, operand, type, modifierStorageTypes, instruction, operandIndex), type);
 }
 
 function floatBound(count, value)

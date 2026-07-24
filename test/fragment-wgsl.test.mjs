@@ -936,6 +936,74 @@ test("fragment lowering emits both sincos destinations and min", () =>
     assert.match(shader.code, /min\(/u);
 });
 
+function udivProgram(quotientOperand, divisorOperand)
+{
+    return {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [ signature("TEXCOORD", 1, 1) ], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 1, interpolationModeName: "linear" },
+                operands: [ register("input", 1) ]
+            },
+            instruction(4, "ftou", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 1, { selected: "x" })
+            ]),
+            instruction(8, "udiv", [
+                quotientOperand,
+                register("temp", 3, { mask: "x" }),
+                register("temp", 1, { selected: "x" }),
+                divisorOperand
+            ]),
+            instruction(12, "umax", [
+                register("temp", 4, { mask: "x" }),
+                register("temp", 3, { selected: "x" }),
+                quotientOperand.typeName === "temp"
+                    ? register("temp", 2, { selected: "x" })
+                    : register("temp", 3, { selected: "x" })
+            ]),
+            instruction(16, "utof", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 4, { swizzle: "xxxx" })
+            ]),
+            instruction(20, "ret", [])
+        ]
+    };
+}
+
+test("fragment lowering emits udiv quotient and remainder for an immediate divisor", () =>
+{
+    const program = udivProgram(register("temp", 2, { mask: "x" }), immediate([ 7 ]));
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv" });
+    assert.match(shader.code, / \/ 0x00000007u\)/u);
+    assert.match(shader.code, / % 0x00000007u\)/u);
+});
+
+test("fragment lowering emits udiv remainder alone when the quotient destination is null", () =>
+{
+    const program = udivProgram(register("null", null), immediate([ 3 ]));
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-null" });
+    assert.match(shader.code, / % 0x00000003u\)/u);
+    assert.doesNotMatch(shader.code, / \/ 0x00000003u\)/u);
+});
+
+test("fragment udiv rejects a dynamic divisor", () =>
+{
+    const program = udivProgram(register("null", null), register("temp", 1, { selected: "x" }));
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-dynamic" }),
+        /udiv instruction \d+ requires an immediate non-zero divisor/u);
+});
+
+test("fragment udiv rejects an immediate zero divisor", () =>
+{
+    const program = udivProgram(register("null", null), immediate([ 0 ]));
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-fragment-udiv-zero" }),
+        /udiv instruction \d+ requires an immediate non-zero divisor/u);
+});
+
 test("fragment lowering samples a cube texture with a three-component coordinate", () =>
 {
     const program = {

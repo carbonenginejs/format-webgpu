@@ -11,11 +11,11 @@ const SUPPORTED_OPCODES = new Set([
     "deriv_rty_coarse", "deriv_rtx_fine", "deriv_rty_fine", "discard", "div",
     "dp2", "dp3", "dp4", "eq", "exp", "f16tof32", "f32tof16", "frc", "ftoi",
     "ftou", "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul",
-    "ine", "ishl", "ishr", "if", "itof", "ld", "ld_structured", "log", "lt",
+    "ine", "ineg", "ishl", "ishr", "if", "itof", "ld", "ld_structured", "log", "lt",
     "mad", "max", "min", "mov", "movc", "mul", "ne", "or", "resinfo",
-    "round_ni", "round_pi", "round_z", "rsq", "sample", "sample_b", "sample_d",
-    "sample_l", "sincos", "sqrt", "uge", "ult", "umax", "umin", "ushr", "utof",
-    "xor", "endif", "ret"
+    "round_ne", "round_ni", "round_pi", "round_z", "rsq", "sample", "sample_b", "sample_d",
+    "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax", "umin", "ushr",
+    "utof", "xor", "endif", "ret"
 ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
     itof: [ "int32", "float32" ],
@@ -344,22 +344,77 @@ function icbParts(program, instruction, operandIndex, operand, destinationMask, 
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
-function applyModifier(parts, operand)
+// DXBC source-modifier semantics are exact per consumer type: float consumers
+// use IEEE negate/abs (pure sign-bit operations), integer consumers use
+// two's-complement negation, and bit-preserving movers (unknown expected type)
+// apply the FLOAT semantics to the raw lane bits ("modifiers assume float
+// data"), which is exactly representable as sign-bit arithmetic on the storage.
+function modifierOnStorage(part, storage, modifier)
+{
+    if (storage === "float32")
+    {
+        if (modifier === "neg") return `-(${part})`;
+        if (modifier === "abs") return `abs(${part})`;
+        return `-(abs(${part}))`;
+    }
+    const bit = modifier === "neg" ? "^ 0x80000000u" : modifier === "abs" ? "& 0x7fffffffu" : "| 0x80000000u";
+    const raw = storage === "int32" ? `bitcast<u32>(${part})` : part;
+    const masked = `(${raw} ${bit})`;
+    return storage === "int32" ? `bitcast<i32>(${masked})` : masked;
+}
+
+const MODIFIER_STORAGE_TYPES = new Set([ "float32", "int32", "uint32", "bitpattern32" ]);
+
+function applyModifier(parts, operand, expected, storageTypes, instruction, operandIndex)
 {
     const modifier = operand.modifierName || "none";
     if (modifier === "none") return parts;
-    if (modifier === "neg") return parts.map((part) => `-(${part})`);
-    if (modifier === "abs") return parts.map((part) => `abs(${part})`);
-    if (modifier === "absneg") return parts.map((part) => `-(abs(${part}))`);
-    throw new Error(`WGSL fragment operand modifier ${modifier} is not supported`);
+    if (![ "neg", "abs", "absneg" ].includes(modifier))
+    {
+        throw new Error(`WGSL fragment operand modifier ${modifier} is not supported`);
+    }
+    if (expected === "float32" || expected === "int32")
+    {
+        if (modifier === "neg") return parts.map((part) => `-(${part})`);
+        if (modifier === "abs") return parts.map((part) => `abs(${part})`);
+        return parts.map((part) => `-(abs(${part}))`);
+    }
+    if (expected === "uint32" && modifier === "neg")
+    {
+        return parts.map((part) => `(0u - ${part})`);
+    }
+    if (expected === "bitpattern32")
+    {
+        return parts.map((part) => modifierOnStorage(part, "bitpattern32", modifier));
+    }
+    if (expected === "unknown" && storageTypes?.length === parts.length
+        && storageTypes.every((storage) => MODIFIER_STORAGE_TYPES.has(storage)))
+    {
+        return parts.map((part, index) => modifierOnStorage(part, storageTypes[index], modifier));
+    }
+    throw new Error(`WGSL fragment instruction ${instruction?.index} operand ${operandIndex} uses an unsupported ${modifier} modifier for ${expected}`);
 }
 
+
+function applyLaneModifier(code, operand, targetType, instruction, operandIndex)
+{
+    const modifier = operand.modifierName || "none";
+    if (modifier === "none") return code;
+    if (![ "neg", "abs", "absneg" ].includes(modifier) || !MODIFIER_STORAGE_TYPES.has(targetType))
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} lane operand ${operandIndex} uses an unsupported ${modifier} modifier for ${targetType}`);
+    }
+    // The per-lane path is reached only from bit-preserving movc lanes, where
+    // DXBC applies the float modifier semantics to the raw lane bits; the lane
+    // code is already reinterpreted to targetType.
+    return modifierOnStorage(code, targetType, modifier);
+}
 
 function operandLaneExpression(program, instruction, operandIndex, destinationMask, laneIndex, targetType, inputs, bindings)
 {
     const operand = instruction.operands[operandIndex];
     if (!operand) throw new Error(`WGSL fragment instruction ${instruction.index} has no operand ${operandIndex}`);
-    if ((operand.minPrecisionName || "default") !== "default" || (operand.modifierName || "none") !== "none")
+    if ((operand.minPrecisionName || "default") !== "default")
     {
         throw new Error(`WGSL fragment instruction ${instruction.index} lane operand ${operandIndex} uses an unsupported modifier`);
     }
@@ -373,17 +428,19 @@ function operandLaneExpression(program, instruction, operandIndex, destinationMa
         }
         const ref = replicated ? read.refs[0] : read.refs[laneIndex];
         const storage = valueStorageType(program, ref);
-        return reinterpretCode(valueReference(program, ref, inputs), storage, targetType, 1,
-            `instruction ${instruction.index} lane read`);
+        return applyLaneModifier(reinterpretCode(valueReference(program, ref, inputs), storage, targetType, 1,
+            `instruction ${instruction.index} lane read`), operand, targetType, instruction, operandIndex);
     }
     const component = destinationMask[laneIndex];
     if (operand.typeName === "immediate32")
     {
-        return immediateParts(operand, component, 1, targetType)[0];
+        return applyLaneModifier(immediateParts(operand, component, 1, targetType)[0],
+            operand, targetType, instruction, operandIndex);
     }
     if (operand.typeName === "constant_buffer")
     {
-        return cbufferParts(program, instruction, operandIndex, operand, component, 1, bindings, targetType, inputs)[0];
+        return applyLaneModifier(cbufferParts(program, instruction, operandIndex, operand, component, 1, bindings, targetType, inputs)[0],
+            operand, targetType, instruction, operandIndex);
     }
     throw new Error(`WGSL fragment instruction ${instruction.index} cannot lower ${operand.typeName} lane operand ${operandIndex}`);
 }
@@ -431,7 +488,10 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     {
         throw new Error(`WGSL fragment instruction ${instruction.index} cannot lower ${operand.typeName} operand ${operandIndex}`);
     }
-    return vectorCode(applyModifier(parts, operand), expectedType);
+    const storageTypes = (operand.modifierName || "none") !== "none" && expectedType === "unknown" && read
+        ? read.refs.slice(0, count).map((ref) => valueStorageType(program, ref))
+        : null;
+    return vectorCode(applyModifier(parts, operand, expectedType, storageTypes, instruction, operandIndex), expectedType);
 }
 
 function expectedType(instruction, operandIndex)
@@ -616,6 +676,23 @@ function expressionFor(program, instruction, write, inputs, bindings)
         }
         return `(${source(2)} * ${source(3)})`;
     }
+    if (op === "udiv")
+    {
+        // Bounded support: WGSL u32 `/` and `%` match D3D udiv bit-for-bit only
+        // when the divisor cannot be zero (D3D defines divide-by-zero results as
+        // 0xffffffff; WGSL defines them differently), so require a provably
+        // non-zero immediate divisor and fail closed on anything dynamic.
+        const divisor = instruction.operands[3];
+        const lanes = (divisor?.immediateValues || []).map((value) => value.uint32);
+        if (divisor?.typeName !== "immediate32" || (divisor.modifierName || "none") !== "none"
+            || !lanes.length || lanes.some((value) => !Number.isInteger(value) || value === 0))
+        {
+            throw new Error(`WGSL fragment udiv instruction ${instruction.index} requires an immediate non-zero divisor`);
+        }
+        const operator = write.operandIndex === 0 ? "/" : write.operandIndex === 1 ? "%" : null;
+        if (!operator) throw new Error(`WGSL fragment udiv instruction ${instruction.index} has an unexpected destination operand`);
+        return `(${source(2)} ${operator} ${source(3)})`;
+    }
     if ([ "max", "imax", "umax" ].includes(op)) return `max(${source(1)}, ${source(2)})`;
     if ([ "min", "imin", "umin" ].includes(op)) return `min(${source(1)}, ${source(2)})`;
     if (op === "ishl") return `(${source(1)} << u32(${source(2)}))`;
@@ -631,9 +708,11 @@ function expressionFor(program, instruction, write, inputs, bindings)
     }
     if (op === "mov") return source(1);
     if (op === "movc") return `select(${source(3)}, ${source(2)}, ${source(1)} != ${zeroMask(count)})`;
+    if (op === "ineg") return `(-${source(1)})`;
     if (op === "exp") return `exp2(${source(1)})`;
     if (op === "frc") return `fract(${source(1)})`;
     if (op === "log") return `log2(${source(1)})`;
+    if (op === "round_ne") return `round(${source(1)})`;
     if (op === "round_ni") return `floor(${source(1)})`;
     if (op === "round_pi") return `ceil(${source(1)})`;
     if (op === "round_z") return `trunc(${source(1)})`;
@@ -766,7 +845,8 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
         // Screen-space derivative / implicit-LOD sample under non-uniform control
         // flow. Rather than reject, record that the module needs the WGSL
         // derivative-uniformity opt-out (emitted at module top); this reproduces
-        // D3D11's permissive behavior. See uniformity.js and COMPATIBILITY-LEDGER.
+        // D3D11's permissive behavior. See uniformity.js and
+        // docs/reference/wgsl-compatibility.md.
         context.requiresDerivativeUniformityOptOut = true;
     }
     validatePreciseInstruction(instruction, "fragment");
@@ -1322,10 +1402,6 @@ export function lowerFragmentProgram(program, options = {})
             const trueBodyEnd = plan.hasElse ? plan.region.elseInstruction : plan.region.endInstruction;
             const trueWritten = cloneWritten(rangeWritten);
             const trueStatements = lowerRange(index + 1, trueBodyEnd, trueWritten, inLoop, branchNonUniform, loopExit);
-            if (plan.merges.length && containsOutputAssignment(trueStatements))
-            {
-                throw new Error(`WGSL fragment selection at ${index} writes output before a live merge`);
-            }
             if (trueStatements.at(-1)?.kind === "return" && plan.merges.length)
             {
                 throw new Error(`WGSL fragment selection at ${index} terminates before merge assignments`);
@@ -1346,10 +1422,6 @@ export function lowerFragmentProgram(program, options = {})
             {
                 falseWritten = cloneWritten(rangeWritten);
                 falseStatements = lowerRange(plan.region.elseInstruction + 1, plan.region.endInstruction, falseWritten, inLoop, branchNonUniform, loopExit);
-                if (plan.merges.length && containsOutputAssignment(falseStatements))
-                {
-                    throw new Error(`WGSL fragment selection at ${index} writes output before a live merge`);
-                }
                 if (falseStatements.at(-1)?.kind === "return" && plan.merges.length)
                 {
                     throw new Error(`WGSL fragment selection at ${index} terminates before merge assignments`);
