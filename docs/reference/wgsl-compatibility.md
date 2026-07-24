@@ -379,9 +379,22 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
 
 ## Bounded / temporary
 
-- **`resinfo`** — 2D and 3D textures, immediate mip, components x/y
+- **`resinfo`** — 2D and 3D textures, scalar immediate mip, components x/y
   (dimensions), z (depth, 3D only), and w (`textureNumLevels`); z rejected
-  for 2D. Widen per dimension when a shader needs it.
+  for 2D. A non-zero mip is queried through an in-range clamped level and its
+  dimensions are selected to zero when the requested level is out of range,
+  reproducing D3D instead of exposing WGSL's indeterminate out-of-range
+  `textureDimensions` result. `_rcpFloat` reciprocates only dimensions, never
+  the mip count; its specified infinity for zero dimensions shares the
+  non-finite WGSL limitation documented for `rcp` above. Unknown return-type
+  encodings fail closed. Widen per dimension when a shader needs it.
+  *Confirmed against vkd3d-shader:* `spirv_compiler_emit_resinfo` (spirv.c)
+  emits image-size and mip-level-count queries, pads missing dimension
+  components with zero, and converts the uint vector to float for the ordinary
+  float form. It explicitly rejects `VKD3DSI_RESINFO_RCP_FLOAT`; that form here
+  follows the D3D contract independently. vkd3d also issues the size query
+  directly, so our explicit clamped-query/zero-select is the WGSL-specific
+  guard needed to preserve D3D's defined out-of-range result.
 - **`ld`** — 2D textures (fragment only; address layout xy=texel/z=mip, u32
   coordinates) and typed buffers (both stages; scalar u32 element index).
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar

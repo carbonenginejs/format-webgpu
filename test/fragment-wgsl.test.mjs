@@ -1208,6 +1208,63 @@ test("fragment lowering emits resinfo and texel loads for 2d textures", () =>
     assert.match(shader.code, /textureLoad\(t0, .*\.xy, .*\.z\)/u);
 });
 
+test("fragment resinfo guards out-of-range mips and keeps rcpfloat mip counts unchanged", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture3d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            { ...instruction(4, "resinfo", [
+                register("output", 0, { mask: "xyzw" }),
+                immediate([ 7 ]),
+                register("resource", 0, { swizzle: "xyzw" })
+            ]), resinfoReturnTypeName: "rcpfloat" },
+            instruction(8, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-rcpfloat" });
+    assert.match(shader.code,
+        /textureDimensions\(t0, min\(7u, textureNumLevels\(t0\) - 1u\)\)\.x/u);
+    assert.match(shader.code,
+        /select\(0u, textureDimensions\(t0, .*?\)\.z, 7u < textureNumLevels\(t0\)\)/u);
+    assert.match(shader.code, /1\.0 \/ f32\(select\(0u, textureDimensions/u);
+    assert.match(shader.code, /f32\(textureNumLevels\(t0\)\)/u);
+    assert.doesNotMatch(shader.code, /1\.0 \/ f32\(textureNumLevels\(t0\)\)/u);
+});
+
+test("fragment resinfo rejects malformed mip operands and return types", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            { ...instruction(4, "resinfo", [
+                register("output", 0, { mask: "xyzw" }),
+                immediate([ 0, 1 ]),
+                register("resource", 0, { swizzle: "xyww" })
+            ]), resinfoReturnTypeName: "float" },
+            instruction(8, "ret", [])
+        ]
+    };
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-vector-mip" }),
+        /requires an immediate mip level/u);
+
+    program.instructions[2].operands[1] = immediate([ 0 ]);
+    program.instructions[2].resinfoReturnTypeName = "return_type_3";
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-return-type" }),
+        /unsupported return type return_type_3/u);
+});
+
 test("fragment lowering emits a counted loop with carried phis and a conditional break", () =>
 {
     const program = {

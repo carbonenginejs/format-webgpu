@@ -792,22 +792,43 @@ function expressionFor(program, instruction, write, inputs, bindings)
         }
         const mipOperand = instruction.operands[1];
         const mipBits = mipOperand?.immediateValues?.[0]?.uint32;
-        if (mipOperand?.typeName !== "immediate32" || !Number.isInteger(mipBits))
+        if (mipOperand?.typeName !== "immediate32" || mipOperand.immediateValues?.length !== 1
+            || (mipOperand.modifierName || "none") !== "none"
+            || (mipOperand.minPrecisionName || "default") !== "default"
+            || !Number.isInteger(mipBits))
         {
             throw new Error(`WGSL fragment resinfo instruction ${instruction.index} requires an immediate mip level`);
         }
         const modifier = instruction.resinfoReturnTypeName || "float";
-        const dims = `textureDimensions(${textureBinding.generatedSymbol}, ${mipBits})`;
+        if (![ "float", "rcpfloat", "uint" ].includes(modifier))
+        {
+            throw new Error(`WGSL fragment resinfo instruction ${instruction.index} has unsupported return type ${modifier}`);
+        }
+        const symbol = textureBinding.generatedSymbol;
+        const mipCount = `textureNumLevels(${symbol})`;
+        // Every WebGPU sampled texture has at least one mip. Query a valid level
+        // and select zero for a non-zero immediate beyond the bound view so D3D's
+        // defined out-of-range resinfo dimensions do not inherit WGSL's
+        // indeterminate textureDimensions result. Mip zero is always valid.
+        const level = mipBits === 0 ? "0" : `min(${mipBits}u, ${mipCount} - 1u)`;
+        const levelInRange = mipBits === 0 ? null : `${mipBits}u < ${mipCount}`;
+        const dims = `textureDimensions(${symbol}, ${level})`;
         const parts = rawSelectedComponents(resource, mask, count).map((component) =>
         {
             let value;
+            let dimension = true;
             if (component === "x") value = `${dims}.x`;
             else if (component === "y") value = `${dims}.y`;
             else if (component === "z" && viewDimension === "3d") value = `${dims}.z`;
-            else if (component === "w") value = `textureNumLevels(${textureBinding.generatedSymbol})`;
+            else if (component === "w")
+            {
+                value = mipCount;
+                dimension = false;
+            }
             else throw new Error(`WGSL fragment resinfo instruction ${instruction.index} cannot report component ${component} for a ${viewDimension} texture`);
+            if (dimension && levelInRange) value = `select(0u, ${value}, ${levelInRange})`;
             if (modifier === "uint") return value;
-            return modifier === "rcpfloat" ? `(1.0 / f32(${value}))` : `f32(${value})`;
+            return modifier === "rcpfloat" && dimension ? `(1.0 / f32(${value}))` : `f32(${value})`;
         });
         return vectorCode(parts, modifier === "uint" ? "uint32" : "float32");
     }
