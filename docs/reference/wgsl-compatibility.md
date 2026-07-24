@@ -571,8 +571,14 @@ sample form and in both stages.
   component, so two lanes written by one vector comparison are not conflated.
   Conditions are preserved through acyclic selection paths but cleared across
   loop backedges/exits, where they may change between iterations. Switch
-  selector correlations and guarded direct instruction reads are not modeled;
-  those cases fail closed rather than using a contradictory-path proof.
+  selector correlations are not modeled. Direct instruction uses fail closed
+  except for one lane-exact rule: an undefined carrier consumed by raw bitwise
+  `and` is safe when the sibling lane is the exact SSA condition proven zero on
+  that path (`0 & unknown` is deterministically zero). The proof is repeated
+  independently for every use and lane, requires the canonical unmodified
+  default-precision `and` shape, and is cleared across loop boundaries; other
+  operations, sibling identities, components, modifiers, index reads, and
+  additional uses remain unsupported.
 - **`gather4`** — front-end lanes reserved, WGSL emission not yet built.
 
 Unless a mapping states otherwise, ordinary WGSL floating-point operations

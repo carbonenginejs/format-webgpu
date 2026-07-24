@@ -211,6 +211,42 @@ function undefinedTraversalKey(valueId, constraints)
     ]);
 }
 
+function undefinedPathMaskedByAnd(use, constraints)
+{
+    const { instruction, read, laneIndex } = use;
+    if (read.kind !== "register-read" || instruction.opcodeName !== "and" || instruction.saturate
+        || instruction.operands.length !== 3 || ![ 1, 2 ].includes(read.operandIndex))
+    {
+        return false;
+    }
+    const writes = instruction.dataflow.writes;
+    if (writes.length !== 1 || writes[0].operandIndex !== 0 || writes[0].mask.length !== read.refs.length) return false;
+    const regularReads = instruction.dataflow.reads.filter((entry) =>
+        entry.kind === "register-read" && [ 1, 2 ].includes(entry.operandIndex));
+    if (regularReads.length !== 2
+        || regularReads.filter((entry) => entry.operandIndex === 1).length !== 1
+        || regularReads.filter((entry) => entry.operandIndex === 2).length !== 1)
+    {
+        return false;
+    }
+    const operand = instruction.operands[read.operandIndex];
+    const siblingOperandIndex = read.operandIndex === 1 ? 2 : 1;
+    const siblingOperand = instruction.operands[siblingOperandIndex];
+    if (!operand || !siblingOperand
+        || (operand.modifierName || "none") !== "none"
+        || (siblingOperand.modifierName || "none") !== "none"
+        || (operand.minPrecisionName || "default") !== "default"
+        || (siblingOperand.minPrecisionName || "default") !== "default")
+    {
+        return false;
+    }
+    const siblingRead = regularReads.find((entry) => entry.operandIndex === siblingOperandIndex);
+    if (!siblingRead || siblingRead.refs.length !== writes[0].mask.length) return false;
+    const siblingRef = siblingRead.refs[laneIndex];
+    return Boolean(siblingRef)
+        && constraints.get(`${siblingRef.valueId}.${siblingRef.component}`) === false;
+}
+
 function validateUndefinedMergePaths(program, live, values, plans, stage)
 {
     const mergePlans = new Map();
@@ -219,10 +255,13 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
         for (const merge of plan.merges) mergePlans.set(merge.id, { plan, merge });
         for (const merge of plan.exitMerges || []) mergePlans.set(merge.id, { plan, merge });
     }
-    function hasUndefinedPath(valueId, constraints, visiting)
+    function hasUndefinedPath(valueId, constraints, visiting, use)
     {
         const value = values.get(valueId);
-        if (value?.origin === "undefined-register") return true;
+        if (value?.origin === "undefined-register")
+        {
+            return !undefinedPathMaskedByAnd(use, constraints);
+        }
         if (value?.origin !== "control-flow-merge" || !live.has(valueId)) return false;
         const traversalKey = undefinedTraversalKey(valueId, constraints);
         if (visiting.has(traversalKey)) return false;
@@ -234,7 +273,7 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
         if (plan.kind === "switch")
         {
             result = merge.perClause.some((incoming) =>
-                hasUndefinedPath(incoming.valueId, constraints, visiting));
+                hasUndefinedPath(incoming.valueId, constraints, visiting, use));
         }
         else if (plan.kind === "loop" && merge.entryIncoming)
         {
@@ -242,8 +281,8 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
             // loop plan. A carried backedge may legitimately refer to this phi;
             // the per-traversal visiting set breaks that cycle without hiding
             // undefined ancestry on another carried value.
-            result = hasUndefinedPath(merge.entryIncoming.valueId, constraints, visiting)
-                || hasUndefinedPath(merge.backedgeIncoming.valueId, new Map(), visiting);
+            result = hasUndefinedPath(merge.entryIncoming.valueId, constraints, visiting, use)
+                || hasUndefinedPath(merge.backedgeIncoming.valueId, new Map(), visiting, use);
         }
         else if (plan.kind === "loop")
         {
@@ -253,7 +292,7 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
                 .some((assignments) => assignments
                     .filter((assignment) => assignment.id === merge.id)
                     .some((assignment) => hasUndefinedPath(
-                        assignment.ref.valueId, new Map(), visiting)));
+                        assignment.ref.valueId, new Map(), visiting, use)));
         }
         else
         {
@@ -264,24 +303,31 @@ function validateUndefinedMergePaths(program, live, values, plans, stage)
             const trueConstraints = withCondition(
                 constraints, plan.conditionId, trueRequiresNonzero);
             result = Boolean(falseConstraints)
-                && hasUndefinedPath(merge.falseIncoming.valueId, falseConstraints, visiting);
+                && hasUndefinedPath(merge.falseIncoming.valueId, falseConstraints, visiting, use);
             if (!result && trueConstraints)
             {
                 result = trueInputs.some((incoming) =>
-                    hasUndefinedPath(incoming.valueId, trueConstraints, visiting));
+                    hasUndefinedPath(incoming.valueId, trueConstraints, visiting, use));
             }
         }
         visiting.delete(traversalKey);
         return result;
     }
 
-    for (const id of live)
+    for (const instruction of program.instructions)
     {
-        const directlyRead = program.instructions.some((instruction) => instruction.dataflow.reads
-            .some((read) => read.refs.some((ref) => ref.valueId === id)));
-        if (directlyRead && hasUndefinedPath(id, new Map(), new Set()))
+        for (const read of instruction.dataflow.reads)
         {
-            throw new Error(`WGSL ${stage} merge ${id} has an unsupported observable undefined path`);
+            for (let laneIndex = 0; laneIndex < read.refs.length; laneIndex += 1)
+            {
+                const id = read.refs[laneIndex].valueId;
+                if (!live.has(id)) continue;
+                const use = { instruction, read, laneIndex };
+                if (hasUndefinedPath(id, new Map(), new Set(), use))
+                {
+                    throw new Error(`WGSL ${stage} merge ${id} has an unsupported observable undefined path`);
+                }
+            }
         }
     }
 }

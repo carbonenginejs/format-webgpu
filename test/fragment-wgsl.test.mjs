@@ -450,6 +450,110 @@ function undefinedMergeChainFixture(secondTestBoolean = "zero", secondConditionC
     };
 }
 
+function undefinedAndMaskFixture({
+    carrierOperand = 2,
+    carrierSwizzle = "wxyz",
+    conditionSwizzle = "xxxx",
+    opcodeName = "and",
+    testBoolean = "nonzero",
+    maskSource = "condition",
+    extraUse = false,
+    sourceModifier = null,
+    sourceMinPrecision = null,
+    saturate = false
+} = {})
+{
+    const instructions = [
+        globalFlagsDeclaration(),
+        {
+            offset: 2,
+            opcode: 0,
+            opcodeName: "dcl_input_ps",
+            isDeclaration: true,
+            declaration: { registerIndex: 0, interpolationModeName: "linear" },
+            operands: [ register("input", 0) ]
+        },
+        instruction(5, "mov", [
+            register("temp", 0, { mask: "xyz" }),
+            register("input", 0, { swizzle: "xyzw" })
+        ]),
+        instruction(9, "lt", [
+            register("temp", 1, { mask: "xy" }),
+            register("input", 0, { swizzle: "xyxx" }),
+            register("input", 0, { swizzle: "yxxx" })
+        ]),
+        { ...instruction(13, "if", [ register("temp", 1, { selected: "x" }) ]), testBoolean },
+        instruction(16, "mov", [
+            register("temp", 0, { mask: "w" }),
+            register("input", 0, { selected: "w" })
+        ]),
+        instruction(20, "endif", [])
+    ];
+    let condition = register("temp", 1, { swizzle: conditionSwizzle });
+    if (maskSource === "derived")
+    {
+        instructions.push(instruction(21, "mov", [
+            register("temp", 3, { mask: "x" }),
+            register("temp", 1, { selected: "x" })
+        ]));
+        condition = register("temp", 3, { swizzle: "xxxx" });
+    }
+    else if (maskSource === "different")
+    {
+        instructions.push(instruction(21, "lt", [
+            register("temp", 3, { mask: "x" }),
+            register("input", 0, { selected: "z" }),
+            register("input", 0, { selected: "w" })
+        ]));
+        condition = register("temp", 3, { swizzle: "xxxx" });
+    }
+    else if (maskSource === "overwritten")
+    {
+        instructions.push(instruction(21, "mov", [
+            register("temp", 1, { mask: "x" }),
+            register("input", 0, { selected: "z" })
+        ]));
+    }
+    const carrier = register("temp", 0, { swizzle: carrierSwizzle });
+    const sources = carrierOperand === 1 ? [ carrier, condition ] : [ condition, carrier ];
+    if (sourceModifier)
+    {
+        sources[0].modifierName = sourceModifier;
+    }
+    if (sourceMinPrecision)
+    {
+        sources[0].minPrecisionName = sourceMinPrecision;
+    }
+    instructions.push({ ...instruction(25, opcodeName, [
+        register("temp", 2, { mask: "xyzw" }),
+        ...sources
+    ]), saturate });
+    if (extraUse)
+    {
+        instructions.push(
+            instruction(30, "mov", [ register("output", 0, { mask: "x" }), register("temp", 2, { selected: "x" }) ]),
+            instruction(34, "mov", [ register("output", 0, { mask: "y" }), register("temp", 0, { selected: "w" }) ]),
+            instruction(38, "mov", [ register("output", 0, { mask: "zw" }), register("temp", 2, { swizzle: "xyzw" }) ])
+        );
+    }
+    else
+    {
+        instructions.push(instruction(30, "mov", [
+            register("output", 0, { mask: "xyzw" }),
+            register("temp", 2, { swizzle: "xyzw" })
+        ]));
+    }
+    instructions.push(instruction(42, "ret", []));
+    return {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 1 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 15) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions
+    };
+}
+
 test("BuildWgsl emits the bounded fragment interface, bindings, and positional sample lanes", () =>
 {
     const shader = CjsFormatWebgpu.buildWgsl(fragmentFixture(), { source: "synthetic-copyblit-ps" });
@@ -964,6 +1068,136 @@ test("SM5.1 undefined-path correlation distinguishes components of one condition
 {
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(undefinedMergeChainFixture("zero", "y")),
+        /observable undefined path/i
+    );
+});
+
+test("SM5.1 undefined carriers are safe only under a lane-matched zero AND mask", () =>
+{
+    const cases = [
+        { carrierOperand: 2, carrierSwizzle: "wxyz", undefinedLane: 0 },
+        { carrierOperand: 1, carrierSwizzle: "xyzw", undefinedLane: 3 }
+    ];
+    for (const options of cases)
+    {
+        const decoded = undefinedAndMaskFixture(options);
+        const ir = CjsFormatWebgpu.buildShaderIr(decoded);
+        const andInstruction = ir.instructions.find((entry) => entry.opcodeName === "and");
+        const ifInstruction = ir.instructions.find((entry) => entry.opcodeName === "if");
+        const carrierRead = andInstruction.dataflow.reads.find((entry) => entry.operandIndex === options.carrierOperand);
+        const conditionRead = andInstruction.dataflow.reads.find((entry) => entry.operandIndex !== options.carrierOperand);
+        const ifRef = ifInstruction.dataflow.reads[0].refs[0];
+        const mergeRef = carrierRead.refs[options.undefinedLane];
+        const merge = ir.values.find((entry) => entry.id === mergeRef.valueId);
+
+        assert.deepEqual(carrierRead.refs.map((ref) => ref.component), Array.from(options.carrierSwizzle));
+        assert.deepEqual(conditionRead.refs.map((ref) => ref.component), [ "x", "x", "x", "x" ]);
+        assert.equal(merge.origin, "control-flow-merge");
+        assert.equal(merge.register, "temp[0]");
+        assert.equal(merge.writeMask, "w");
+        assert.equal(conditionRead.refs[options.undefinedLane].valueId, ifRef.valueId);
+        assert.equal(conditionRead.refs[options.undefinedLane].component, ifRef.component);
+        assert.match(CjsFormatWebgpu.buildWgsl(ir).code, / & /u);
+    }
+});
+
+test("SM5.1 undefined AND masking rejects wrong operations and correlations", () =>
+{
+    const unsafe = [
+        { opcodeName: "or" },
+        { opcodeName: "xor" },
+        { opcodeName: "mul" },
+        { conditionSwizzle: "yyyy" },
+        { maskSource: "different" },
+        { maskSource: "derived" },
+        { maskSource: "overwritten" }
+    ];
+    for (const options of unsafe)
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(undefinedAndMaskFixture(options)),
+            /observable undefined path/i
+        );
+    }
+});
+
+test("SM5.1 undefined AND masking remains per-use and fail-closed on malformed sources", () =>
+{
+    const unsafe = [
+        { testBoolean: "zero" },
+        { extraUse: true },
+        { sourceModifier: "neg" },
+        { sourceMinPrecision: "float_16" },
+        { carrierOperand: 1, sourceModifier: "neg" },
+        { carrierOperand: 1, sourceMinPrecision: "float_16" },
+        { saturate: true }
+    ];
+    for (const options of unsafe)
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(undefinedAndMaskFixture(options)),
+            /observable undefined path/i
+        );
+    }
+
+    const malformed = structuredClone(CjsFormatWebgpu.buildShaderIr(undefinedAndMaskFixture()));
+    const andInstruction = malformed.instructions.find((entry) => entry.opcodeName === "and");
+    andInstruction.dataflow.reads.push(structuredClone(
+        andInstruction.dataflow.reads.find((entry) => entry.operandIndex === 1)
+    ));
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(malformed),
+        /observable undefined path/i
+    );
+
+    const indexUse = structuredClone(CjsFormatWebgpu.buildShaderIr(undefinedAndMaskFixture()));
+    const indexAnd = indexUse.instructions.find((entry) => entry.opcodeName === "and");
+    indexAnd.dataflow.reads.find((entry) => entry.operandIndex === 2).kind = "index-read";
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(indexUse),
+        /observable undefined path/i
+    );
+
+    const cbOperand = register("constant_buffer", 3, { swizzle: "xyzw" });
+    cbOperand.indices = [
+        { values: [ 3 ], relative: null },
+        { values: [ 0 ], relative: register("temp", 0, { selected: "x" }) }
+    ];
+    const undefinedIndex = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("TEXCOORD", 0, 3) ],
+            output: [ signature("SV_Target", 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            {
+                offset: 2, opcode: 0, opcodeName: "dcl_constant_buffer", isDeclaration: true,
+                declaration: { registerIndex: 3, accessPattern: "dynamic_indexed", sizeInVec4: 4 },
+                operands: [ register("constant_buffer", 3) ]
+            },
+            {
+                offset: 6, opcode: 0, opcodeName: "dcl_input_ps", isDeclaration: true,
+                declaration: { registerIndex: 0, interpolationModeName: "linear" },
+                operands: [ register("input", 0) ]
+            },
+            instruction(9, "lt", [
+                register("temp", 1, { mask: "x" }),
+                register("input", 0, { selected: "x" }),
+                register("input", 0, { selected: "y" })
+            ]),
+            { ...instruction(13, "if", [ register("temp", 1, { selected: "x" }) ]), testBoolean: "nonzero" },
+            instruction(16, "ftou", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "x" })
+            ]),
+            instruction(20, "endif", []),
+            instruction(21, "mov", [ register("output", 0, { mask: "xyzw" }), cbOperand ]),
+            instruction(25, "ret", [])
+        ]
+    };
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(undefinedIndex),
         /observable undefined path/i
     );
 });
