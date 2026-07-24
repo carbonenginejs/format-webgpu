@@ -153,6 +153,13 @@ qualified package is byte-identical under the typed lowering: no already
 qualified shader used the changed paths. Both stages; per-lane (mixed-type
 `movc`) reads share the same storage-typed rules.
 
+*Confirmed against vkd3d-shader:* `vsir_program_lower_modifiers` (ir.c) lowers
+`NEG` as `data_type_is_integer(src) ? INEG : NEG` — integer vs float negate
+dispatched on the operand's data type, the same per-consumer typing — with
+`ABS` as float abs and `ABSNEG` as abs-then-neg. (vkd3d resolves the type before
+lowering, so it has no separate bit-mover case; our sign-bit-on-raw-bits path is
+the WGSL-specific equivalent for lanes whose type is still `bitpattern32`.)
+
 ### `continue`/`continuec` in loops → WGSL `continuing {}` latch
 
 Loop phi-latch updates are emitted in a WGSL `continuing {}` block (which runs
