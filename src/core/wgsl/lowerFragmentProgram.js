@@ -344,6 +344,26 @@ function icbParts(program, instruction, operandIndex, operand, destinationMask, 
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
+function constTableParts(program, instruction, operandIndex, operand, destinationMask, count, expectedType, inputs, activeComponents = null)
+{
+    const registerIndex = operand.indices?.[0]?.values?.[0];
+    const table = (program.constTables || []).find((entry) => entry.registerIndex === registerIndex);
+    if (!table)
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} indexable temp x${registerIndex} is not a supported constant table`);
+    }
+    const vectorIndex = cbufferVectorIndex(program, instruction, operandIndex, operand, inputs);
+    const parts = rawSelectedComponents(operand, destinationMask, count, activeComponents)
+        .map((component) => `${table.symbol}[${vectorIndex}].${component}`);
+    if (expectedType === "float32") return parts;
+    if (![ "int32", "uint32", "bitpattern32" ].includes(expectedType))
+    {
+        throw new Error(`WGSL fragment cannot reinterpret constant-table lanes as ${expectedType}`);
+    }
+    const target = scalarTypeName(expectedType);
+    return parts.map((part) => `bitcast<${target}>(${part})`);
+}
+
 // DXBC source-modifier semantics are exact per consumer type: float consumers
 // use IEEE negate/abs (pure sign-bit operations), integer consumers use
 // two's-complement negation, and bit-preserving movers (unknown expected type)
@@ -479,6 +499,10 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     else if (operand.typeName === "constant_buffer")
     {
         parts = cbufferParts(program, instruction, operandIndex, operand, destinationMask, count, bindings, expectedType, inputs, activeComponents);
+    }
+    else if (operand.typeName === "indexable_temp")
+    {
+        parts = constTableParts(program, instruction, operandIndex, operand, destinationMask, count, expectedType, inputs, activeComponents);
     }
     else if (operand.typeName === "immediate_constant_buffer")
     {
@@ -1482,6 +1506,7 @@ export function lowerFragmentProgram(program, options = {})
         interface: { inputs, outputs },
         bindings,
         immediateConstantBuffer: program.immediateConstantBuffer || null,
+        constTables: program.constTables || null,
         requiresDerivativeUniformityOptOut: context.requiresDerivativeUniformityOptOut,
         statements
     });

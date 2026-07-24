@@ -57,7 +57,12 @@ function registerKey(operand)
     if (!REGISTER_FILES.has(operand.typeName)) return null;
     if (operand.typeName === "indexable_temp" && (operand.indices || []).some((index) => index.relative))
     {
-        throw new Error("Shader IR does not yet support relative indexable-temp SSA");
+        // Relative indexable-temp accesses only reach this pass as validated
+        // constant-table reads (extractConstTables fails closed on any other
+        // shape). The table contents are compile-time constants resolved at
+        // emit time — like cbuffer/immediate operands they carry no register
+        // dataflow; the slot index still contributes through its index-read.
+        return null;
     }
     const indices = (operand.indices || []).map((index) =>
     {

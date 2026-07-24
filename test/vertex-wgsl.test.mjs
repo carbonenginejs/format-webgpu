@@ -859,6 +859,128 @@ test("vertex lowering emits a switch with grouped selectors and an N-way merge",
     assert.equal(assignments.length, 2);
 });
 
+function indexableTempDeclaration(offset, registerIndex, registerCount)
+{
+    return {
+        offset,
+        opcode: 0,
+        opcodeName: "dcl_indexable_temp",
+        isDeclaration: true,
+        declaration: { registerIndex, registerCount, componentCount: 4 },
+        operands: []
+    };
+}
+
+function indexableTempOperand(registerIndex, slot, { mask = "", swizzle = "", selected = "", relative = null } = {})
+{
+    return {
+        ...register("indexable_temp", null, { mask, swizzle, selected }),
+        registerIndex,
+        indices: [
+            { values: [ registerIndex ], relative: null },
+            { values: [ slot ], relative }
+        ]
+    };
+}
+
+function constTableVertex({ mutable = false } = {})
+{
+    return {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 15) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            indexableTempDeclaration(2, 0, 2),
+            instruction(4, "mov", [
+                indexableTempOperand(0, 0, { mask: "xy" }),
+                immediate([ 0x3f800000, 0xbf800000, 0, 0 ])
+            ]),
+            instruction(8, "mov", [
+                indexableTempOperand(0, 1, { mask: "xy" }),
+                mutable
+                    ? register("input", 0, { swizzle: "xyxx" })
+                    : immediate([ 0xbf800000, 0x3f800000, 0, 0 ])
+            ]),
+            instruction(12, "ftou", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "z" })
+            ]),
+            instruction(16, "mov", [
+                register("temp", 1, { mask: "xy" }),
+                indexableTempOperand(0, 0, { swizzle: "xyxx", relative: register("temp", 0, { selected: "x" }) })
+            ]),
+            instruction(20, "mov", [
+                register("output", 0, { mask: "xy" }),
+                register("temp", 1, { swizzle: "xyxx" })
+            ]),
+            instruction(24, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0, 0x3f800000 ])
+            ]),
+            instruction(28, "ret", [])
+        ]
+    };
+}
+
+test("vertex lowering emits a relative indexable temp as a module constant table", () =>
+{
+    const shader = CjsFormatWebgpu.buildWgsl(constTableVertex(), { source: "synthetic-vertex-const-table" });
+    assert.match(shader.code, /const xt0 = array<vec4<f32>, 2>\(vec4<f32>\(1\.0, -1\.0, 0\.0, 0\.0\), vec4<f32>\(-1\.0, 1\.0, 0\.0, 0\.0\)\);/u);
+    assert.match(shader.code, /xt0\[i32\(value\d+\)\]\.x/u);
+    assert.doesNotMatch(shader.code, /xt0\[[^\]]*\]\s*=/u);
+});
+
+test("vertex fails closed on mutable relative indexable temps", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(constTableVertex({ mutable: true }), { source: "synthetic-vertex-mutable-table" }),
+        /indexable temp x0 relative addressing is not supported: initializers require immediate32 sources/u
+    );
+});
+
+test("vertex lowering emits udiv quotient and remainder for an immediate divisor", () =>
+{
+    const program = {
+        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+        signatures: {
+            input: [ signature("POSITION", 0, 0, 15) ],
+            output: [ signature("SV_Position", 0, 0, 15) ]
+        },
+        instructions: [
+            globalFlagsDeclaration(),
+            instruction(2, "ftou", [
+                register("temp", 0, { mask: "x" }),
+                register("input", 0, { selected: "x" })
+            ]),
+            instruction(6, "udiv", [
+                register("temp", 1, { mask: "x" }),
+                register("temp", 2, { mask: "x" }),
+                register("temp", 0, { selected: "x" }),
+                immediate([ 6 ])
+            ]),
+            instruction(10, "utof", [
+                register("output", 0, { mask: "x" }),
+                register("temp", 1, { selected: "x" })
+            ]),
+            instruction(14, "utof", [
+                register("output", 0, { mask: "y" }),
+                register("temp", 2, { selected: "x" })
+            ]),
+            instruction(18, "mov", [
+                register("output", 0, { mask: "zw" }),
+                immediate([ 0, 0, 0, 0x3f800000 ])
+            ]),
+            instruction(22, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-udiv" });
+    assert.match(shader.code, / \/ 0x00000006u\)/u);
+    assert.match(shader.code, / % 0x00000006u\)/u);
+});
+
 test("vertex switch merges accept a pass-through incoming for clauses that keep the prior value", () =>
 {
     const selector = (value) => ({

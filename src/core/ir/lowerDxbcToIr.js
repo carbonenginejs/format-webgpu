@@ -122,6 +122,180 @@ function controlKind(opcodeName)
     return null;
 }
 
+const COMPONENT_ORDER = [ "x", "y", "z", "w" ];
+const FLOAT_VIEW = new DataView(new ArrayBuffer(4));
+
+function immediateRecord(value)
+{
+    const bits = (value?.uint32 ?? 0) >>> 0;
+    FLOAT_VIEW.setUint32(0, bits);
+    return { uint32: bits, float32: FLOAT_VIEW.getFloat32(0) };
+}
+
+/**
+ * Recognizes indexable temps that are immutable constant tables: every write
+ * is a straight-line pre-control-flow `mov x#[slot].mask, l(...)` immediate,
+ * and at least one access uses relative addressing. Such registers lower to a
+ * module-scope WGSL `const` array (the same shape as the DXBC icb), so their
+ * dynamic reads never need mutable-register SSA. Any relative indexable-temp
+ * usage that does not fit this shape fails closed here with a diagnostic.
+ *
+ * @param {object[]} declarationInstructions Decoded declaration instructions.
+ * @param {object[]} executable Decoded executable instructions.
+ * @returns {{tables: object[]|null, removed: Set<number>|null}} Tables and initializer indices.
+ */
+function extractConstTables(declarationInstructions, executable)
+{
+    const declared = new Map();
+    for (const declaration of declarationInstructions)
+    {
+        if (declaration.opcodeName !== "dcl_indexable_temp") continue;
+        const data = declaration.declaration || {};
+        declared.set(data.registerIndex, {
+            slotCount: data.registerCount,
+            componentCount: data.componentCount
+        });
+    }
+
+    const touched = new Map();
+    const entryFor = (registerIndex) =>
+    {
+        let entry = touched.get(registerIndex);
+        if (!entry)
+        {
+            entry = { writes: [], hasRelative: false, invalid: null };
+            touched.set(registerIndex, entry);
+        }
+        return entry;
+    };
+    const invalidate = (entry, reason) =>
+    {
+        if (!entry.invalid) entry.invalid = reason;
+    };
+    let firstControl = executable.findIndex((instruction) => controlKind(instruction.opcodeName) !== null);
+    if (firstControl < 0) firstControl = executable.length;
+
+    executable.forEach((instruction, instructionIndex) =>
+    {
+        (instruction.operands || []).forEach((operand, operandIndex) =>
+        {
+            if (operand.typeName !== "indexable_temp") return;
+            const indices = operand.indices || [];
+            const registerIndex = indices[0]?.values?.[0];
+            const entry = entryFor(registerIndex);
+            if (indices.length !== 2 || indices[0]?.relative)
+            {
+                return invalidate(entry, "requires [register][slot] addressing with a fixed register");
+            }
+            if (indices[1]?.relative) entry.hasRelative = true;
+
+            if (operandIndex !== 0)
+            {
+                const lanes = operand.selected
+                    ? [ operand.selected ]
+                    : operand.swizzle
+                        ? Array.from(new Set(operand.swizzle))
+                        : COMPONENT_ORDER.slice();
+                entry.reads = entry.reads || [];
+                entry.reads.push({ lanes });
+                return;
+            }
+
+            // Destination use: only straight-line immediate table initializers
+            // are representable; anything else is a mutable indexable temp.
+            const source = instruction.operands?.[1];
+            const slot = indices[1]?.values?.[0];
+            if (instruction.opcodeName !== "mov" || instruction.saturate)
+            {
+                return invalidate(entry, "is only writable by non-saturating mov initializers");
+            }
+            if (instructionIndex >= firstControl)
+            {
+                return invalidate(entry, "initializers must precede all control flow");
+            }
+            if (indices[1]?.relative || !Number.isInteger(slot))
+            {
+                return invalidate(entry, "initializers require an immediate slot index");
+            }
+            if (source?.typeName !== "immediate32" || (source.modifierName || "none") !== "none"
+                || ![ 1, 4 ].includes(source.immediateValues?.length ?? 0))
+            {
+                return invalidate(entry, "initializers require immediate32 sources");
+            }
+            if (!operand.mask)
+            {
+                return invalidate(entry, "initializers require an explicit write mask");
+            }
+            entry.writes.push({ instructionIndex, slot, mask: operand.mask, values: source.immediateValues });
+        });
+    });
+
+    const tables = [];
+    const removed = new Set();
+
+    for (const [ registerIndex, entry ] of touched)
+    {
+        if (!entry.hasRelative) continue;
+        const declaration = declared.get(registerIndex);
+        const describe = (reason) => new Error(
+            `Shader IR indexable temp x${registerIndex} relative addressing is not supported: ${reason}`);
+        if (entry.invalid) throw describe(entry.invalid);
+        if (!declaration || !Number.isInteger(declaration.slotCount) || declaration.slotCount < 1)
+        {
+            throw describe("it has no usable declaration");
+        }
+
+        const laneMask = entry.writes[0]?.mask;
+        const rows = Array.from({ length: declaration.slotCount }, () =>
+            COMPONENT_ORDER.map(() => null));
+        for (const write of entry.writes)
+        {
+            if (write.mask !== laneMask) throw describe("initializers must share one write mask");
+            if (write.slot < 0 || write.slot >= declaration.slotCount)
+            {
+                throw describe("an initializer writes outside the declared range");
+            }
+            for (const lane of write.mask)
+            {
+                const laneIndex = COMPONENT_ORDER.indexOf(lane);
+                if (rows[write.slot][laneIndex] !== null) throw describe("a slot lane is written twice");
+                rows[write.slot][laneIndex] = immediateRecord(write.values.length === 1
+                    ? write.values[0]
+                    : write.values[laneIndex]);
+            }
+            removed.add(write.instructionIndex);
+        }
+        for (const [ slot, row ] of rows.entries())
+        {
+            for (const lane of laneMask || "")
+            {
+                if (row[COMPONENT_ORDER.indexOf(lane)] === null)
+                {
+                    throw describe(`slot ${slot} is never fully written`);
+                }
+            }
+        }
+        for (const read of entry.reads || [])
+        {
+            if (read.lanes.some((lane) => !(laneMask || "").includes(lane)))
+            {
+                throw describe("a read selects lanes the table never writes");
+            }
+        }
+
+        tables.push(Object.freeze({
+            kind: "const-table",
+            registerIndex,
+            symbol: `xt${registerIndex}`,
+            slotCount: declaration.slotCount,
+            laneMask: laneMask || "",
+            rows: rows.map((row) => row.map((value) => value ?? { uint32: 0, float32: 0 }))
+        }));
+    }
+
+    return tables.length ? { tables, removed } : { tables: null, removed: null };
+}
+
 function buildInstruction(instruction, index)
 {
     return {
@@ -305,7 +479,12 @@ export function lowerDxbcToIr(input, options = {})
     if (!decoded.program) throw new Error("DXBC input has no shader program");
 
     const declarationInstructions = decoded.instructions.filter((instruction) => instruction.isDeclaration);
-    const executable = decoded.instructions.filter((instruction) => !instruction.isDeclaration);
+    let executable = decoded.instructions.filter((instruction) => !instruction.isDeclaration);
+    const constTableExtraction = extractConstTables(declarationInstructions, executable);
+    if (constTableExtraction.removed)
+    {
+        executable = executable.filter((_, index) => !constTableExtraction.removed.has(index));
+    }
     const instructions = executable.map(buildInstruction);
     const icbInstruction = declarationInstructions.find((instruction) => instruction.customData?.immediateConstantBuffer);
     const immediateConstantBuffer = icbInstruction
@@ -336,6 +515,7 @@ export function lowerDxbcToIr(input, options = {})
         })),
         bindings: declarationInstructions.map(buildBinding).filter(Boolean),
         immediateConstantBuffer,
+        constTables: constTableExtraction.tables,
         instructions,
         blocks: buildBlocks(instructions)
     };

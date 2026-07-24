@@ -1,4 +1,9 @@
 const STAGE_NAMES = new Set([ "vertex", "pixel" ]);
+// Structurally valid DXBC stage kinds that the WGSL packager cannot lower yet:
+// there is no WGSL geometry/hull/domain stage, and compute lowering plus its
+// compute-pipeline browser gate are not built. These fail closed as
+// unsupported rather than being misreported as malformed records.
+const KNOWN_UNSUPPORTED_STAGE_NAMES = new Set([ "compute", "geometry", "hull", "domain" ]);
 
 /**
  * Verify that every requested permutation resolved exactly.
@@ -74,8 +79,20 @@ function validateStageRecords(stages)
 
         if (!stage || typeof stage.techniqueName !== "string" || !stage.techniqueName
             || !Number.isInteger(stage.passIndex) || stage.passIndex < 0
-            || !STAGE_NAMES.has(stage.stageName) || stage.key !== expected)
+            || stage.key !== expected)
         {
+            throw new Error(`Effect analysis stage ${index} is malformed`);
+        }
+
+        if (!STAGE_NAMES.has(stage.stageName))
+        {
+            if (KNOWN_UNSUPPORTED_STAGE_NAMES.has(stage.stageName))
+            {
+                throw new Error(
+                    `WGSL effect stage ${expected} kind ${stage.stageName} is not supported`
+                );
+            }
+
             throw new Error(`Effect analysis stage ${index} is malformed`);
         }
 

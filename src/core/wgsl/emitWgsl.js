@@ -35,6 +35,15 @@ function emitImmediateConstantBuffer(lines, rows)
     lines.push(`const icb = array<vec4<f32>, ${rows.length}>(${vectors.join(", ")});`, "");
 }
 
+function emitConstTables(lines, tables)
+{
+    for (const table of tables)
+    {
+        const vectors = table.rows.map((row) => `vec4<f32>(${row.map(f32Literal).join(", ")})`);
+        lines.push(`const ${table.symbol} = array<vec4<f32>, ${table.rows.length}>(${vectors.join(", ")});`, "");
+    }
+}
+
 function emitStruct(lines, name, fields, invariantPosition = false)
 {
     lines.push(`struct ${name}`, "{");
@@ -84,6 +93,7 @@ export function buildWgsl(input, options = {})
     if (hasInputs) emitStruct(lines, `${prefix}Input`, program.interface.inputs);
     emitStruct(lines, `${prefix}Output`, program.interface.outputs, program.stage === "vertex");
     if (program.immediateConstantBuffer?.length) emitImmediateConstantBuffer(lines, program.immediateConstantBuffer);
+    if (program.constTables?.length) emitConstTables(lines, program.constTables);
     for (const binding of program.bindings || [])
     {
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);

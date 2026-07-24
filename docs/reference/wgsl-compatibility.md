@@ -169,6 +169,24 @@ lane a round-tripping f32 decimal literal (non-finite lanes fall back to
 (pure-relative and base+relative indices both supported), with int/uint
 consumers bitcast exactly like uniform cbuffers.
 
+### Relative indexable temps → module `const` tables (immutable shape only)
+
+An indexable temp (`x#`) accessed with relative addressing is recognized when
+it is an immutable constant table: every write is a straight-line
+pre-control-flow `mov x#[slot].mask, l(...)` immediate with one shared write
+mask, every declared slot is fully written, and reads select only written
+lanes. Such registers lower exactly like the icb — a module-scope
+`const xt# = array<vec4<f32>, N>(...)` with reads through the shared dynamic
+index machinery (`xt#[base + i32(index)].comp`) — so the dynamic read needs no
+mutable-register SSA and inherits index-driven uniformity. This is the
+compiler-generated shape for small lookup tables (e.g. the six quad-corner
+UVs in `particles/gpu/quads`). Any other relative indexable-temp use —
+mutable writes, non-immediate initializers, initializers under control flow,
+partial slots — fails closed with a per-reason diagnostic. Out-of-bounds
+dynamic indices follow WGSL's in-bounds guarantee (as with the icb) rather
+than D3D's out-of-bounds register semantics; no corpus shader indexes out of
+bounds.
+
 ### Component-packed varyings → one merged interface field per register
 
 DXBC signature tables can emit several rows for a single interpolant register
@@ -205,8 +223,14 @@ WGSL forbids implicit derivatives in a vertex entry point.
   textures (below).
 - **Unknown texture dimensions** (`texturecubearray`, MSAA kinds, …) in
   sampled layouts.
-- **Relative `indexable_temp` SSA, subroutine control flow
-  (`call`/`callc`/`label`/`interface_call`)** — front-end rejections.
+- **Mutable relative `indexable_temp` registers** (any shape outside the
+  constant-table form above), and subroutine control flow
+  (`call`/`callc`/`label`/`interface_call`) — front-end rejections.
+- **Compute, geometry, hull, and domain stage kinds** — structurally valid
+  stages the packager cannot lower: WGSL has no geometry/hull/domain stage,
+  and compute lowering plus its compute-pipeline browser gate are not built.
+  These fail closed per stage kind instead of being misreported as malformed
+  records.
 - **Sampler modes other than `default`**, non-`linear` fragment input
   interpolation, minimum-precision operands, and vertex system semantics
   outside `SV_Position`/`SV_VertexID`/`SV_InstanceID` (fragment:
@@ -233,9 +257,10 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
   address, fixed (non-relative) resource operands.
 - **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`;
   `f32tof16` keeps only the low 16 bits (DXBC contract).
-- **Fragment `udiv`** — quotient and remainder lower to WGSL `u32` division
-  and remainder only when every divisor lane is an immediate non-zero value.
-  Dynamic or zero divisors fail closed because DXBC and WGSL define
+- **`udiv` (both stages)** — quotient and remainder lower to WGSL `u32`
+  division and remainder only when every divisor lane is an immediate non-zero
+  value; both destinations may be written by one instruction (with independent
+  masks). Dynamic or zero divisors fail closed because DXBC and WGSL define
   divide-by-zero results differently.
 - **Loop merges** — scalar phis with exactly one entry and one backedge
   incoming; multi-exit loops (several `break` sites feeding distinct post-loop

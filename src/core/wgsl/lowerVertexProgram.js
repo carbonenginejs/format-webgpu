@@ -27,8 +27,8 @@ const SUPPORTED_OPCODES = new Set([
     "ge", "iadd", "ieq", "ige", "ilt", "imad", "imax", "imin", "imul", "ine",
     "ishl", "ishr", "itof", "ld_structured", "log", "lt", "mad", "max", "min",
     "mov", "movc", "mul", "ne", "or", "round_ni", "round_pi", "round_z", "rsq",
-    "sample_d", "sample_l", "sincos", "sqrt", "uge", "ult", "umax", "umin",
-    "ushr", "utof", "xor", "ret"
+    "sample_d", "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax",
+    "umin", "ushr", "utof", "xor", "ret"
 ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
     itof: [ "int32", "float32" ],
@@ -312,6 +312,26 @@ function icbParts(program, instruction, operandIndex, operand, destinationMask, 
     return parts.map((part) => `bitcast<${target}>(${part})`);
 }
 
+function constTableParts(program, instruction, operandIndex, operand, destinationMask, count, expectedScalarType, inputs, activeComponents = null)
+{
+    const registerIndex = operand.indices?.[0]?.values?.[0];
+    const table = (program.constTables || []).find((entry) => entry.registerIndex === registerIndex);
+    if (!table)
+    {
+        throw new Error(`WGSL vertex instruction ${instruction.index} indexable temp x${registerIndex} is not a supported constant table`);
+    }
+    const vectorIndex = cbufferVectorIndex(program, instruction, operandIndex, operand, inputs);
+    const parts = sourceComponents(operand, destinationMask, count, activeComponents)
+        .map((component) => `${table.symbol}[${vectorIndex}].${component}`);
+    if (expectedScalarType === "float32") return parts;
+    if (![ "int32", "uint32", "bitpattern32" ].includes(expectedScalarType))
+    {
+        throw new Error(`WGSL vertex cannot reinterpret constant-table lanes as ${expectedScalarType}`);
+    }
+    const target = scalarTypeName(expectedScalarType);
+    return parts.map((part) => `bitcast<${target}>(${part})`);
+}
+
 // DXBC source-modifier semantics are exact per consumer type: float consumers
 // use IEEE negate/abs (pure sign-bit operations), integer consumers use
 // two's-complement negation, and bit-preserving movers (unknown expected type)
@@ -492,6 +512,10 @@ function operandExpression(program, instruction, operandIndex, destinationMask, 
     {
         parts = cbufferParts(program, instruction, operandIndex, operand, destinationMask, count, bindings, type, inputs, activeComponents);
     }
+    else if (operand.typeName === "indexable_temp")
+    {
+        parts = constTableParts(program, instruction, operandIndex, operand, destinationMask, count, type, inputs, activeComponents);
+    }
     else if (operand.typeName === "immediate_constant_buffer")
     {
         parts = icbParts(program, instruction, operandIndex, operand, destinationMask, count, type, inputs, activeComponents);
@@ -608,6 +632,23 @@ function expressionFor(program, instruction, write, type, inputs, bindings)
             throw new Error(`WGSL vertex instruction ${instruction.index} does not support the ${op} high result`);
         }
         return `(${source(2)} * ${source(3)})`;
+    }
+    if (op === "udiv")
+    {
+        // Bounded support: WGSL u32 `/` and `%` match D3D udiv bit-for-bit only
+        // when the divisor cannot be zero (D3D defines divide-by-zero results as
+        // 0xffffffff; WGSL defines them differently), so require a provably
+        // non-zero immediate divisor and fail closed on anything dynamic.
+        const divisor = instruction.operands[3];
+        const lanes = (divisor?.immediateValues || []).map((value) => value.uint32);
+        if (divisor?.typeName !== "immediate32" || (divisor.modifierName || "none") !== "none"
+            || !lanes.length || lanes.some((value) => !Number.isInteger(value) || value === 0))
+        {
+            throw new Error(`WGSL vertex udiv instruction ${instruction.index} requires an immediate non-zero divisor; dynamic or zero divisors are not supported`);
+        }
+        const operator = write.operandIndex === 0 ? "/" : write.operandIndex === 1 ? "%" : null;
+        if (!operator) throw new Error(`WGSL vertex udiv instruction ${instruction.index} has an unexpected destination operand`);
+        return `(${source(2)} ${operator} ${source(3)})`;
     }
     if (op === "and") return `(${source(1)} & ${source(2)})`;
     if (op === "or") return `(${source(1)} | ${source(2)})`;
@@ -735,15 +776,15 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     }
     const writes = instruction.dataflow.writes;
     if (!writes.length) throw new Error(`WGSL vertex instruction ${instruction.index} has no result write`);
-    if (instruction.opcodeName === "sincos")
+    if (instruction.opcodeName === "sincos" || instruction.opcodeName === "udiv")
     {
         const destinationOperands = writes.map((write) => write.operandIndex);
         if (writes.length > 2 || new Set(destinationOperands).size !== writes.length
             || destinationOperands.some((operandIndex) => ![ 0, 1 ].includes(operandIndex)))
         {
-            throw new Error(`WGSL vertex sincos instruction ${instruction.index} has unsupported result writes`);
+            throw new Error(`WGSL vertex ${instruction.opcodeName} instruction ${instruction.index} has unsupported result writes`);
         }
-        if (writes.length === 2 && writes[0].mask !== writes[1].mask)
+        if (instruction.opcodeName === "sincos" && writes.length === 2 && writes[0].mask !== writes[1].mask)
         {
             throw new Error(`WGSL vertex sincos instruction ${instruction.index} requires matching destination masks`);
         }
@@ -1237,6 +1278,7 @@ export function lowerVertexProgram(program, options = {})
         interface: { inputs, outputs },
         bindings,
         immediateConstantBuffer: program.immediateConstantBuffer || null,
+        constTables: program.constTables || null,
         statements
     });
 }

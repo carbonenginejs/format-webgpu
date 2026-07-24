@@ -128,6 +128,21 @@ test("package-effect rejects malformed and duplicate ANLS stage records", () =>
     );
 });
 
+test("package-effect fails closed on structurally valid but unsupported stage kinds", () =>
+{
+    const compute = { key: "Main.pass0.compute", techniqueName: "Main", passIndex: 0, stageName: "compute" };
+    const geometry = { key: "Main.pass0.geometry", techniqueName: "Main", passIndex: 0, stageName: "geometry" };
+
+    assert.throws(
+        () => selectPackageEffectStages([ compute ], null),
+        /stage Main\.pass0\.compute kind compute is not supported/u
+    );
+    assert.throws(
+        () => selectPackageEffectStages([ geometry ], null),
+        /stage Main\.pass0\.geometry kind geometry is not supported/u
+    );
+});
+
 test("package-effect requires requested permutations to resolve exactly", () =>
 {
     const selected = [
