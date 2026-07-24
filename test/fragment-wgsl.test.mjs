@@ -462,6 +462,15 @@ test("BuildWgsl emits the bounded fragment interface, bindings, and positional s
     assert.match(shader.code, /bitcast<f32>\(0x3f800000u\)/);
     assert.equal(shader.program.bindings[0].buffer.minBindingSize, 48);
     assert.equal(shader.sourceMap.some((entry) => entry.dxbcOffset === 38), false);
+
+    const offsetProgram = fragmentFixture();
+    offsetProgram.instructions.find((entry) => entry.offset === 39).extensions = [ {
+        typeName: "sample_controls",
+        sampleOffsets: { u: -2, v: 2, w: 0 }
+    } ];
+    const offsetShader = CjsFormatWebgpu.buildWgsl(offsetProgram, { source: "synthetic-copyblit-offset-ps" });
+    assert.match(offsetShader.code,
+        /textureSample\(t0, s0, vec2<f32>\([^\n]+, vec2<i32>\(-2, 2\)\);/u);
 });
 
 test("fragment lowering emits a parameterless entry point when declared inputs are dead", () =>
@@ -700,9 +709,14 @@ test("fragment lowering emits an explicit texture bias for sample_b", () =>
     const sample = decoded.instructions.find((entry) => entry.offset === 18);
     sample.opcodeName = "sample_b";
     sample.operands.push(immediate([ 0x3dcccccd ]));
+    sample.extensions = [ {
+        typeName: "sample_controls",
+        sampleOffsets: { u: 2, v: -2, w: 0 }
+    } ];
     const shader = CjsFormatWebgpu.buildWgsl(decoded);
 
-    assert.match(shader.code, /textureSampleBias\(t0, s0, vec2<f32>\([^\n]+\), bitcast<f32>\(0x3dcccccdu\)\)\.xy/);
+    assert.match(shader.code,
+        /textureSampleBias\(t0, s0, vec2<f32>\([^\n]+, bitcast<f32>\(0x3dcccccdu\), vec2<i32>\(2, -2\)\)\.xy/u);
 });
 
 test("fragment fixed-width cbuffer sources use intrinsic lanes instead of destination lanes", () =>
@@ -1132,6 +1146,15 @@ test("fragment lowering samples a 2d-array texture with a split coordinate and a
     const array = shader.program.bindings.find((entry) => entry.resourceKind === "sampled-resource");
     assert.equal(array.type, "texture_2d_array<f32>");
     assert.match(shader.code, /textureSample\(.*\.xy, i32\(.*\.z\)\)/u);
+
+    program.instructions.find((entry) => entry.opcodeName === "sample").extensions = [ {
+        typeName: "sample_controls",
+        sampleOffsets: { u: 1, v: 0, w: 0 }
+    } ];
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-2d-array-offset" }),
+        /immediate sample offsets support only 2d textures/u
+    );
 });
 
 test("fragment lowering emits an if/else selection with a scalar float merge", () =>
@@ -1495,6 +1518,37 @@ test("fragment lowering emits gradient sampling, ceil, shifts, and integer min/m
     assert.match(shader.code, /ceil\(/u);
     assert.match(shader.code, /<< u32\(/u);
     assert.match(shader.code, /max\(/u);
+
+    const sample = program.instructions.find((entry) => entry.opcodeName === "sample_d");
+    sample.extensions = [
+        { typeName: "resource_dimension" },
+        { typeName: "resource_return_type" },
+        {
+            token: 1,
+            type: 1,
+            typeName: "sample_controls",
+            sampleOffsets: { u: 1, v: -1, w: 7 }
+        }
+    ];
+    const offsetShader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-sampled-offset" });
+    assert.match(offsetShader.code, /textureSampleGrad\(.*vec2<i32>\(1, -1\)\);/u);
+
+    sample.extensions.push({ typeName: "unknown_extension" });
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-unknown-extension" }),
+        /opcode extension unknown_extension is not supported/u
+    );
+    sample.extensions.pop();
+    sample.extensions.at(-1).sampleOffsets.u = 8;
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-invalid-sampled-offset" }),
+        /has invalid immediate sample offsets/u
+    );
+    delete sample.extensions.at(-1).sampleOffsets;
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-missing-sampled-offset" }),
+        /has invalid immediate sample offsets/u
+    );
 });
 
 test("fragment lowering loads typed float4 buffer SRVs as read-only storage arrays", () =>
@@ -1541,7 +1595,7 @@ test("fragment lowering loads typed float4 buffer SRVs as read-only storage arra
     assert.deepEqual(load.extensions, [ sampleControls ]);
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-extended-ld" }),
-        /load instruction \d+ opcode extensions are not supported/u
+        /opcode extension sample_controls is not supported/u
     );
 });
 

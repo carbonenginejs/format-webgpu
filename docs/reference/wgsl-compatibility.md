@@ -362,6 +362,9 @@ fail closed.
   resource shapes listed below.
 - **Unknown texture dimensions** (`texturecubearray`, MSAA kinds, …) in
   sampled layouts.
+- **Immediate texture offsets** (`sample_controls` / `_aoffimmi`) outside the
+  bounded 2D sample family below. In particular, offset texture `ld` and
+  non-2D sampling fail closed.
 - **Mutable relative `indexable_temp` registers** (any shape outside the
   constant-table form above), and subroutine control flow
   (`call`/`callc`/`label`/`interface_call`) — front-end rejections.
@@ -389,6 +392,17 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
 
 ## Bounded / temporary
 
+- **Immediate 2D sample offsets** — `sample`, `sample_b`, `sample_d`, and
+  `sample_l` lower their signed `_aoffimmi(u,v,w)` record to WGSL's final
+  constant `vec2<i32>(u, v)` sampling argument. Both APIs apply that
+  texel-space offset before sampler address modes, and both require components
+  in `[-8, 7]`. D3D ignores `w` for a Texture2D, so only `u` and `v` are
+  emitted. Fragment supports all four opcodes; vertex supports the
+  explicit-gradient/LOD pair already legal there. Duplicate or malformed
+  records, offsets on other opcodes, and non-2D resource shapes fail closed.
+  *Confirmed against vkd3d-shader:* its IR preserves the signed immediate
+  offset on sample instructions, and its SPIR-V, GLSL, and MSL backends pass
+  those constants through as the target sampling operation's constant offset.
 - **`resinfo`** — 2D and 3D textures, scalar immediate mip, components x/y
   (dimensions), z (depth, 3D only), and w (`textureNumLevels`); z rejected
   for 2D. A non-zero mip is queried through an in-range clamped level and its
@@ -421,8 +435,6 @@ cast to the WGSL-required u32), `ineg` (signed negation), `round_ne`
   DXBC's resource declaration does not encode the bound view's channel count;
   supporting a future one- or two-component view would require view-format
   metadata to reproduce D3D's missing-component defaults (normally alpha one).
-  Immediate-offset opcode extensions are preserved by the shader IR but fail
-  closed until signed offset addition and its bounds interaction are lowered.
 - **`ld_structured`** — fixed immediate DWORD byte offsets, one scalar
   address, fixed (non-relative) resource operands. Every word fetch is clamped
   to valid storage-buffer memory and selected to zero when the structure index

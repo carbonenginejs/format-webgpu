@@ -1060,6 +1060,37 @@ test("vertex lowering samples a texture with an explicit level of detail", () =>
     const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-sample-l" });
     assert.match(shader.code, /textureSampleLevel\(t0, s0, vec2<f32>\([^)]+\), [^)]+\)/u);
     assert.match(shader.code, /@group\(0\) @binding\(\d+\) var t0: texture_2d<f32>;/u);
+
+    const sample = program.instructions.find((entry) => entry.opcodeName === "sample_l");
+    sample.extensions = [ {
+        token: 1,
+        type: 1,
+        typeName: "sample_controls",
+        sampleOffsets: { u: -1, v: 1, w: 0 }
+    } ];
+    const offsetShader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-sample-l-offset" });
+    assert.match(offsetShader.code, /textureSampleLevel\(.*vec2<i32>\(-1, 1\)\);/u);
+
+    const gradientProgram = structuredClone(program);
+    const gradientSample = gradientProgram.instructions.find((entry) => entry.opcodeName === "sample_l");
+    gradientSample.opcodeName = "sample_d";
+    gradientSample.operands[4] = register("input", 0, { swizzle: "xyxx" });
+    gradientSample.operands.push(register("input", 0, { swizzle: "yxyy" }));
+    const gradientShader = CjsFormatWebgpu.buildWgsl(gradientProgram, {
+        source: "synthetic-vertex-sample-d-offset"
+    });
+    assert.match(gradientShader.code, /textureSampleGrad\(.*vec2<i32>\(-1, 1\)\);/u);
+
+    sample.extensions.push({
+        token: 1,
+        type: 1,
+        typeName: "sample_controls",
+        sampleOffsets: { u: 0, v: 0, w: 0 }
+    });
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-duplicate-sampled-offset" }),
+        /has duplicate sample_controls extensions/u
+    );
 });
 
 function typedBufferDeclaration(offset, returnTypeName)
@@ -1118,7 +1149,7 @@ test("vertex lowering loads typed float4 buffer SRVs as read-only storage arrays
     } ];
     assert.throws(
         () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-typed-buffer-extended-ld" }),
-        /load instruction \d+ opcode extensions are not supported/u
+        /opcode extension sample_controls is not supported/u
     );
 });
 

@@ -17,6 +17,8 @@ const SUPPORTED_OPCODES = new Set([
     "sample_l", "sincos", "sqrt", "udiv", "uge", "ult", "umax", "umin", "ushr",
     "utof", "xor", "endif", "ret"
 ]);
+const METADATA_OPCODE_EXTENSIONS = new Set([ "resource_dimension", "resource_return_type" ]);
+const SAMPLE_OFFSET_OPCODES = new Set([ "sample", "sample_b", "sample_d", "sample_l" ]);
 const NUMERIC_CONVERSIONS = Object.freeze({
     itof: [ "int32", "float32" ],
     utof: [ "uint32", "float32" ],
@@ -43,6 +45,29 @@ const REQUIRES_UNIFORM_CONTROL_FLOW = new Set([
 function componentsFromMask(mask)
 {
     return COMPONENTS.filter((_, index) => (mask & (1 << index)) !== 0);
+}
+
+function sampleOffsetArgument(instruction, viewDimension)
+{
+    const controls = instruction.extensions?.filter((extension) => extension.typeName === "sample_controls") || [];
+    if (!controls.length) return "";
+    if (controls.length !== 1)
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} has duplicate sample_controls extensions`);
+    }
+    if (viewDimension !== "2d")
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} immediate sample offsets support only 2d textures`);
+    }
+    const offsets = controls[0].sampleOffsets;
+    if (![ offsets?.u, offsets?.v, offsets?.w ].every((value) =>
+        Number.isInteger(value) && value >= -8 && value <= 7))
+    {
+        throw new Error(`WGSL fragment instruction ${instruction.index} has invalid immediate sample offsets`);
+    }
+    // D3D ignores the w offset for Texture2D. WGSL takes the same signed,
+    // texel-space u/v constants as the final sampling argument.
+    return `, vec2<i32>(${offsets.u}, ${offsets.v})`;
 }
 
 function scalarTypeName(type)
@@ -895,13 +920,14 @@ function expressionFor(program, instruction, write, inputs, bindings)
             coord = source(1, coordComponents);
         }
         const tex = `${textureBinding.generatedSymbol}, ${samplerBinding.generatedSymbol}`;
+        const offsetArg = sampleOffsetArgument(instruction, viewDimension);
         const sampled = op === "sample_b"
-            ? `textureSampleBias(${tex}, ${coord}${arrayArg}, ${source(4, 1)})`
+            ? `textureSampleBias(${tex}, ${coord}${arrayArg}, ${source(4, 1)}${offsetArg})`
             : op === "sample_l"
-                ? `textureSampleLevel(${tex}, ${coord}${arrayArg}, ${source(4, 1)})`
+                ? `textureSampleLevel(${tex}, ${coord}${arrayArg}, ${source(4, 1)}${offsetArg})`
                 : op === "sample_d"
-                    ? `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, coordComponents)}, ${source(5, coordComponents)})`
-                    : `textureSample(${tex}, ${coord}${arrayArg})`;
+                    ? `textureSampleGrad(${tex}, ${coord}${arrayArg}, ${source(4, coordComponents)}, ${source(5, coordComponents)}${offsetArg})`
+                    : `textureSample(${tex}, ${coord}${arrayArg}${offsetArg})`;
         const components = rawSelectedComponents(resource, mask, count);
         return count === 4 && components.join("") === "xyzw" ? sampled : `${sampled}.${components.join("")}`;
     }
@@ -931,10 +957,13 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
     {
         throw new Error(`WGSL fragment opcode ${instruction.opcodeName} at instruction ${instruction.index} is not supported`);
     }
-    if (instruction.opcodeName === "ld" && instruction.extensions?.some((extension) =>
-        ![ "resource_dimension", "resource_return_type" ].includes(extension.typeName)))
+    const unsupportedExtension = instruction.extensions?.find((extension) =>
+        !METADATA_OPCODE_EXTENSIONS.has(extension.typeName)
+        && !(extension.typeName === "sample_controls"
+            && SAMPLE_OFFSET_OPCODES.has(instruction.opcodeName)));
+    if (unsupportedExtension)
     {
-        throw new Error(`WGSL fragment load instruction ${instruction.index} opcode extensions are not supported`);
+        throw new Error(`WGSL fragment instruction ${instruction.index} opcode extension ${unsupportedExtension.typeName} is not supported`);
     }
     if (nonUniform && REQUIRES_UNIFORM_CONTROL_FLOW.has(instruction.opcodeName) && context)
     {
