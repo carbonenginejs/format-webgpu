@@ -1690,48 +1690,35 @@ function typedBufferDeclaration(offset, returnTypeName)
     };
 }
 
-test("vertex lowering loads typed float4 buffer SRVs as read-only storage arrays", () =>
+test("vertex typed Buffer SRVs require explicit bound-view format metadata", () =>
 {
-    const program = {
-        program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
-        signatures: { input: [], output: [ signature("SV_Position", 0, 0, 15) ] },
-        instructions: [
-            globalFlagsDeclaration(),
-            typedBufferDeclaration(2, "float"),
-            instruction(4, "ld", [
-                register("temp", 0, { mask: "xyzw" }),
-                immediate([ 1, 0, 0, 0 ]),
-                register("resource", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(9, "mov", [
-                register("output", 0, { mask: "xyzw" }),
-                register("temp", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(13, "ret", [])
-        ]
-    };
-    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-typed-buffer-ld" });
-    const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "t0");
-    assert.equal(binding.declaration, "var<storage, read>");
-    assert.equal(binding.type, "array<vec4<f32>>");
-    assert.deepEqual(binding.buffer, {
-        type: "read-only-storage",
-        hasDynamicOffset: false,
-        minBindingSize: 16
-    });
-    assert.match(shader.code,
-        /select\(vec4<f32>\(\), t0\[min\(0x00000001u, arrayLength\(&t0\) - 1u\)\], 0x00000001u < arrayLength\(&t0\)\)/u);
-
-    program.instructions[2].extensions = [ {
-        token: 1,
-        type: 1,
-        typeName: "sample_controls",
-        sampleOffsets: { u: 1, v: 0, w: 0 }
-    } ];
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-vertex-typed-buffer-extended-ld" }),
-        /opcode extension sample_controls is not supported/u
-    );
+    for (const returnTypeName of [ "float", "uint" ])
+    {
+        const program = {
+            program: { programType: 1, programTypeName: "vertex", majorVersion: 5, minorVersion: 0 },
+            signatures: { input: [], output: [ signature("SV_Position", 0, 0, 15) ] },
+            instructions: [
+                globalFlagsDeclaration(),
+                typedBufferDeclaration(2, returnTypeName),
+                instruction(4, "ld", [
+                    register("temp", 0, { mask: "xyzw" }),
+                    immediate([ 1, 0, 0, 0 ]),
+                    register("resource", 0, { swizzle: "xyzw" })
+                ]),
+                instruction(9, "mov", [
+                    register("output", 0, { mask: "xyzw" }),
+                    register("temp", 0, { swizzle: "xyzw" })
+                ]),
+                instruction(13, "ret", [])
+            ]
+        };
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(program, {
+                source: `synthetic-vertex-typed-buffer-${returnTypeName}`
+            }),
+            /is not supported in the vertex stage without explicit bound-view format metadata/u
+        );
+    }
 });
 
 test("vertex lowering fails closed on ld from texture resources", () =>

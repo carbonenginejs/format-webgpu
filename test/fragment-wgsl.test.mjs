@@ -2478,110 +2478,45 @@ test("fragment lowering emits gradient sampling, ceil, shifts, and integer min/m
     );
 });
 
-test("fragment lowering loads typed float4 buffer SRVs as read-only storage arrays", () =>
+test("fragment typed Buffer SRVs require explicit bound-view format metadata", () =>
 {
-    const program = {
-        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
-        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
-        instructions: [
-            globalFlagsDeclaration(),
-            declaration(2, "dcl_resource", "resource", {
-                resourceDimensionName: "buffer",
-                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+    for (const returnTypeName of [ "float", "uint", "sint" ])
+    {
+        const program = {
+            program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+            signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+            instructions: [
+                globalFlagsDeclaration(),
+                declaration(2, "dcl_resource", "resource", {
+                    resourceDimensionName: "buffer",
+                    returnType: {
+                        returnTypeNames: [
+                            returnTypeName,
+                            returnTypeName,
+                            returnTypeName,
+                            returnTypeName
+                        ]
+                    }
+                }),
+                instruction(4, "ld", [
+                    register("temp", 0, { mask: "xyzw" }),
+                    immediate([ 0, 0, 0, 0 ]),
+                    register("resource", 0, { swizzle: "xyzw" })
+                ]),
+                instruction(9, "mov", [
+                    register("output", 0, { mask: "xyzw" }),
+                    register("temp", 0, { swizzle: "xyzw" })
+                ]),
+                instruction(13, "ret", [])
+            ]
+        };
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(program, {
+                source: `synthetic-typed-buffer-${returnTypeName}`
             }),
-            instruction(4, "ld", [
-                register("output", 0, { mask: "xyzw" }),
-                immediate([ 3, 0, 0, 0 ]),
-                register("resource", 0, { swizzle: "yzwx" })
-            ]),
-            instruction(9, "ret", [])
-        ]
-    };
-    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-ld" });
-    const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "t0");
-    assert.equal(binding.declaration, "var<storage, read>");
-    assert.equal(binding.type, "array<vec4<f32>>");
-    assert.equal(binding.structureStride ?? null, null);
-    assert.deepEqual(binding.buffer, {
-        type: "read-only-storage",
-        hasDynamicOffset: false,
-        minBindingSize: 16
-    });
-    assert.match(shader.code, /@group\(0\) @binding\(0\) var<storage, read> t0: array<vec4<f32>>;/u);
-    assert.match(shader.code,
-        /select\(vec4<f32>\(\), t0\[min\(0x00000003u, arrayLength\(&t0\) - 1u\)\], 0x00000003u < arrayLength\(&t0\)\)\.yzwx/u);
-
-    const sampleControls = {
-        token: 1,
-        type: 1,
-        typeName: "sample_controls",
-        sampleOffsets: { u: 1, v: 0, w: 0 }
-    };
-    program.instructions[2].extensions = [ sampleControls ];
-    const load = CjsFormatWebgpu.buildShaderIr(program).instructions.find((entry) => entry.opcodeName === "ld");
-    assert.deepEqual(load.extensions, [ sampleControls ]);
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-extended-ld" }),
-        /opcode extension sample_controls is not supported/u
-    );
-});
-
-test("fragment lowering loads typed uint4 buffer SRVs with uint storage typing", () =>
-{
-    const program = {
-        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
-        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
-        instructions: [
-            globalFlagsDeclaration(),
-            declaration(2, "dcl_resource", "resource", {
-                resourceDimensionName: "buffer",
-                returnType: { returnTypeNames: [ "uint", "uint", "uint", "uint" ] }
-            }),
-            instruction(4, "ld", [
-                register("temp", 0, { mask: "xyzw" }),
-                immediate([ 2, 0, 0, 0 ]),
-                register("resource", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(9, "utof", [
-                register("output", 0, { mask: "xyzw" }),
-                register("temp", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(13, "ret", [])
-        ]
-    };
-    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-uint-ld" });
-    const binding = shader.program.bindings.find((entry) => entry.generatedSymbol === "t0");
-    assert.equal(binding.type, "array<vec4<u32>>");
-    assert.match(shader.code,
-        /select\(vec4<u32>\(\), t0\[min\(0x00000002u, arrayLength\(&t0\) - 1u\)\], 0x00000002u < arrayLength\(&t0\)\)/u);
-});
-
-test("fragment lowering fails closed on unsupported typed-buffer element types", () =>
-{
-    const program = {
-        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
-        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
-        instructions: [
-            globalFlagsDeclaration(),
-            declaration(2, "dcl_resource", "resource", {
-                resourceDimensionName: "buffer",
-                returnType: { returnTypeNames: [ "sint", "sint", "sint", "sint" ] }
-            }),
-            instruction(4, "ld", [
-                register("temp", 0, { mask: "xyzw" }),
-                immediate([ 0, 0, 0, 0 ]),
-                register("resource", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(9, "itof", [
-                register("output", 0, { mask: "xyzw" }),
-                register("temp", 0, { swizzle: "xyzw" })
-            ]),
-            instruction(13, "ret", [])
-        ]
-    };
-    assert.throws(
-        () => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-typed-buffer-sint" }),
-        /only uniform float4 and uint4 elements are supported/u);
+            /is not supported in the pixel stage without explicit bound-view format metadata/u
+        );
+    }
 });
 
 test("fragment lowering emits guarded storage atomics for typed uint buffer UAVs", () =>

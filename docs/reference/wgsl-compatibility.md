@@ -361,8 +361,8 @@ storage remains outside the current portability contract. The bounded compute
 profile below uses the same representation and `atomicStore` for ordinary
 typed stores because WGSL requires every access to an atomic-typed element to
 use an atomic builtin. The engine must bind either form as storage containing
-raw 4-byte u32 words (`minBindingSize: 4`); unlike typed SRV buffers, this is
-one scalar word per element. No DXGI view-format conversion is reproduced.
+raw 4-byte u32 words (`minBindingSize: 4`); the admitted typed-atomic contract
+is one scalar word per element. No DXGI view-format conversion is reproduced.
 *Confirmed against vkd3d-shader for operation shape and the
 robustness-dependent OOB mechanism:* its backend emits the corresponding
 atomic through a directly computed buffer/image pointer and inserts no
@@ -871,28 +871,29 @@ validation likewise restricts modifier types and verifies descriptor indices
 against their declared ranges. This compiler is stricter about relative member
 indices because its binding layout deliberately supports singleton ranges only.
 
-### Typed `Buffer` SRVs → read-only storage buffers
+### Typed `Buffer` SRVs require bound-view metadata
 
-WGSL has no texel-buffer type, so a `dcl_resource` with dimension `buffer`
-lowers to `var<storage, read> tN: array<vec4<f32>>` (float4 elements) or
-`array<vec4<u32>>` (uint4 elements), and `ld` on it becomes a guarded element
-fetch:
-`select(vec4<T>(), tN[min(i, arrayLength(&tN) - 1u)], i < arrayLength(&tN))`.
-The in-range clamp makes the eagerly evaluated load valid before zero is
-selected, reproducing D3D's defined out-of-bounds result without triggering
-WGSL's invalid-memory-reference behavior. The layout advertises
-`minBindingSize: 16`, so every valid binding has at least one element and
-`arrayLength(&tN) - 1u` cannot underflow. Both stages support the load (this
-is also the first vertex-stage `ld`; texture `ld` remains fragment-only).
+A render-stage `dcl_resource` with dimension `buffer` declares the component
+class returned by `ld`, but it does not encode the width or conversion rules of
+the bound DXGI view. The same uniform uint declaration can be paired with an
+`R32_UINT` view or an `R32G32B32A32_UINT` view; lowering both to one WGSL
+storage-array element type changes indexing for at least one valid binding.
 
-The deliberate divergence is the engine contract: D3D typed buffers convert
-through the *bound view's* DXGI format in hardware (an `R8G8B8A8_UNORM` view
-would yield normalized floats). That conversion is not reproduced — the engine
-must bind the underlying buffer as storage containing 16-byte elements already
-matching the declared component type. The element type is recorded in the
-binding's WGSL `type` (a typed buffer is distinguishable from a structured one
-by `structureStride: null`). Element types other than uniform float4/uint4
-fail closed.
+Render typed-buffer SRVs therefore fail closed until trusted bound-view format
+metadata is part of the binding policy, manifest, and compatibility
+fingerprint. A future lowering must derive the physical WGSL element type,
+element stride, D3D missing-channel values, format conversion, and
+`minBindingSize` from that metadata rather than from the declaration return
+token. The bounded compute profiles described above use separately validated
+scalar-word contracts and are not widened by this restriction.
+
+The corrective corpus transition moved from 513 qualified / 24 unsupported /
+0 failed to 506 / 31 / 0. Exactly `exposuredebug`, `highpassfilter`, `taa`,
+`taacopy`, `tonemapping`, `lensflare`, and `lensgrime` were retracted; direct
+comparison confirmed all 506 remaining qualified packages are byte-identical.
+The paired DX11/DX12 matrices retained matching axes and active topology with
+zero front-end failures while moving the affected 111 stage occurrences (72
+DX11 and 39 DX12) from emitted to unsupported.
 
 ## Not supported (fail closed)
 
@@ -911,6 +912,9 @@ fail closed.
   address/mip but remains bounded to the resource shapes listed below.
 - **Unknown texture dimensions** (`texturecubearray`, MSAA kinds, …) in
   sampled layouts.
+- **Render typed `Buffer` SRVs without explicit bound-view format metadata** —
+  the DXBC declaration identifies a return component class but not whether the
+  runtime view is scalar, vector, normalized, integer, or floating point.
 - **Immediate texture offsets** (`sample_controls` / `_aoffimmi`) outside the
   bounded 2D sample family below. In particular, offset texture `ld` and
   non-2D sampling fail closed.
@@ -996,8 +1000,9 @@ sample form and in both stages.
   clamped-query/zero-select is the WGSL-specific guard needed to preserve
   D3D's defined out-of-range result.
 - **`ld`** — 2D textures (fragment only; original address lanes xy=texel and
-  w=mip, packed into a three-lane u32 WGSL address) and typed buffers (both
-  stages; scalar u32 element index).
+  w=mip, packed into a three-lane u32 WGSL address). Typed-buffer loads are
+  admitted only by bounded compute profiles with a separately validated
+  scalar-word contract.
   Texture coordinates and mip are clamped to a valid texel for the eagerly
   evaluated `textureLoad`, then the result is selected to zero unless the
   original address was fully in range. This excludes WGSL's otherwise

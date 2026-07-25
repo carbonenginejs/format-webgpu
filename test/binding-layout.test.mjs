@@ -104,6 +104,28 @@ function structuredVertexBinding(minor, stride = 48)
     };
 }
 
+function typedRenderBuffer(stage, returnTypeName)
+{
+    const programType = { pixel: 0, vertex: 1 }[stage];
+    return {
+        program: { programType, programTypeName: stage, majorVersion: 5, minorVersion: 0 },
+        instructions: [
+            declaration(3, "dcl_resource", "resource", {
+                resourceDimensionName: "buffer",
+                returnType: {
+                    returnTypeNames: [
+                        returnTypeName,
+                        returnTypeName,
+                        returnTypeName,
+                        returnTypeName
+                    ]
+                }
+            }, 0),
+            { offset: 20, opcode: 62, opcodeName: "ret", isDeclaration: false, operands: [] }
+        ]
+    };
+}
+
 function computeTypedBuffers()
 {
     const handle = (typeName) => ({
@@ -356,6 +378,23 @@ test("compute typed uint buffers lower to raw scalar words without widening rend
     const mixedIr = CjsFormatWebgpu.buildShaderIr(mixedDecoded);
     assert.throws(() => lowerBindingLayout(mixedIr),
         /require uniform sint or uint components/u);
+});
+
+test("render typed buffers require explicit bound-view format metadata", () =>
+{
+    for (const [ stage, returnTypeName ] of [
+        [ "pixel", "float" ],
+        [ "pixel", "uint" ],
+        [ "vertex", "float" ],
+        [ "vertex", "uint" ]
+    ])
+    {
+        const ir = CjsFormatWebgpu.buildShaderIr(typedRenderBuffer(stage, returnTypeName));
+        assert.throws(
+            () => lowerBindingLayout(ir),
+            new RegExp(`is not supported in the ${stage} stage without explicit bound-view format metadata`, "u")
+        );
+    }
 });
 
 test("compute structured UAV lowering uses writable raw DWORD storage", () =>
