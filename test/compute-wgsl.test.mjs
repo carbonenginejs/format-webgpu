@@ -1,13 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import CjsFormatWebgpu from "../src/index.js";
+import { readEffectAnalysis } from "../src/core/effectAnalysis.js";
 import { lowerComputeProgram } from "../src/core/wgsl/lowerComputeProgram.js";
+import {
+    isParticleEmitComputeCandidate,
+    lowerParticleEmitComputeProgram
+} from "../src/core/wgsl/lowerParticleEmitComputeProgram.js";
 import {
     particleClearEffectProofFor,
     preflightParticleClearEffectProfile
 } from "../src/core/wgsl/lowerParticleClearComputePrograms.js";
+import {
+    particleEmitSemanticDigest,
+    sha256Utf8
+} from "../src/core/wgsl/particleEmitSemanticDigest.js";
 
 function register(typeName, registerIndex, {
     componentCount = 4,
@@ -5646,6 +5656,494 @@ test("particle clear block and tail loops cover each u32 index below practical c
         assert.deepEqual(
             visits,
             Array.from({ length: count }, (_, particle) => particle)
+        );
+    }
+});
+
+function particleDigestFixture()
+{
+    return {
+        kind: "shader-program",
+        format: "CJS_SHADER_IR",
+        formatVersion: 1,
+        source: "ignored-source",
+        stage: "compute",
+        programType: 5,
+        shaderModel: { major: 5, minor: 0 },
+        signatures: { input: [], output: [], patch: [] },
+        declarations: [ {
+            kind: "declaration",
+            opcodeName: "dcl_thread_group",
+            data: {
+                threadGroupX: 16,
+                threadGroupY: 16,
+                threadGroupZ: 1
+            },
+            operands: []
+        } ],
+        bindings: [ {
+            kind: "binding",
+            resourceKind: "storage-resource",
+            registerIndex: 1,
+            returnType: {
+                returnTypeNames: [ "sint", "sint", "sint", "sint" ]
+            }
+        } ],
+        immediateConstantBuffer: null,
+        constTables: null,
+        instructions: [ {
+            kind: "instruction",
+            index: 0,
+            dxbcOffset: 45,
+            opcode: 180,
+            opcodeName: "imm_atomic_iadd",
+            controlKind: null,
+            testBoolean: null,
+            saturate: false,
+            preciseMask: "",
+            operands: [ {
+                typeName: "temp",
+                registerIndex: 9,
+                componentCount: 4,
+                selectionModeName: "mask",
+                mask: "x",
+                swizzle: "",
+                selected: "",
+                modifierName: "none",
+                minPrecisionName: "default",
+                nonUniform: false,
+                indices: [ {
+                    dimension: 0,
+                    representation: 0,
+                    values: [ 9 ],
+                    relative: null
+                } ],
+                immediateValues: [
+                    { uint32: 0xffffffff, float32: Number.NaN },
+                    { uint32: 0, float32: -0 }
+                ]
+            } ],
+            dataflow: { ignored: true },
+            typeInfo: { ignored: true }
+        } ],
+        blocks: [ { ignored: true } ],
+        controlFlow: { ignored: true },
+        values: [ { ignored: true } ],
+        typeSystem: { scalar: "u32" }
+    };
+}
+
+test("browser-safe SHA-256 matches node:crypto known and varied vectors", () =>
+{
+    const messages = [
+        "",
+        "abc",
+        "The quick brown fox jumps over the lazy dog",
+        "\u0000\u0001\u00ff\u0100",
+        "particle-\u03c0-\ud83d\udc14",
+        "x".repeat(55),
+        "x".repeat(56),
+        "x".repeat(63),
+        "x".repeat(64),
+        "x".repeat(65),
+        "0123456789abcdef".repeat(257)
+    ];
+    let seed = 0x5eedc0de;
+    for (let index = 0; index < 40; index += 1)
+    {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        messages.push(`${index}:${seed.toString(16)}:${"z".repeat(seed % 173)}`);
+    }
+    for (const message of messages)
+    {
+        assert.equal(
+            sha256Utf8(message),
+            createHash("sha256").update(message).digest("hex")
+        );
+    }
+});
+
+test("particle emit digest is lossless across aliases, presence, descriptors, and numeric types", () =>
+{
+    const fixture = particleDigestFixture();
+    const expected = particleEmitSemanticDigest(fixture);
+    const ignored = structuredClone(fixture);
+    ignored.source = "another-source";
+    ignored.blocks[0].ignored = false;
+    ignored.controlFlow.ignored = false;
+    ignored.values[0].ignored = false;
+    ignored.instructions[0].dataflow.ignored = false;
+    ignored.instructions[0].typeInfo.ignored = false;
+    assert.equal(particleEmitSemanticDigest(ignored), expected);
+
+    const operand = (program) => program.instructions[0].operands[0];
+    const mutations = [
+        (program) => { program.instructions[0].kind = "declaration"; },
+        (program) => { program.instructions[0].opcode = "180"; },
+        (program) => { program.instructions[0].opcode = -1; },
+        (program) => { program.instructions[0].opcode = 0x100000000; },
+        (program) => { program.instructions[0].opcode = -0; },
+        (program) => { program.instructions[0].opcode = Number.NaN; },
+        (program) => { program.instructions[0].opcode = Number.POSITIVE_INFINITY; },
+        (program) => { program.instructions[0].opcodeName = "atomic_iadd"; },
+        (program) => { program.instructions[0].saturate = 0; },
+        (program) => { program.instructions[0].saturate = null; },
+        (program) => { operand(program).nonUniform = 0; },
+        (program) => { operand(program).nonUniform = null; },
+        (program) => { operand(program).mask = ""; },
+        (program) => { operand(program).swizzle = "x"; },
+        (program) => { operand(program).selected = "x"; },
+        (program) => { operand(program).indices[0].relative = false; },
+        (program) => { delete operand(program).indices[0].relative; },
+        (program) => { operand(program).indices[0].relative = undefined; },
+        (program) => { program.instructions[0].extensions = false; },
+        (program) => { program.instructions[0].extensions = null; },
+        (program) => { program.instructions[0].extensions = undefined; },
+        (program) =>
+        {
+            operand(program).immediateValues[0].uint32 = "4294967295";
+        },
+        (program) =>
+        {
+            operand(program).immediateValues[0].uint32 = -1;
+        },
+        (program) =>
+        {
+            operand(program).immediateValues[0].uint32 = 0x100000000;
+        },
+        (program) =>
+        {
+            operand(program).immediateValues[0].float32 = 0;
+        },
+        (program) =>
+        {
+            operand(program).immediateValues[1].float32 = 0;
+        },
+        (program) =>
+        {
+            delete operand(program).immediateValues[1];
+        },
+        (program) =>
+        {
+            program.signatures.input.push(undefined);
+            delete program.signatures.input[0];
+        },
+        (program) => { delete program.signatures.patch; },
+        (program) => { program.signatures.patch = undefined; },
+        (program) => { program.immediateConstantBuffer = false; },
+        (program) => { program.constTables = undefined; },
+        (program) => { program.extraSemanticField = undefined; },
+        (program) => { operand(program).extra = undefined; },
+        (program) => { operand(program).toJSON = () => ({ mask: "x" }); },
+        (program) =>
+        {
+            const value = operand(program);
+            delete value.mask;
+            Object.setPrototypeOf(value, { mask: "x" });
+        },
+        (program) =>
+        {
+            Object.defineProperty(
+                operand(program).immediateValues[0],
+                "uint32",
+                { get: () => 0xffffffff, enumerable: true }
+            );
+        }
+    ];
+    for (const mutate of mutations)
+    {
+        const changed = structuredClone(fixture);
+        mutate(changed);
+        assert.notEqual(particleEmitSemanticDigest(changed), expected);
+    }
+});
+
+const PARTICLE_EMIT_DX11_EFFECT =
+    process.env.CJS_PARTICLE_EMIT_DX11_EFFECT || "";
+const PARTICLE_EMIT_DX12_EFFECT =
+    process.env.CJS_PARTICLE_EMIT_DX12_EFFECT || "";
+const HAS_GENUINE_PARTICLE_EMIT_FIXTURES =
+    Boolean(PARTICLE_EMIT_DX11_EFFECT && PARTICLE_EMIT_DX12_EFFECT);
+
+function particleEmitShaderBytes(effectPath)
+{
+    const effectBytes = new Uint8Array(readFileSync(effectPath));
+    const analysis = readEffectAnalysis(effectBytes, { source: effectPath });
+    for (const technique of analysis.effectDescription.techniques || [])
+    {
+        for (const pass of technique.passes || [])
+        {
+            for (const stage of pass.stageInputs.filter(Boolean))
+            {
+                if (stage.m_exists
+                    && stage.cjsShaderBytecode?.stageName === "compute")
+                {
+                    return Uint8Array.from(stage.cjsShaderBytecode.bytes);
+                }
+            }
+        }
+    }
+    throw new Error("Genuine particle-emitter effect has no compute shader");
+}
+
+test("genuine SM5.0 particle emit lowers with guarded signed atomic and complete records", {
+    skip: !HAS_GENUINE_PARTICLE_EMIT_FIXTURES
+}, () =>
+{
+    const bytes = particleEmitShaderBytes(PARTICLE_EMIT_DX11_EFFECT);
+    const ir = CjsFormatWebgpu.buildShaderIr(bytes, {
+        source: "genuine-particle-emit-sm50"
+    });
+    assert.equal(isParticleEmitComputeCandidate(ir), true);
+    const result = CjsFormatWebgpu.buildWgsl(ir);
+    assert.deepEqual(
+        result.threadGroupSize,
+        [ 16, 16, 1 ]
+    );
+    assert.match(result.code, /var<workgroup> g0: array<u32, 28>;/u);
+    assert.match(result.code, /array<vec4<f32>, 4096>/u);
+    assert.match(result.code, /array<atomic<i32>>/u);
+    assert.match(
+        result.code,
+        /bitcast<u32>\(atomicAdd\(&u1\[0u\], -1i\)\)/u
+    );
+    assert.match(
+        result.code,
+        /bitcast<i32>\(r7\.y\) >= bitcast<i32>\(0x00000000u\)/u
+    );
+    assert.equal(
+        result.code.match(/workgroupBarrier\(\);/gu)?.length,
+        1
+    );
+    assert.equal(
+        result.code.match(/cb3\[min\(cb_row_\d+, 4095u\)\]/gu)?.length,
+        7
+    );
+    assert.match(
+        result.code,
+        /select\(vec4<f32>\(\), cb3\[min\(cb_row_1, 4095u\)\], cb_row_1 < 4096u\)/u
+    );
+    assert.match(
+        result.code,
+        /r7\.y = select\(0u, u2\[dead_safe_index\], r7\.y < dead_length\);/u
+    );
+    assert.match(
+        result.code,
+        /if \(r7\.y < \(arrayLength\(&u0\) \/ 8u\)\)/u
+    );
+    assert.equal(
+        result.code.match(/u0\[\(record_word_base \+ [0-7]u\)\] = r[89]\.[xyzw];/gu)
+            ?.length,
+        8
+    );
+    assert.ok(
+        result.code.indexOf("workgroupBarrier();")
+            < result.code.indexOf("atomicAdd(&u1[0u], -1i)")
+    );
+    assert.ok(
+        result.code.indexOf("atomicAdd(&u1[0u], -1i)")
+            < result.code.indexOf("if (r7.y < (arrayLength(&u0) / 8u))")
+    );
+});
+
+test("genuine SM5.1 particle emit is exact comparison-only and fails closed", {
+    skip: !HAS_GENUINE_PARTICLE_EMIT_FIXTURES
+}, () =>
+{
+    const bytes = particleEmitShaderBytes(PARTICLE_EMIT_DX12_EFFECT);
+    const ir = CjsFormatWebgpu.buildShaderIr(bytes, {
+        source: "genuine-particle-emit-sm51"
+    });
+    assert.equal(isParticleEmitComputeCandidate(ir), true);
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(ir),
+        /particle emit SM5\.1 is comparison-only/u
+    );
+    const nearMiss = structuredClone(ir);
+    nearMiss.instructions[45].opcode = "180";
+    assert.equal(isParticleEmitComputeCandidate(nearMiss), false);
+    assert.throws(
+        () => CjsFormatWebgpu.buildWgsl(nearMiss),
+        /WGSL compute body slice currently supports only SM5\.0/u
+    );
+});
+
+test("genuine SM5.0 particle emit rejects all former canonicalization aliases", {
+    skip: !HAS_GENUINE_PARTICLE_EMIT_FIXTURES
+}, () =>
+{
+    const bytes = particleEmitShaderBytes(PARTICLE_EMIT_DX11_EFFECT);
+    const ir = CjsFormatWebgpu.buildShaderIr(bytes, {
+        source: "genuine-particle-emit-attacks"
+    });
+    const baseline = particleEmitSemanticDigest(ir);
+    const operand = (program) => program.instructions[1].operands[1];
+    const mutations = [
+        (program) => { program.instructions[45].opcode = "180"; },
+        (program) =>
+        {
+            program.instructions[45].operands[3]
+                .immediateValues[0].uint32 = -1;
+        },
+        (program) =>
+        {
+            program.instructions[45].operands[3]
+                .immediateValues[0].uint32 = 0x100000000;
+        },
+        (program) => { program.instructions[1].saturate = 0; },
+        (program) => { operand(program).nonUniform = 0; },
+        (program) => { operand(program).mask = "y"; },
+        (program) => { operand(program).swizzle = "x"; },
+        (program) => { operand(program).selected = "x"; },
+        (program) => { operand(program).indices[0].relative = false; },
+        (program) => { delete operand(program).indices[0].relative; },
+        (program) => { program.instructions[1].extensions = false; },
+        (program) => { program.instructions[1].extensions = null; },
+        (program) => { program.instructions[1].extensions = undefined; },
+        (program) => { delete program.signatures.patch; },
+        (program) => { program.signatures.patch = undefined; },
+        (program) => { program.immediateConstantBuffer = false; },
+        (program) => { program.constTables = false; },
+        (program) => { program.extraSemanticField = undefined; },
+        (program) => { operand(program).extra = undefined; },
+        (program) => { operand(program).toJSON = () => ({}); },
+        (program) =>
+        {
+            const value = operand(program);
+            delete value.mask;
+            Object.setPrototypeOf(value, { mask: "x" });
+        },
+        (program) =>
+        {
+            Object.defineProperty(
+                program.instructions[45].operands[3].immediateValues[0],
+                "uint32",
+                { get: () => 0xffffffff, enumerable: true }
+            );
+        },
+        (program) => { delete program.declarations[1]; },
+        (program) => { delete program.instructions[1]; }
+    ];
+    for (const mutate of mutations)
+    {
+        const changed = structuredClone(ir);
+        mutate(changed);
+        assert.notEqual(particleEmitSemanticDigest(changed), baseline);
+        assert.equal(isParticleEmitComputeCandidate(changed), false);
+        assert.throws(
+            () => lowerParticleEmitComputeProgram(changed),
+            /particle emit requires the exact declaration family/u
+        );
+        assert.throws(
+            () => CjsFormatWebgpu.buildWgsl(changed),
+            /WGSL/u
+        );
+    }
+});
+
+test("particle emit CPU oracles cover TGSM, signed pop, OOB loads, and record stores", () =>
+{
+    const rowValue = (row, lane) => ((row << 4) | lane) >>> 0;
+    const initialize = (groupId) =>
+    {
+        const words = new Array(28).fill(0xdecafbad);
+        const base = Math.imul(groupId >>> 0, 7) >>> 0;
+        let word = 0;
+        for (let offset = 1; offset <= 7; offset += 1)
+        {
+            const row = (base + offset) >>> 0;
+            const width = offset === 7 ? 1 : 4;
+            for (let lane = 0; lane < width; lane += 1)
+            {
+                words[word] = row < 4096 ? rowValue(row, lane) : 0;
+                word += 1;
+            }
+        }
+        return words;
+    };
+    for (const groupId of [ 0, 1, 584, 585, 0xffffffff ])
+    {
+        const words = initialize(groupId);
+        assert.equal(words.length, 28);
+        assert.deepEqual(words.slice(25), new Array(3).fill(0xdecafbad));
+        assert.ok(words.slice(0, 25).every((word) =>
+            Number.isInteger(word) && word >= 0 && word <= 0xffffffff));
+    }
+    assert.ok(initialize(584).slice(0, 25).some((word) => word !== 0));
+    assert.ok(initialize(585).slice(0, 25).every((word) => word === 0));
+
+    const pop = (counter) =>
+    {
+        const old = counter | 0;
+        const next = (old - 1) | 0;
+        return { stored: next, old, deadIndex: next, success: next >= 0 };
+    };
+    assert.deepEqual(pop(2), {
+        stored: 1, old: 2, deadIndex: 1, success: true
+    });
+    assert.deepEqual(pop(1), {
+        stored: 0, old: 1, deadIndex: 0, success: true
+    });
+    assert.deepEqual(pop(0), {
+        stored: -1, old: 0, deadIndex: -1, success: false
+    });
+    assert.equal(pop(-0x80000000).stored, 0x7fffffff);
+    assert.equal(pop(-0x80000000).success, true);
+
+    const deadLoad = (values, index) =>
+        index >= 0 && index < values.length ? values[index] : 0;
+    assert.equal(deadLoad([ 9, 7 ], 0), 9);
+    assert.equal(deadLoad([ 9, 7 ], 2), 0);
+    assert.equal(deadLoad([], 0), 0);
+
+    const storeRecord = (wordLength, recordIndex) =>
+    {
+        const words = new Array(wordLength).fill(0);
+        if (recordIndex < Math.floor(wordLength / 8))
+        {
+            for (let lane = 0; lane < 8; lane += 1)
+            {
+                words[recordIndex * 8 + lane] = lane + 1;
+            }
+        }
+        return words;
+    };
+    for (let wordLength = 0; wordLength <= 65; wordLength += 1)
+    {
+        for (let record = 0; record < 10; record += 1)
+        {
+            const words = storeRecord(wordLength, record);
+            const changed = words
+                .map((value, index) => value ? index : -1)
+                .filter((index) => index >= 0);
+            const admitted = record < Math.floor(wordLength / 8);
+            assert.equal(changed.length, admitted ? 8 : 0);
+            if (admitted)
+            {
+                assert.deepEqual(
+                    changed,
+                    Array.from(
+                        { length: 8 },
+                        (_, lane) => record * 8 + lane)
+                );
+            }
+        }
+    }
+
+    for (const limit of [ 0, 1, 255, 256, 257, 4095, 65535 ])
+    {
+        const visits = [];
+        for (let lane = 0; lane < 256; lane += 1)
+        {
+            for (let index = lane; index < limit; index += 256)
+            {
+                visits.push(index);
+            }
+        }
+        visits.sort((left, right) => left - right);
+        assert.deepEqual(
+            visits,
+            Array.from({ length: limit }, (_, index) => index)
         );
     }
 });

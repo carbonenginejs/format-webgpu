@@ -2,6 +2,9 @@ import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import {
     particleClearSignedAtomicLayoutPolicy
 } from "./lowerParticleClearComputePrograms.js";
+import {
+    particleEmitSignedAtomicLayoutPolicy
+} from "./lowerParticleEmitComputeProgram.js";
 
 const KIND_ORDER = Object.freeze({
     "uniform-buffer": 0,
@@ -99,7 +102,7 @@ export function buildWgslBindingPlan(programs, options = {})
         const layoutPolicy = particleClearSignedAtomicLayoutPolicy(
             program,
             options.effectProfileProof ?? null
-        );
+        ) ?? particleEmitSignedAtomicLayoutPolicy(program);
         for (const binding of lowerBindingLayout(program, null, layoutPolicy))
         {
             const key = identity(binding);

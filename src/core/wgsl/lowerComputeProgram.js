@@ -24,6 +24,10 @@ import {
     lowerParticleClearResetComputeProgram
 } from "./lowerParticleClearComputePrograms.js";
 import {
+    isParticleEmitComputeCandidate,
+    lowerParticleEmitComputeProgram
+} from "./lowerParticleEmitComputeProgram.js";
+import {
     isSortStepComputeProfile,
     lowerSortStepComputeProgram
 } from "./lowerSortStepComputeProgram.js";
@@ -1088,6 +1092,10 @@ export function lowerComputeProgram(program, options = {})
     if (isParticleClearInitializeCandidate(program))
     {
         return lowerParticleClearInitializeComputeProgram(program, options);
+    }
+    if (isParticleEmitComputeCandidate(program))
+    {
+        return lowerParticleEmitComputeProgram(program, options);
     }
     if (isCreateHistogramsComputeProfile(program))
     {
