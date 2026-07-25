@@ -5,6 +5,11 @@ import { buildWgslBindingPlan } from "./wgsl/buildWgslBindingPlan.js";
 import { buildWgsl } from "./wgsl/emitWgsl.js";
 import { buildWgslSet } from "./wgsl/buildWgslSet.js";
 import {
+    isParticleClearEffectCandidate,
+    particleClearEffectProofFor,
+    preflightParticleClearEffectProfile
+} from "./wgsl/lowerParticleClearComputePrograms.js";
+import {
     buildWgslSelectionMetadata,
     selectEffectStages,
     validateResolvedPermutation
@@ -36,21 +41,42 @@ export function buildEffectPackage(input, options = {})
     });
     const bytecodeByKey = collectStageBytecode(resolved.effectDescription);
     const selectedStages = selectEffectStages(analysis.stages, selection);
-    const irEntries = selectedStages.map((stage) =>
+    const programsByKey = new Map();
+    const programForKey = (key) =>
     {
-        const bytecode = bytecodeByKey.get(stage.key);
+        if (programsByKey.has(key)) return programsByKey.get(key);
+        const bytecode = bytecodeByKey.get(key);
 
         if (!bytecode?.length)
         {
-            throw new Error(`${stage.key} has no shader bytecode`);
+            throw new Error(`${key} has no shader bytecode`);
         }
-
-        return {
-            key: stage.key,
-            passKey: `${stage.techniqueName}.pass${stage.passIndex}`,
-            ir: lowerDxbcToIr(bytecode, { source: `${source}#${stage.key}` })
-        };
-    });
+        const program = lowerDxbcToIr(
+            bytecode,
+            { source: `${source}#${key}` }
+        );
+        programsByKey.set(key, program);
+        return program;
+    };
+    let effectProfileContext = null;
+    if (isParticleClearEffectCandidate(resolved.effectDescription))
+    {
+        programForKey("Main.pass0.compute");
+        programForKey("Main.pass1.compute");
+        effectProfileContext = preflightParticleClearEffectProfile(
+            resolved.effectDescription,
+            programsByKey
+        );
+    }
+    const irEntries = selectedStages.map((stage) => ({
+        key: stage.key,
+        passKey: `${stage.techniqueName}.pass${stage.passIndex}`,
+        ir: programForKey(stage.key),
+        effectProfileProof: particleClearEffectProofFor(
+            effectProfileContext,
+            stage.key
+        )
+    }));
     const programsByPass = new Map();
 
     for (const entry of irEntries)
@@ -60,16 +86,32 @@ export function buildEffectPackage(input, options = {})
             programsByPass.set(entry.passKey, []);
         }
 
-        programsByPass.get(entry.passKey).push(entry.ir);
+        programsByPass.get(entry.passKey).push(entry);
     }
 
-    const plans = new Map(Array.from(programsByPass, ([ key, programs ]) => [
-        key,
-        buildWgslBindingPlan(programs, options.bindingPolicy ?? {})
-    ]));
+    const plans = new Map(Array.from(programsByPass, ([ key, entries ]) =>
+    {
+        const proof = entries.find((entry) => entry.effectProfileProof)
+            ?.effectProfileProof ?? null;
+        return [
+            key,
+            buildWgslBindingPlan(
+                entries.map((entry) => entry.ir),
+                {
+                    ...(options.bindingPolicy ?? {}),
+                    ...(proof ? { effectProfileProof: proof } : {})
+                }
+            )
+        ];
+    }));
     const shaderEntries = irEntries.map((entry) => ({
         key: entry.key,
-        shader: buildWgsl(entry.ir, { bindingPlan: plans.get(entry.passKey) })
+        shader: buildWgsl(entry.ir, {
+            bindingPlan: plans.get(entry.passKey),
+            ...(entry.effectProfileProof
+                ? { effectProfileProof: entry.effectProfileProof }
+                : {})
+        })
     }));
     const wgsl = buildWgslSet(shaderEntries);
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);

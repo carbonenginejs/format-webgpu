@@ -1,4 +1,7 @@
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
+import {
+    particleClearSignedAtomicLayoutPolicy
+} from "./lowerParticleClearComputePrograms.js";
 
 const KIND_ORDER = Object.freeze({
     "uniform-buffer": 0,
@@ -54,6 +57,7 @@ function deepFreeze(value)
  * @param {object} [options] Explicit pass-level identity policy.
  * @param {string[]} [options.sharedIdentities] D3D identities confirmed by
  * pass metadata/CjsLibrary to represent one resource across stages.
+ * @param {object|null} [options.effectProfileProof] Opaque exact-effect proof.
  * @returns {object} Frozen pass-global binding plan.
  */
 export function buildWgslBindingPlan(programs, options = {})
@@ -92,7 +96,11 @@ export function buildWgslBindingPlan(programs, options = {})
             throw new Error(`BuildWgslBindingPlan contains multiple ${stage} programs for one pass`);
         }
         programStages.add(stage);
-        for (const binding of lowerBindingLayout(program))
+        const layoutPolicy = particleClearSignedAtomicLayoutPolicy(
+            program,
+            options.effectProfileProof ?? null
+        );
+        for (const binding of lowerBindingLayout(program, null, layoutPolicy))
         {
             const key = identity(binding);
             const entry = portableBinding(binding);

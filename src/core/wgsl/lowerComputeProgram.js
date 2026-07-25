@@ -1,13 +1,40 @@
 import { requireRefactoringAllowed } from "./precisionControls.js";
+import {
+    validateExactComputeEnvelope,
+    validateReturnTypeMirror,
+    validateSm50ResourceExtensions
+} from "./validateExactComputeIr.js";
 import { validateFixedHandleBinding, validateFixedHandleOperand } from "./validateHandleOperand.js";
 import {
     isSkinVerticesComputeProfile,
     lowerSkinVerticesComputeProgram
 } from "./lowerSkinVerticesComputeProgram.js";
 import {
+    isCreateHistogramsComputeProfile,
+    lowerCreateHistogramsComputeProgram
+} from "./lowerCreateHistogramsComputeProgram.js";
+import {
+    isMergeHistogramsComputeProfile,
+    lowerMergeHistogramsComputeProgram
+} from "./lowerMergeHistogramsComputeProgram.js";
+import {
+    isParticleClearInitializeCandidate,
+    isParticleClearResetCandidate,
+    lowerParticleClearInitializeComputeProgram,
+    lowerParticleClearResetComputeProgram
+} from "./lowerParticleClearComputePrograms.js";
+import {
     isSortStepComputeProfile,
     lowerSortStepComputeProgram
 } from "./lowerSortStepComputeProgram.js";
+import {
+    isSortComputeProfile,
+    lowerSortComputeProgram
+} from "./lowerSortComputeProgram.js";
+import {
+    isSortInnerComputeProfile,
+    lowerSortInnerComputeProgram
+} from "./lowerSortInnerComputeProgram.js";
 
 const COMPONENTS = Object.freeze([ "x", "y", "z", "w" ]);
 const DECLARATION_OPCODES = Object.freeze([
@@ -520,6 +547,12 @@ function validateBindingDeclaration(program, binding, opcodeName, operandType, r
     const declaration = declarations[0];
     const data = declaration.data;
     const operand = declaration.operands?.[0];
+    validateReturnTypeMirror(
+        binding.returnType,
+        `WGSL compute binding ${binding.id}`);
+    validateReturnTypeMirror(
+        data?.returnType,
+        `WGSL compute declaration at DXBC offset ${declaration.dxbcOffset}`);
     validateBindingRange(binding);
     if (binding.operandType !== operandType
         || binding.resourceDimension !== "buffer"
@@ -774,17 +807,12 @@ function validateInstructionEnvelope(instruction)
 function validateLoadExtensions(instruction)
 {
     const extensions = instruction.extensions || [];
-    const dimension = extensions.filter((entry) => entry.typeName === "resource_dimension");
-    const returns = extensions.filter((entry) => entry.typeName === "resource_return_type");
-    if (extensions.length !== 2
-        || dimension.length !== 1 || returns.length !== 1
-        || dimension[0].resourceDimensionName !== "buffer"
-        || dimension[0].structureStride !== 0
-        || returns[0].resourceReturnTypes?.length !== 4
-        || returns[0].resourceReturnTypes.some((entry) => entry !== 3))
-    {
-        throw new Error(`WGSL compute load instruction ${instruction.index} requires exact typed sint-buffer extensions`);
-    }
+    validateSm50ResourceExtensions(extensions, {
+        resourceDimension: 1,
+        resourceDimensionName: "buffer",
+        structureStride: 0,
+        resourceReturnTypes: [ 3, 3, 3, 3 ]
+    }, `WGSL compute load instruction ${instruction.index}`);
 }
 
 function validateNullHighDestination(instruction)
@@ -1052,6 +1080,31 @@ function lowerScalarWordComputeProgram(program, options = {})
  */
 export function lowerComputeProgram(program, options = {})
 {
+    validateExactComputeEnvelope(program, "WGSL compute");
+    if (isParticleClearResetCandidate(program))
+    {
+        return lowerParticleClearResetComputeProgram(program, options);
+    }
+    if (isParticleClearInitializeCandidate(program))
+    {
+        return lowerParticleClearInitializeComputeProgram(program, options);
+    }
+    if (isCreateHistogramsComputeProfile(program))
+    {
+        return lowerCreateHistogramsComputeProgram(program, options);
+    }
+    if (isMergeHistogramsComputeProfile(program))
+    {
+        return lowerMergeHistogramsComputeProgram(program, options);
+    }
+    if (isSortComputeProfile(program))
+    {
+        return lowerSortComputeProgram(program, options);
+    }
+    if (isSortInnerComputeProfile(program))
+    {
+        return lowerSortInnerComputeProgram(program, options);
+    }
     if (isSortStepComputeProfile(program))
     {
         return lowerSortStepComputeProgram(program, options);

@@ -330,11 +330,15 @@ with the signed-zero, subnormal, and non-finite caveats above. The same
 signed-zero and non-finite caveats apply to the supported `div` opcode in both
 stages.
 
-*Confirmed against vkd3d-shader:* `spirv_compiler_emit_rcp` (spirv.c) emits
-`SpvOpFDiv` with a `1.0` numerator, the same ordinary floating division used
-here. Its `tests/hlsl/rcp.shader_test` also records the D3D results for positive
-and negative zero and infinity; those expectations identify the non-finite
-WGSL limitation above rather than requiring a different finite-input lowering.
+*Confirmed against vkd3d-shader within the finite-normal scope above:* its
+IR applies float source modifiers before `rcp` and destination saturation
+afterward, while its SPIR-V backend emits floating division with a `1.0`
+numerator using the active destination-mask/source-swizzle lanes. Scalar
+immediates replicate across active lanes. Its tests also record D3D's
+sign-sensitive zero/infinity results. This confirmation does not widen the
+portable WGSL claim: signed zero, subnormal, infinity, NaN, overflow, and a
+subnormal reciprocal retain the caveats above, and the GLSL/MSL backends do
+not independently corroborate `rcp`.
 
 ### Vertex-stage texture sampling → explicit LOD/gradient only
 
@@ -359,13 +363,15 @@ typed stores because WGSL requires every access to an atomic-typed element to
 use an atomic builtin. The engine must bind either form as storage containing
 raw 4-byte u32 words (`minBindingSize: 4`); unlike typed SRV buffers, this is
 one scalar word per element. No DXGI view-format conversion is reproduced.
-*Checked against vkd3d-shader:* `spirv_compiler_emit_atomic_instruction`
-(spirv.c) emits the corresponding SPIR-V atomic through a directly computed
-buffer/image pointer with no explicit bounds branch. Any out-of-bounds behavior
-is therefore delegated to the Vulkan robustness features available at runtime;
-that path does not itself confirm D3D's exact drop result. This compiler
-implements the D3D result independently with an explicit statement-level
-guard.
+*Confirmed against vkd3d-shader for operation shape and the
+robustness-dependent OOB mechanism:* its backend emits the corresponding
+atomic through a directly computed buffer/image pointer and inserts no
+explicit bounds guard. A zero/drop result therefore depends on the applicable
+target and runtime robustness guarantees; vkd3d-shader alone does not prove
+that result for every target. This compiler independently implements D3D's
+dropped-write result for the supported non-result atomic with an explicit
+statement-level guard. A future result-returning OOB atomic must additionally
+synthesize a zero old-value result.
 
 ### Bounded 1×1×1 compute programs → native WebGPU compute pipelines
 
@@ -493,6 +499,134 @@ failed to 508 / 29 / 0: only `particles/gpu/sortstep` became qualified, and
 direct byte comparison confirmed all 507 previously qualified packages
 remained identical.
 
+### Bounded 256×1×1 shared-memory particle bitonic merge
+
+An isolated SM5.0/finite-SM5.1 profile covers
+`particles/gpu/sortinner`. Both forms declare a typed uint Buffer `t0`, a
+non-coherent structured UAV `u0` with an 8-byte stride, flattened and vector
+local-thread identifiers, `workgroup_id.x`, three temporary registers,
+structured thread-group memory `g0` with 512 8-byte records, and
+`dcl_thread_group 256,1,1`. The flattened local identifier and
+`input_thread_id_in_group.x` both map to `local_invocation_id.x` because the
+admitted group shape is exactly 256×1×1.
+
+The exact 61-opcode body has eight no-else selections and one uniform
+nine-iteration loop. Its two `sync` instructions must carry exactly
+`threads_in_group | thread_group_shared_memory`; the second executes once per
+loop iteration, so each invocation dynamically reaches ten workgroup
+barriers. The profile replays CFG, SSA, and scalar types, requires the exact
+loop-carried signed stride merge and both integer `NEG` source modifiers, and
+rejects declaration or executable tail words. A dedicated uniform WGSL
+`stride` variable and immutable loop-exit condition avoid carrying the earlier
+varying `r0.w` value into barrier control flow.
+
+`g0` lowers to `var<workgroup> g0: array<u32, 1024>`, exactly 4 KiB. `t0`
+and `u0` reuse the scalar-word and complete two-word-record contracts proven
+for SetSortArgs and SortStep. External structured loads return a complete zero
+record when physically out of range, and external stores drop the complete
+record. The logical active count is not clamped to the physical `u0` length:
+an out-of-range zero record can participate in the network and move into a
+physically present slot, so pre-clamping would change defined robust-buffer
+behavior.
+
+The loop is a nine-stage compare/exchange (bitonic-merge) network, not a
+standalone general sort of arbitrary input. For each stride it partitions the
+512 workgroup records into disjoint pairs, compares the f32 key in word one,
+and swaps both words when the high key is less than the low key. NaN therefore
+keeps the source's false comparison result. The surrounding particle-sort
+schedule supplies the bitonic input relationship; replacing this body with a
+library sort would implement a stronger and different operation.
+
+Shared-memory initialization has an explicit runtime orchestration premise.
+SetSortArgs must complete first, the same `SortParameters` buffer range must be
+usable as storage and indirect-dispatch data, its first three words must
+dispatch exactly `D = ceil(max(N, 1) / 512)` groups, and SortInner must read
+the fourth word, `t0[3]`, as the same `N`. A valid D3D/WebGPU x-dispatch
+dimension has `D <= 65535`, hence `N <= 33,553,920 < 2^31`; for every
+dispatched group and every logical record below the clamped remainder, the
+source's signed outer guard then proves that record was initialized before the
+network reads it.
+The current WebGPU runtime prepares compute pipelines but does not dispatch
+them, so same-buffer usage, ordering, and indirect dispatch remain integration
+obligations rather than locally enforced runtime facts. Outside this premise
+the original DXBC can read uninitialized thread-group memory (for example,
+`N = 0x80000000`, group 1), and this profile makes no equivalence claim for
+that source-undefined path.
+
+The native browser gate validates one shared-memory module and both paired
+compute pipelines with zero WGSL warnings. The full corpus transition moved
+from 508 qualified / 29 unsupported / 0 failed to 509 / 28 / 0: only
+`particles/gpu/sortinner` became qualified, and the hardened direct-byte
+comparison confirmed all 508 previously qualified package outputs remained
+identical.
+
+### Exact 256×1×1 shared-memory particle chunk sort
+
+An isolated SM5.0/finite-SM5.1 profile covers the full per-workgroup particle
+sort that precedes the later merge passes. It has the same typed uint Buffer
+`t0`, non-coherent stride-8 structured UAV `u0`, three thread identifiers,
+512 two-word `g0` records, and 256×1×1 group shape as SortInner, but requires
+exactly four temporary registers and its own exact 69-opcode body. Routing
+checks this longer family before SortInner; near siblings still fail closed.
+Declaration tails, body tails, operand selectors, the three integer `NEG`
+sites, load extensions, synchronization flags, finite SM5.1 ranges and
+references, CFG, SSA, scalar types, and both loop-carried merges are all
+replayed or compared before emission.
+
+The source begins with a storage-data-dependent `if (N == 0) return`
+immediately before group barriers, which WGSL uniformity analysis cannot prove
+uniform. That return is observably redundant: when `N` is zero the clamped
+logical count is zero, so no external load, shared-memory read, or external
+store executes. The profile validates but omits that three-opcode selection.
+Every invocation can therefore reach the barriers uniformly with the same
+result as the source's all-invocation return.
+
+The two source loops are emitted with dedicated uniform state:
+`merge_width`, `merge_done`, `half_width`, `stride`, and `stride_done`.
+`merge_width` visits powers of two from 2 through 512; for each width, `stride`
+visits descending powers of two from half the width through 1. This produces
+45 compare/exchange stages. The two static `sync` sites require exactly
+`threads_in_group | thread_group_shared_memory`: one follows initialization
+and the other executes after every stage, for 46 dynamic barriers in a
+complete invocation, including the normalized zero-count case.
+
+For each stage, every local lane selects one disjoint pair. The first stride
+of a merge width mirrors the high index; later strides use the ordinary merge
+partner. Both words move together, and the second word is bitcast to f32 for
+the `<` comparison. Finite keys are consequently sorted ascending within each
+logical chunk of at most 512 records. Equal keys and signed zero preserve the
+source's false comparison result, as does any comparison involving NaN; no
+stronger total ordering is introduced.
+
+`g0` remains the exact 4 KiB `array<u32, 1024>`. The signed difference between
+`N` and the wrapping `workgroup_id.x * 512` base is clamped to `[0, 512]`.
+Every shared record below that count is initialized before the first barrier,
+and the guarded high member of every admitted pair implies that both pair
+members are below the count. All physical shared indices remain in
+`[0, 511]`, and each stage's pairs are disjoint. Shared-memory safety therefore
+does not depend on a dispatch premise.
+
+External accesses retain D3D robust-buffer behavior independently. `t0[3]`
+returns zero when absent. A structured `u0` load returns one complete zero
+record when either physical word is absent, while a structured store writes
+both words only when the complete record exists. The logical count is not
+clamped to physical `u0` length, because a robust zero record is allowed to
+participate in the sort and move into a present slot.
+
+Runtime orchestration is still responsible for the intended global result:
+the producer must publish the same `N` in `t0[3]`, and the application must
+dispatch the chunk groups that cover that logical range before scheduling
+the subsequent merge profiles. This is a result-coverage obligation, not a
+shared-memory-safety precondition of this profile.
+
+The native browser gate validates the shared-memory module and both paired
+compute pipelines with zero WGSL warnings.
+
+The full corpus transition moved from 509 qualified / 28 unsupported / 0
+failed to 510 / 27 / 0: only `particles/gpu/sort` became qualified. The
+hardened direct-byte comparator cached and compared all 509 previously
+qualified package outputs, with zero byte changes and zero regressions.
+
 ### `float_16` minimum precision → full-precision f32
 
 D3D minimum precision is a floor, not a format: an implementation that computes
@@ -510,6 +644,220 @@ promotion. I/O-signature precision is a separate field. This compiler ignores
 it and emits the signature's base 32-bit component type, so valid 10/16-bit
 float or integer minima are conformingly widened; reserved or unknown
 signature-precision values are not yet rejected.
+
+### Exact 256×1×1 atomic histogram merge
+
+An isolated SM5.0/finite-SM5.1 profile covers
+`postprocess/mergehistograms`. Both forms declare immediate one-row `cb0`,
+typed uint Buffer `t0`, a non-coherent typed uint UAV `u0`,
+`input_thread_id_in_group.x`, `input_thread_id.x`, four temporary registers,
+64 stride-4 thread-group records in `g0`, and
+`dcl_thread_group 256,1,1`. The SM5.1 declarations and body references must
+use canonical finite singleton range-zero metadata. The exact 35-opcode body,
+operand selectors and immediates, SM5.0 typed-load extensions, both barrier
+payloads, CFG, SSA, scalar types, and the loop-carried bin index are replayed
+or compared before emission. Selection occurs before the generic compute
+lowerer, so malformed near siblings fail closed.
+
+`g0` lowers to
+`var<workgroup> g0: array<atomic<u32>, 64>`. Local lanes 0 through 63
+atomically initialize one bin each, all 256 invocations execute an
+unconditional `workgroupBarrier`, active global invocations accumulate 16
+`uint4` input records with four `atomicAdd` operations per loop iteration,
+and every invocation executes the second unconditional barrier. Local lanes
+0 through 63 then atomically add the shared totals to `u0`. The source
+barriers must carry exactly
+`threads_in_group | thread_group_shared_memory`; moving either barrier under
+one of the surrounding varying conditions is rejected.
+
+The typed Buffer is represented as `var<storage, read> t0: array<u32>`.
+The source record address is preserved as the wrapping sequence
+`(global_invocation_id.x << 6) >> 2`, and each logical `uint4` load is admitted
+only when all four physical words exist. A missing or partial record therefore
+produces four zero lanes, matching typed-buffer OOB load semantics without an
+eager WGSL access outside the scalar backing array. The typed UAV is
+`var<storage, read_write> u0: array<atomic<u32>>`; its final atomic executes
+only when the local bin index is below `arrayLength(&u0)`, so an OOB source
+atomic is dropped.
+
+The intended histogram result has explicit runtime premises. `cb0.x` and
+`cb0.y` must be finite non-negative integer-valued f32 dimensions representable
+as u32, because the profile's `ftou` adaptation claims equivalence only on
+that domain. Their low-u32 product is the active global-invocation count.
+Dispatch must cover that count, `t0` must provide the intended 64 bins for
+each active invocation, and `u0` must provide at least 64 elements (normally
+initialized to zero for a fresh result). The explicit robust guards remain
+memory-safe outside the physical `t0`/`u0` size premises, but undersized
+bindings intentionally produce the source's zero-load/drop-atomic behavior
+rather than the complete intended histogram.
+
+The substantive DX11 and DX12 shader pair passes the real comparison matrix
+and emits byte-identical WGSL after finite-range normalization. The native
+browser gate validates both paired compute pipelines with zero WGSL warnings.
+
+The full corpus transition moved from 510 qualified / 27 unsupported / 0
+failed to 511 / 26 / 0: only `postprocess/mergehistograms` became qualified.
+The hardened direct-byte comparator cached and compared all 510 previously
+qualified package outputs, with zero byte changes and zero regressions.
+
+### Exact 16×16×1 atomic histogram creation
+
+An isolated dual-validator profile covers `postprocess/createhistograms`.
+Both backends declare immediate one-row `cb0`, float `texture2d` `t0`, a
+non-coherent typed uint Buffer UAV `u0`, two-component workgroup, local, and
+global invocation identifiers, 64 stride-4 thread-group records in `g0`, and
+`dcl_thread_group 16,16,1`. The SM5.0 form has three temporary registers and
+converts `cb0.z` inside its final selection. The finite-range SM5.1 form has
+four temps and hoists that conversion ahead of the first selection. Each
+literal 49-instruction schedule has its own exact opcode, operand, modifier,
+extension, range/reference, CFG, SSA, and type validator; both feed one
+canonical emitter only after validation.
+
+Canonical emission hoists the pure uniform `ftou(cb0.z)` conversion. This is
+equivalent on the admitted runtime domain: `ScreenTilesX` must be finite,
+non-negative, integer-valued, and representable as u32. The conversion has no
+side effect, changes no branch or barrier participation, and its value is used
+only by the final output address. Evaluating it for all 256 lanes instead of
+the 16 output lanes is therefore unobservable on that domain. NaN and
+out-of-range conversion remain outside this claim.
+
+The entry point preserves the ordered source identities as
+`workgroup_id`, `local_invocation_id`, and `global_invocation_id`.
+`g0` is `var<workgroup> array<atomic<u32>, 64>`. The first 64 flattened
+local lanes initialize it with `atomicStore`, all lanes execute the first
+unconditional `workgroupBarrier`, and in-range pixels atomically increment one
+bin. All lanes then execute the second unconditional barrier before the first
+16 lanes atomically load four bins each. Both source barriers must carry
+exactly `threads_in_group | thread_group_shared_memory`; moved, conditional,
+or differently flagged barriers fail closed.
+
+Mip-zero `resinfo_uint` becomes `textureDimensions(t0, 0)`. The explicit
+global-coordinate test surrounds the source pixel path, while the load itself
+retains the texture contract's safe coordinate and zero-result selection so
+no eager out-of-range `textureLoad` can be formed. The RGB transfer curve,
+luminance dot product, base-two logarithms/exponent, natural-log conversion,
+and source `div_sat` remain in their original f32 order and bit-exact
+constants. The resulting signed bin is additionally guarded by
+`0 <= bin && bin < 64` before `atomicAdd`. That guard is redundant for the
+admitted finite path but contains WGSL memory access on adapted numeric edges;
+D3D otherwise makes all TGSM undefined for an out-of-range shared atomic.
+
+Each workgroup emits 16 typed `uint4` records. The wrapping address is
+`((workgroup_id.y * ScreenTilesX + workgroup_id.x) << 4) + local_index`.
+The atomic-word `u0` representation tests the complete typed element against
+`arrayLength(&u0) / 4` before issuing all four `atomicStore` calls. An
+out-of-range or physically partial element therefore writes nothing, never a
+partial record. This is the exact 64-bin layout consumed by
+`postprocess/mergehistograms`.
+
+The intended numeric result additionally requires finite `MinLuminance` and
+`MaxLuminance`, `MaxLuminance > MinLuminance`, and finite intermediate
+normalization arithmetic. In particular, every executed pixel path admitted
+by this claim must produce a finite positive `luminance`, a finite
+`log_luminance`, and a finite `normalized_luminance` before the multiply and
+`ftoi`; the value presented to `ftoi` is consequently in `[0, 64]` and within
+the i32 conversion range. This explicitly excludes zero/negative luminance,
+NaN, infinity, and any overflow or invalid intermediate from the equivalence
+claim. Ordinary finite `_sat` maps exactly to WGSL
+`clamp(..., 0.0, 1.0)`; D3D's special NaN-to-zero saturation result remains
+the existing documented non-finite adaptation.
+
+For every non-empty dispatch, `ScreenTilesX` must equal the dispatched
+x workgroup count as well as being the output row stride, and the y workgroup
+count must cover the intended source texture rows. The equality prevents an
+x workgroup beyond the declared row width from aliasing a later row's output
+records; a dispatch/stride mismatch and its resulting output collision are
+outside the equivalence claim. `u0` must contain the intended complete output
+records. Physical texture and UAV undersizing remains memory-safe through the
+explicit guards, but cannot produce the complete intended histogram.
+
+The substantive DX11 and DX12 pair passes the real comparison matrix and
+emits byte-identical WGSL after schedule and finite-range normalization. The
+native browser gate validates the shared module and both paired compute
+pipelines with zero WGSL warnings.
+
+The full corpus transition moved from 511 qualified / 26 unsupported / 0
+failed to 512 / 25 / 0: only `postprocess/createhistograms` became qualified.
+The hardened direct-byte comparator confirmed all 511 common previously
+qualified package outputs remained byte-identical.
+
+### Exact two-pass particle clear with effect-proven signed counter
+
+An effect-level profile covers `managed/space/specialfx/particles/gpu/clear`.
+It requires exactly `Main.pass0.compute` and `Main.pass1.compute`, each as the
+only active stage in its pass. Reflection must identify pass 0 `u0` and pass 1
+`u1` as the same one-element `ParticleCounters` UAV with Carbon type 10,
+alongside pass 1 stride-4 `DeadBuffer` `u0` and stride-32 `ParticleBuffer`
+`u2`. Both companion IR programs are validated before an opaque,
+program-identity-bound proof is minted. A standalone pass-0 shader can never
+select this profile: its signed typed-store declaration alone does not prove
+the bound view is `R32_SINT`, and a missing, forged, or differently decoded
+program proof fails closed. Selecting only pass 0 for package output remains
+safe because preflight still examines the complete resolved effect.
+
+Pass 0 has exact SM5.0 and finite-range SM5.1 validators for its signed typed
+`u0`, `1x1x1` group, and two-instruction body. Under the effect proof it emits
+`array<atomic<i32>>` with a four-byte minimum binding and
+`atomicStore(&u0[0u], 0i)`. The same opaque policy gates binding-plan
+construction and final lowering, so signed typed UAV layout is not admitted
+as a general store feature.
+
+Pass 1 independently proves the signed 32-bit view through its exact returned
+`imm_atomic_iadd` on signed typed `u1[0]`. Its separate SM5.0 and finite-range
+SM5.1 validators require the literal 26-opcode schedule, immediate `cb3`,
+three UAV identities and strides, scalar flattened local index, two temps,
+`16x16x1` group, both structured loops, lane-zero tail selection, operand
+selectors and immediates, ranges/references, CFG, SSA, scalar types, and the
+two loop-carried merges. `cb3[0].x` is read as raw bits with `bitcast<u32>`.
+The complete-block index stays source-shaped as
+`insertBits(local_invocation_index, block_index, 8u, 24u)`.
+
+Together the 256 lanes visit every index in `[0, count)` exactly once: all
+complete 256-record blocks run in the first loop, then lane zero visits the
+remainder. Each visit first attempts both source-ordered `ParticleBuffer`
+stores under a complete stride-32 record guard, then executes
+`atomicAdd(&u1[0u], 1i)`, bitcasts the returned old signed value to the
+dead-list `u32` index, and independently guards the stride-4 `DeadBuffer`
+store. A short particle buffer therefore does not suppress the counter
+increment or dead-list attempt, and a short dead-list buffer drops only its
+own store. No barrier is introduced.
+
+The intended dispatch uses one `1x1x1` pass-0 workgroup, requires its reset to
+complete and become visible before pass 1, then uses exactly one `16x16x1`
+pass-1 workgroup with no concurrent counter users and at least `count`
+complete records in both structured buffers. Extra pass-0 workgroups only
+repeat the same zero store, but extra pass-1 workgroups repeat the entire
+traversal and append duplicates. External consumers must wait for pass 1 to
+complete. Practical counts must also fit the application's watchdog budget.
+Explicit store guards remain memory-safe for undersized buffers, but the final
+counter still reaches `count`, matching the source's per-operation
+dropped-write behavior rather than claiming a complete result.
+
+The substantive DX11 and DX12 effect pair passes the real effect-level matrix:
+both passes are ready and emit byte-identical WGSL after range normalization.
+The intentionally standalone matrix view keeps pass 0 unsupported while pass
+1 is independently emitted. The engine's fail-closed matrix validator
+reconciles the exact two-pass body, stage digests, occurrence counts, per-key
+coverage, reset WGSL, and signed atomic layout before admitting that contextual
+pass. Its required native WebGPU gate compiled one unique independently
+emitted module and prepared four compute pipelines for the paired backends
+with zero WGSL warnings.
+
+The full corpus transition moved from 512 qualified / 25 unsupported / 0
+failed to 513 / 24 / 0: only
+`managed/space/specialfx/particles/gpu/clear` became qualified. The hardened
+direct-byte comparator confirmed all 512 common previously qualified package
+outputs remained byte-identical, with zero regressions.
+
+### Fail-closed intentional nontermination: `system/crash`
+
+`system/crash` is not a bounded compute candidate. Without the required
+sentinel its loop deliberately traverses all `2^32` indices and never
+terminates; adding an iteration cap would change observable semantics.
+Multiple workgroups also race rather than preserving the intended
+exactly-one-group behavior. Because the package proves neither the sentinel
+nor the exact-one-group runtime contract, the shader remains permanently
+fail-closed.
 
 ### Resource handles → fixed, unmodified identities
 
@@ -628,7 +976,9 @@ sample form and in both stages.
   `textureDimensions` result. `_rcpFloat` reciprocates only dimensions, never
   the mip count; its specified infinity for zero dimensions shares the
   non-finite WGSL limitation documented for `rcp` above. Unknown return-type
-  encodings and the invalid saturate modifier fail closed. D3D's zero result
+  encodings fail closed. Ordinary float saturation is valid in D3D but
+  currently unsupported here; saturation on the uint return mode is invalid
+  because saturation requires a floating-point destination. D3D's zero result
   for an unbound resource is outside
   this shader mapping: WebGPU requires every declared binding, and the engine
   rejects a missing caller resource. A fallback texture cannot reproduce the
@@ -638,11 +988,13 @@ sample form and in both stages.
   Widen per dimension when a shader needs it.
   *Confirmed against vkd3d-shader:* `spirv_compiler_emit_resinfo` (spirv.c)
   emits image-size and mip-level-count queries, pads missing dimension
-  components with zero, and converts the uint vector to float for the ordinary
-  float form. It explicitly rejects `VKD3DSI_RESINFO_RCP_FLOAT`; that form here
-  follows the D3D contract independently. vkd3d also issues the size query
-  directly, so our explicit clamped-query/zero-select is the WGSL-specific
-  guard needed to preserve D3D's defined out-of-range result.
+  components with zero, applies the resource swizzle, and converts the uint
+  vector to float for the ordinary float form. It also accepts ordinary float
+  saturation after forming that result. It explicitly rejects
+  `VKD3DSI_RESINFO_RCP_FLOAT`; that form here follows the D3D contract
+  independently. vkd3d also issues the size query directly, so our explicit
+  clamped-query/zero-select is the WGSL-specific guard needed to preserve
+  D3D's defined out-of-range result.
 - **`ld`** — 2D textures (fragment only; original address lanes xy=texel and
   w=mip, packed into a three-lane u32 WGSL address) and typed buffers (both
   stages; scalar u32 element index).
@@ -661,15 +1013,16 @@ sample form and in both stages.
   is outside `arrayLength / stride`. Offset-plus-swizzle accesses beyond the
   declared stride fail closed, so D3D's undefined byte-offset-overrun case is
   never emitted.
-  *Checked against vkd3d-shader:* `spirv_compiler_emit_ld` loads texture
-  coordinates from the resource-dimensional coordinate mask, takes LOD
-  separately from source lane w, and emits `OpImageFetch` directly, while
-  raw/structured buffer loads use direct image reads or storage-buffer access
-  chains. There is no compiler-inserted bounds guard; any out-of-bounds
-  behavior is delegated to the Vulkan robustness features available at
-  runtime, which does not itself confirm D3D's exact zero result. The explicit
-  WGSL clamps and selects above implement that D3D result independently,
-  without relying on an implementation-chosen invalid-access outcome.
+  *Confirmed against vkd3d-shader for address formation and the
+  robustness-dependent OOB mechanism:* its texture `ld` takes coordinates from
+  the resource-dimensional coordinate mask and LOD separately from source lane
+  `w`; texture and raw/structured buffer loads then use direct backend accesses
+  with no compiler-inserted bounds guard. A zero result therefore depends on
+  the applicable target and runtime robustness guarantees (buffer robustness
+  must not be generalized to every image access), and vkd3d-shader alone does
+  not prove exact zero on every target. The explicit WGSL clamps and logical
+  in-range selects above independently implement D3D's zero result without
+  executing an invalid logical access.
 - **`f16tof32`/`f32tof16`** — per-lane `unpack2x16float`/`pack2x16float`.
   `f16tof32` is exact for finite normal inputs, but WGSL may flush binary16
   subnormals and ignore zero sign. `f32tof16` keeps only the low 16 result bits

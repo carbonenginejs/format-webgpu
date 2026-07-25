@@ -5,6 +5,7 @@ import { resolveRegisterFlow } from "../ir/resolveRegisterFlow.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed } from "./precisionControls.js";
 import { buildSelectionPlans } from "./selectionPlans.js";
+import { validateSm50ResourceExtensions } from "./validateExactComputeIr.js";
 
 const COMPONENTS = Object.freeze([ "x", "y", "z", "w" ]);
 const DECLARATION_OPCODES = Object.freeze([
@@ -441,23 +442,21 @@ function validExtensions(program, instruction)
     if (program.shaderModel.minor === 1) return extensions.length === 0;
     if (instruction.opcodeName === "ld")
     {
-        return extensions.length === 2
-            && extensions[0]?.typeName === "resource_dimension"
-            && extensions[0].resourceDimensionName === "buffer"
-            && extensions[0].structureStride === 0
-            && extensions[1]?.typeName === "resource_return_type"
-            && extensions[1].resourceReturnTypes?.length === 4
-            && extensions[1].resourceReturnTypes.every((entry) => entry === 4);
+        return validateSm50ResourceExtensions(extensions, {
+            resourceDimension: 1,
+            resourceDimensionName: "buffer",
+            structureStride: 0,
+            resourceReturnTypes: [ 4, 4, 4, 4 ]
+        }, `WGSL sort-step instruction ${instruction.index}`);
     }
     if (instruction.opcodeName === "ld_structured")
     {
-        return extensions.length === 2
-            && extensions[0]?.typeName === "resource_dimension"
-            && extensions[0].resourceDimensionName === "structured_buffer"
-            && extensions[0].structureStride === 8
-            && extensions[1]?.typeName === "resource_return_type"
-            && extensions[1].resourceReturnTypes?.length === 4
-            && extensions[1].resourceReturnTypes.every((entry) => entry === 6);
+        return validateSm50ResourceExtensions(extensions, {
+            resourceDimension: 12,
+            resourceDimensionName: "structured_buffer",
+            structureStride: 8,
+            resourceReturnTypes: [ 6, 6, 6, 6 ]
+        }, `WGSL sort-step instruction ${instruction.index}`);
     }
     return extensions.length === 0;
 }

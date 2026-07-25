@@ -4,6 +4,35 @@ import { lowerFragmentProgram } from "./lowerFragmentProgram.js";
 import { lowerVertexProgram } from "./lowerVertexProgram.js";
 
 const COMPONENTS = [ "x", "y", "z", "w" ];
+const SAFE_WORKGROUP_IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]*$/u;
+const WORKGROUP_ELEMENT_BYTES = 4;
+const MAX_WORKGROUP_VARIABLE_BYTES = 16 * 1024;
+const WGSL_RESERVED_IDENTIFIERS = new Set([
+    "NULL", "Self", "abstract", "active", "alias", "alignas", "alignof", "array", "as",
+    "asm", "asm_fragment", "async", "atomic", "attribute", "auto", "await", "become",
+    "binding_array", "bool", "break", "case", "cast", "catch", "class", "co_await",
+    "co_return", "co_yield", "coherent", "column_major", "common", "compile",
+    "compile_fragment", "concept", "const", "const_assert", "const_cast", "consteval",
+    "constexpr", "constinit", "continue", "continuing", "crate", "debug", "debugger",
+    "decltype", "default", "delete", "demote", "demote_to_helper", "diagnostic", "discard",
+    "do", "dynamic_cast", "else", "enable", "enum", "explicit", "export", "extends",
+    "extern", "external", "f16", "f32", "fallthrough", "false", "filter", "final",
+    "finally", "fn", "for", "friend", "from", "fxgroup", "get", "goto", "groupshared",
+    "highp", "i32", "if", "impl", "implements", "import", "inline", "instanceof",
+    "interface", "layout", "let", "loop", "lowp", "macro", "macro_rules", "match",
+    "mediump", "meta", "mod", "module", "move", "mut", "mutable", "namespace", "new",
+    "nil", "noexcept", "noinline", "nointerpolation", "noperspective", "null", "nullptr",
+    "of", "operator", "override", "package", "packoffset", "partition", "pass", "patch",
+    "pixelfragment", "precise", "precision", "premerge", "priv", "protected", "ptr",
+    "pub", "public", "readonly", "ref", "regardless", "register", "reinterpret_cast",
+    "require", "requires", "resource", "restrict", "return", "sampler",
+    "sampler_comparison", "self", "set", "shared", "sizeof", "smooth", "snorm", "static",
+    "static_assert", "static_cast", "std", "struct", "subroutine", "super", "switch",
+    "target", "template", "this", "thread_local", "throw", "trait", "true", "try", "type",
+    "typedef", "typeid", "typename", "typeof", "u32", "union", "unless", "unorm", "unsafe",
+    "unsized", "use", "using", "var", "varying", "vec2", "vec3", "vec4", "virtual",
+    "volatile", "wgsl", "where", "while", "with", "writeonly", "yield"
+]);
 
 function attribute(field, invariantPosition = false)
 {
@@ -119,13 +148,139 @@ export function computeEntryPointParameters(program)
     {
         return "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
     }
+    if (signature === "local_invocation_id:local_invocation_id:vec3<u32>")
+    {
+        return "@builtin(local_invocation_id) local_invocation_id: vec3<u32>";
+    }
+    if (signature === "local_invocation_index:local_invocation_index:u32")
+    {
+        return "@builtin(local_invocation_index) local_invocation_index: u32";
+    }
+    if (signature === "local_invocation_id:local_invocation_id:vec3<u32>|"
+        + "global_invocation_id:dispatch_thread_id:vec3<u32>")
+    {
+        return "@builtin(local_invocation_id) local_invocation_id: vec3<u32>, "
+            + "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
+    }
     if (signature === "workgroup_id:workgroup_id:vec3<u32>|"
         + "local_invocation_id:local_invocation_id:vec3<u32>")
     {
         return "@builtin(workgroup_id) workgroup_id: vec3<u32>, "
             + "@builtin(local_invocation_id) local_invocation_id: vec3<u32>";
     }
+    if (signature === "workgroup_id:workgroup_id:vec3<u32>|"
+        + "local_invocation_id:local_invocation_id:vec3<u32>|"
+        + "global_invocation_id:dispatch_thread_id:vec3<u32>")
+    {
+        return "@builtin(workgroup_id) workgroup_id: vec3<u32>, "
+            + "@builtin(local_invocation_id) local_invocation_id: vec3<u32>, "
+            + "@builtin(global_invocation_id) dispatch_thread_id: vec3<u32>";
+    }
     throw new Error("WGSL compute builtinInputs contains an unsupported ordered schema");
+}
+
+function collectStatementNames(statements, names)
+{
+    for (const statement of statements || [])
+    {
+        if (typeof statement?.name === "string") names.add(statement.name);
+        if (Array.isArray(statement?.statements)) collectStatementNames(statement.statements, names);
+        if (Array.isArray(statement?.elseStatements)) collectStatementNames(statement.elseStatements, names);
+        if (Array.isArray(statement?.continuing)) collectStatementNames(statement.continuing, names);
+        for (const clause of statement?.clauses || [])
+        {
+            collectStatementNames(clause.statements, names);
+        }
+    }
+}
+
+/**
+ * Validates and formats the closed module-scope workgroup-variable schema.
+ * The 16 KiB cap is deliberately the WebGPU baseline workgroup-storage limit,
+ * applied cumulatively so admitted modules remain portable without querying
+ * device-specific limits.
+ *
+ * @param {object} program Typed shader program.
+ * @returns {string[]} Canonical WGSL workgroup variable declarations.
+ */
+export function computeWorkgroupVariableDeclarations(program)
+{
+    const variables = program?.workgroupVariables;
+    if (variables === undefined) return [];
+    if (program?.stage !== "compute")
+    {
+        throw new Error("WGSL workgroupVariables metadata is compute-only");
+    }
+    if (!Array.isArray(variables) || variables.length === 0)
+    {
+        throw new Error("WGSL compute workgroupVariables must be a non-empty array");
+    }
+
+    const occupied = new Set();
+    if (typeof program.entryPoint === "string") occupied.add(program.entryPoint);
+    for (const input of program.builtinInputs || [])
+    {
+        if (typeof input?.name === "string") occupied.add(input.name);
+    }
+    for (const binding of program.bindings || [])
+    {
+        if (typeof binding?.generatedSymbol === "string") occupied.add(binding.generatedSymbol);
+    }
+    if (program.immediateConstantBuffer?.length) occupied.add("icb");
+    for (const table of program.constTables || [])
+    {
+        if (typeof table?.symbol === "string") occupied.add(table.symbol);
+    }
+    collectStatementNames(program.statements, occupied);
+
+    const names = new Set();
+    const declarations = [];
+    let footprint = 0;
+    for (const variable of variables)
+    {
+        if (!variable || typeof variable !== "object" || Array.isArray(variable))
+        {
+            throw new Error("WGSL compute workgroup variable must be an object");
+        }
+        const keys = Object.keys(variable).sort();
+        if (keys.length !== 3
+            || keys[0] !== "elementCount" || keys[1] !== "elementType" || keys[2] !== "name")
+        {
+            throw new Error("WGSL compute workgroup variable contains unsupported metadata");
+        }
+        const { name, elementType, elementCount } = variable;
+        if (typeof name !== "string"
+            || !SAFE_WORKGROUP_IDENTIFIER.test(name)
+            || name.includes("__")
+            || WGSL_RESERVED_IDENTIFIERS.has(name))
+        {
+            throw new Error(`WGSL compute workgroup variable has unsafe name ${JSON.stringify(name)}`);
+        }
+        if (elementType !== "u32" && elementType !== "atomic<u32>")
+        {
+            throw new Error(`WGSL compute workgroup variable ${name} has unsupported element type`);
+        }
+        if (!Number.isSafeInteger(elementCount) || elementCount < 1)
+        {
+            throw new Error(`WGSL compute workgroup variable ${name} requires a positive safe-integer elementCount`);
+        }
+        if (names.has(name))
+        {
+            throw new Error(`WGSL compute workgroup variable duplicates ${name}`);
+        }
+        if (occupied.has(name))
+        {
+            throw new Error(`WGSL compute workgroup variable ${name} collides with another shader symbol`);
+        }
+        footprint += elementCount * WORKGROUP_ELEMENT_BYTES;
+        if (footprint > MAX_WORKGROUP_VARIABLE_BYTES)
+        {
+            throw new Error("WGSL compute workgroupVariables exceed the conservative 16 KiB footprint");
+        }
+        names.add(name);
+        declarations.push(`var<workgroup> ${name}: array<${elementType}, ${elementCount}>;`);
+    }
+    return declarations;
 }
 
 /**
@@ -172,6 +327,8 @@ export function buildWgsl(input, options = {})
     if (!compute) emitStruct(lines, `${prefix}Output`, interfaceOutputs, program.stage === "vertex");
     if (program.immediateConstantBuffer?.length) emitImmediateConstantBuffer(lines, program.immediateConstantBuffer);
     if (program.constTables?.length) emitConstTables(lines, program.constTables);
+    const workgroupDeclarations = computeWorkgroupVariableDeclarations(program);
+    if (workgroupDeclarations.length) lines.push(...workgroupDeclarations, "");
     for (const binding of program.bindings || [])
     {
         lines.push(`@group(${binding.group}) @binding(${binding.binding}) ${binding.declaration} ${binding.generatedSymbol}: ${binding.type};`);

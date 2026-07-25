@@ -5,6 +5,7 @@ import { resolveRegisterFlow } from "../ir/resolveRegisterFlow.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
 import { requireRefactoringAllowed } from "./precisionControls.js";
 import { buildSelectionPlans } from "./selectionPlans.js";
+import { validateSm50ResourceExtensions } from "./validateExactComputeIr.js";
 
 const COMPONENTS = Object.freeze([ "x", "y", "z", "w" ]);
 const DECLARATION_OPCODES = Object.freeze([
@@ -766,13 +767,12 @@ function validateBody(program)
         const resourceIndex = instruction.operands?.[3]?.registerIndex;
         const expectedStride = resourceIndex === 0 ? 48 : resourceIndex === 1 ? 4 : null;
         const hasValidExtensions = instruction.opcodeName === "ld_structured"
-            ? extensions.length === 2
-                && extensions[0]?.typeName === "resource_dimension"
-                && extensions[0].resourceDimensionName === "structured_buffer"
-                && extensions[0].structureStride === expectedStride
-                && extensions[1]?.typeName === "resource_return_type"
-                && extensions[1].resourceReturnTypes?.length === 4
-                && extensions[1].resourceReturnTypes.every((type) => type === 6)
+            ? validateSm50ResourceExtensions(extensions, {
+                resourceDimension: 12,
+                resourceDimensionName: "structured_buffer",
+                structureStride: expectedStride,
+                resourceReturnTypes: [ 6, 6, 6, 6 ]
+            }, `WGSL structured skinning instruction ${index}`)
             : extensions.length === 0;
         if (instruction.index !== index
             || (index > 0 && instruction.dxbcOffset <= program.instructions[index - 1].dxbcOffset)

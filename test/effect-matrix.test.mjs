@@ -8,6 +8,7 @@ import {
     validateEffectPermutationAxes
 } from "../scripts/effectMatrixHelpers.js";
 import {
+    buildEffectPassVariantSeed,
     classifyEffectPassTopology,
     serializeIndependentShader
 } from "../scripts/effectMatrixQualification.js";
@@ -70,6 +71,23 @@ test("effect matrix retains independent compute thread-group metadata", () =>
         entryPoint: "main",
         code: "@vertex fn main() {}"
     });
+});
+
+test("effect matrix pass cache separates companion-authorized particle reset", () =>
+{
+    const stages = [ { stageName: "compute", digest: "same-reset-bytes" } ];
+    const standalone = buildEffectPassVariantSeed(
+        "Main.pass0",
+        stages
+    );
+    const authorized = buildEffectPassVariantSeed(
+        "Main.pass0",
+        stages,
+        "particle-clear-r32sint-v1"
+    );
+    assert.notEqual(standalone, authorized);
+    assert.match(standalone, /effectContext:none$/u);
+    assert.match(authorized, /effectContext:particle-clear-r32sint-v1$/u);
 });
 
 test("effect matrix rejects axes that cannot map names and values uniquely", () =>

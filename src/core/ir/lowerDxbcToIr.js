@@ -358,8 +358,21 @@ function buildInstruction(instruction, index)
         ...(instruction.opcodeName === "resinfo"
             ? { resinfoReturnTypeName: instruction.resinfoReturnTypeName || "float" }
             : {}),
+        ...(instruction.opcodeName === "sync"
+            ? {
+                syncFlags: Number.isInteger(instruction.syncFlags)
+                    ? instruction.syncFlags
+                    : null,
+                syncFlagNames: Array.isArray(instruction.syncFlagNames)
+                    ? clonePlain(instruction.syncFlagNames)
+                    : null
+            }
+            : {}),
         ...(instruction.extensions?.length
             ? { extensions: clonePlain(instruction.extensions) }
+            : {}),
+        ...(instruction.tailTokens?.length
+            ? { tailTokens: clonePlain(instruction.tailTokens) }
             : {}),
         operands: clonePlain(instruction.operands || [])
     };
@@ -561,7 +574,10 @@ export function lowerDxbcToIr(input, options = {})
             dxbcOffset: instruction.offset,
             opcodeName: instruction.opcodeName,
             data: clonePlain(instruction.declaration),
-            operands: clonePlain(instruction.operands || [])
+            operands: clonePlain(instruction.operands || []),
+            ...(instruction.tailTokens?.length
+                ? { tailTokens: clonePlain(instruction.tailTokens) }
+                : {})
         })),
         bindings: declarationInstructions.map(buildBinding).filter(Boolean),
         immediateConstantBuffer,

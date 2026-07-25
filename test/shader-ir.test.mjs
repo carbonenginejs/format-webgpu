@@ -82,6 +82,72 @@ test("BuildShaderIr preserves SM5.1 binding ranges and resource references", () 
     assert.deepEqual(ir.blocks.map((block) => block.instructionIndices), [ [ 0, 1 ] ]);
 });
 
+test("BuildShaderIr preserves compute shared-memory declarations and sync controls", () =>
+{
+    const marker = 0xdecafbad;
+    const executableMarker = 0xabad1dea;
+    const ir = CjsFormatWebgpu.buildShaderIr({
+        program: {
+            programType: 5,
+            programTypeName: "compute",
+            majorVersion: 5,
+            minorVersion: 1
+        },
+        instructions: [ {
+            offset: 2,
+            opcode: 160,
+            opcodeName: "dcl_thread_group_shared_memory_structured",
+            isDeclaration: true,
+            declaration: {
+                registerIndex: 0,
+                structureStride: 4,
+                structureCount: 64
+            },
+            operands: [ {
+                type: 31,
+                typeName: "thread_group_shared_memory",
+                componentCount: 0,
+                indices: [ {
+                    representation: 0,
+                    values: [ 0 ],
+                    relative: null
+                } ]
+            } ],
+            tailTokens: [ marker ]
+        }, {
+            offset: 8,
+            opcode: 190,
+            opcodeName: "sync",
+            isDeclaration: false,
+            syncFlags: 3,
+            syncFlagNames: [ "threads_in_group", "thread_group_shared_memory" ],
+            operands: [],
+            tailTokens: [ executableMarker ]
+        }, {
+            offset: 9,
+            opcode: 62,
+            opcodeName: "ret",
+            isDeclaration: false,
+            operands: []
+        } ]
+    }, { source: "synthetic-cs51-shared" });
+
+    assert.deepEqual(ir.declarations[0].data, {
+        registerIndex: 0,
+        structureStride: 4,
+        structureCount: 64
+    });
+    assert.equal(ir.declarations[0].operands[0].typeName, "thread_group_shared_memory");
+    assert.deepEqual(ir.declarations[0].tailTokens, [ marker ]);
+    assert.equal(ir.instructions[0].opcodeName, "sync");
+    assert.equal(ir.instructions[0].syncFlags, 3);
+    assert.deepEqual(ir.instructions[0].syncFlagNames, [
+        "threads_in_group",
+        "thread_group_shared_memory"
+    ]);
+    assert.deepEqual(ir.instructions[0].tailTokens, [ executableMarker ]);
+});
+
 test("BuildShaderIr partitions structured control boundaries deterministically", () =>
 {
     const names = [ "if", "mov", "else", "mov", "endif", "ret" ];

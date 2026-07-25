@@ -6,6 +6,12 @@ import CjsFormatHlsl from "../../format-hlsl/src/index.js";
 import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
 import CjsFormatWebgpu from "../src/index.js";
 import {
+    isParticleClearEffectCandidate,
+    particleClearEffectProofClass,
+    particleClearEffectProofFor,
+    preflightParticleClearEffectProfile
+} from "../src/core/wgsl/lowerParticleClearComputePrograms.js";
+import {
     enumerateEffectPermutations,
     inspectEffectOffsets,
     validateEffectPermutationAxes
@@ -140,7 +146,7 @@ export function classifyEffectPassTopology(stageNames)
     return null;
 }
 
-function qualifyPass(passKey, stages)
+function qualifyPass(passKey, stages, effectProfileProof = null)
 {
     const stageNames = stages.map((stage) => stage.stageName);
     if (!classifyEffectPassTopology(stageNames))
@@ -160,7 +166,10 @@ function qualifyPass(passKey, stages)
     let bindingPlan;
     try
     {
-        bindingPlan = CjsFormatWebgpu.buildWgslBindingPlan(stages.map((stage) => stage.qualification.ir));
+        bindingPlan = CjsFormatWebgpu.buildWgslBindingPlan(
+            stages.map((stage) => stage.qualification.ir),
+            effectProfileProof ? { effectProfileProof } : {}
+        );
     }
     catch (error)
     {
@@ -172,7 +181,10 @@ function qualifyPass(passKey, stages)
     {
         shaders = stages.map((stage) => ({
             key: `${passKey}.${stage.stageName}`,
-            shader: CjsFormatWebgpu.buildWgsl(stage.qualification.ir, { bindingPlan })
+            shader: CjsFormatWebgpu.buildWgsl(stage.qualification.ir, {
+                bindingPlan,
+                ...(effectProfileProof ? { effectProfileProof } : {})
+            })
         }));
     }
     catch (error)
@@ -192,6 +204,81 @@ function qualifyPass(passKey, stages)
     {
         return { status: "failed", phase: "wgsl-set", reason: errorMessage(error) };
     }
+}
+
+function cachedStageVariant(stageVariants, bytecode, source)
+{
+    const digest = hashBytes(bytecode);
+    if (!stageVariants.has(digest))
+    {
+        stageVariants.set(digest, {
+            digest,
+            keys: new Set(),
+            keyOccurrences: new Map(),
+            occurrences: 0,
+            qualification: qualifyStage(bytecode, source)
+        });
+    }
+    return stageVariants.get(digest);
+}
+
+function preflightEffectProfile(description, sourcePath, stageVariants)
+{
+    if (!isParticleClearEffectCandidate(description)) return null;
+    const programs = new Map();
+    for (const [ passIndex, key ] of [
+        [ 0, "Main.pass0.compute" ],
+        [ 1, "Main.pass1.compute" ]
+    ])
+    {
+        const stage = description.techniques[0].passes[passIndex]
+            .stageInputs.filter(Boolean)
+            .find((entry) =>
+                entry.m_exists
+                && entry.cjsShaderBytecode?.stageName === "compute");
+        const qualification = cachedStageVariant(
+            stageVariants,
+            stage.cjsShaderBytecode.bytes,
+            `${sourcePath}#${key}`
+        ).qualification;
+        if (qualification.frontEnd !== "qualified")
+        {
+            throw new Error(qualification.reason);
+        }
+        programs.set(key, qualification.ir);
+    }
+    return preflightParticleClearEffectProfile(description, programs);
+}
+
+/**
+ * Builds the pass cache seed. Effect proof class is semantic input because an
+ * otherwise identical pass-0 shader is unsupported outside its companion
+ * particle-clear effect.
+ *
+ * @param {string} passKey Canonical pass key.
+ * @param {object[]} stages Active stage/digest records.
+ * @param {string|null} [effectContextClass] Branded effect-proof cache class.
+ * @returns {string} Deterministic variant seed.
+ */
+export function buildEffectPassVariantSeed(
+    passKey,
+    stages,
+    effectContextClass = null
+)
+{
+    if (typeof passKey !== "string"
+        || !Array.isArray(stages)
+        || stages.some((stage) =>
+            typeof stage?.stageName !== "string"
+            || typeof stage?.digest !== "string")
+        || (effectContextClass !== null
+            && typeof effectContextClass !== "string"))
+    {
+        throw new TypeError("Effect matrix pass seed requires pass/stage/context strings");
+    }
+    return `${passKey}|${stages.map((stage) =>
+        `${stage.stageName}:${stage.digest}`).join("|")}`
+        + `|effectContext:${effectContextClass || "none"}`;
 }
 
 function stageSummary(variants)
@@ -352,6 +439,7 @@ function serializePassVariants(variants)
         occurrences: variant.occurrences,
         exampleBodyIndex: variant.exampleBodyIndex,
         exampleOptions: variant.exampleOptions,
+        effectContextClass: variant.effectContextClass || null,
         status: variant.result.status,
         phase: variant.result.phase,
         reason: variant.result.reason || null,
@@ -404,6 +492,19 @@ async function qualifyBackend(label, sourcePath)
         const topology = [];
         const bodyPasses = [];
         const bodyEmptyTechniques = [];
+        let effectProfileContext = null;
+        try
+        {
+            effectProfileContext = preflightEffectProfile(
+                description,
+                sourcePath,
+                stageVariants
+            );
+        }
+        catch
+        {
+            effectProfileContext = null;
+        }
         for (const technique of description?.techniques || [])
         {
             if (!Array.isArray(technique.passes) || !technique.passes.length)
@@ -431,17 +532,11 @@ async function qualifyBackend(label, sourcePath)
                         continue;
                     }
                     const digest = hashBytes(bytecode);
-                    if (!stageVariants.has(digest))
-                    {
-                        stageVariants.set(digest, {
-                            digest,
-                            keys: new Set(),
-                            keyOccurrences: new Map(),
-                            occurrences: 0,
-                            qualification: qualifyStage(bytecode, `${sourcePath}#${passKey}.${stageName}`)
-                        });
-                    }
-                    const variant = stageVariants.get(digest);
+                    const variant = cachedStageVariant(
+                        stageVariants,
+                        bytecode,
+                        `${sourcePath}#${passKey}.${stageName}`
+                    );
                     const stageKey = `${passKey}.${stageName}`;
                     variant.keys.add(stageKey);
                     increment(variant.keyOccurrences, stageKey);
@@ -449,7 +544,18 @@ async function qualifyBackend(label, sourcePath)
                     stages.push({ stageName, digest, qualification: variant.qualification });
                 }
                 topology.push(`${passKey}:${stages.map((stage) => stage.stageName).join("+")}`);
-                const variantSeed = `${passKey}|${stages.map((stage) => `${stage.stageName}:${stage.digest}`).join("|")}`;
+                const effectProfileProof = particleClearEffectProofFor(
+                    effectProfileContext,
+                    `${passKey}.compute`
+                );
+                const proofClass = effectProfileProof
+                    ? particleClearEffectProofClass(effectProfileContext)
+                    : null;
+                const variantSeed = buildEffectPassVariantSeed(
+                    passKey,
+                    stages,
+                    proofClass
+                );
                 const variantKey = variantSeed;
                 if (!passVariants.has(variantKey))
                 {
@@ -462,7 +568,12 @@ async function qualifyBackend(label, sourcePath)
                         occurrences: 0,
                         exampleBodyIndex: selection.bodyIndex,
                         exampleOptions: selection.options,
-                        result: qualifyPass(passKey, stages)
+                        effectContextClass: proofClass,
+                        result: qualifyPass(
+                            passKey,
+                            stages,
+                            effectProfileProof
+                        )
                     });
                 }
                 const passVariant = passVariants.get(variantKey);

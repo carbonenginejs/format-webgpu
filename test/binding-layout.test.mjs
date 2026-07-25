@@ -115,12 +115,18 @@ function computeTypedBuffers()
     const resource = declaration(3, "dcl_resource", "resource", {
         resourceDimensionName: "buffer",
         sampleCount: 0,
-        returnType: { returnTypeNames: [ "sint", "sint", "sint", "sint" ] }
+        returnType: {
+            returnTypes: [ 3, 3, 3, 3 ],
+            returnTypeNames: [ "sint", "sint", "sint", "sint" ]
+        }
     }, 0);
     const uav = declaration(7, "dcl_unordered_access_view_typed", "uav", {
         resourceDimensionName: "buffer",
         globallyCoherent: false,
-        returnType: { returnTypeNames: [ "uint", "uint", "uint", "uint" ] }
+        returnType: {
+            returnTypes: [ 4, 4, 4, 4 ],
+            returnTypeNames: [ "uint", "uint", "uint", "uint" ]
+        }
     }, 0);
     resource.operands = [ handle("resource") ];
     uav.operands = [ handle("uav") ];

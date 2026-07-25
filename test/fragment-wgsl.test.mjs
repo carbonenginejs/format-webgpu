@@ -1847,6 +1847,58 @@ test("fragment lowering emits resinfo and texel loads for 2d textures", () =>
     assert.match(shader.code, /&& all\(/u);
 });
 
+test("fragment resinfo emits ordinary float dimensions", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            { ...instruction(4, "resinfo", [
+                register("temp", 0, { mask: "xy" }),
+                immediate([ 0 ]),
+                register("resource", 0, { swizzle: "xyzw" })
+            ]), resinfoReturnTypeName: "float" },
+            instruction(8, "mov", [
+                register("output", 0, { mask: "xyzw" }),
+                register("temp", 0, { swizzle: "xyxy" })
+            ]),
+            instruction(12, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-float" });
+    assert.match(shader.code,
+        /vec2<f32>\(f32\(textureDimensions\(t0, 0\)\.x\), f32\(textureDimensions\(t0, 0\)\.y\)\)/u);
+});
+
+test("fragment resinfo applies the resource swizzle including w", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            { ...instruction(4, "resinfo", [
+                register("output", 0, { mask: "xyzw" }),
+                immediate([ 0 ]),
+                register("resource", 0, { swizzle: "wyyx" })
+            ]), resinfoReturnTypeName: "float" },
+            instruction(8, "ret", [])
+        ]
+    };
+    const shader = CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-swizzle-w" });
+    assert.match(shader.code,
+        /vec4<f32>\(f32\(textureNumLevels\(t0\)\), f32\(textureDimensions\(t0, 0\)\.y\), f32\(textureDimensions\(t0, 0\)\.y\), f32\(textureDimensions\(t0, 0\)\.x\)\)/u);
+});
+
 test("fragment resinfo guards out-of-range mips and keeps rcpfloat mip counts unchanged", () =>
 {
     const program = {
@@ -1931,9 +1983,59 @@ test("fragment resinfo rejects malformed mip operands and return types", () =>
     assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-return-type" }),
         /unsupported return type return_type_3/u);
 
-    program.instructions[2].resinfoReturnTypeName = "float";
-    program.instructions[2].saturate = true;
-    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-saturate" }),
+});
+
+test("fragment resinfo fails closed on currently unsupported ordinary float saturation", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                ...instruction(4, "resinfo", [
+                    register("output", 0, { mask: "xyzw" }),
+                    immediate([ 0 ]),
+                    register("resource", 0, { swizzle: "xyww" })
+                ]),
+                resinfoReturnTypeName: "float",
+                saturate: true
+            },
+            instruction(8, "ret", [])
+        ]
+    };
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-float-saturate" }),
+        /resinfo instruction \d+ cannot saturate/u);
+});
+
+test("fragment resinfo rejects invalid uint saturation", () =>
+{
+    const program = {
+        program: { programType: 0, programTypeName: "pixel", majorVersion: 5, minorVersion: 0 },
+        signatures: { input: [], output: [ signature("SV_Target", 0, 15) ] },
+        instructions: [
+            globalFlagsDeclaration(),
+            declaration(2, "dcl_resource", "resource", {
+                resourceDimensionName: "texture2d",
+                returnType: { returnTypeNames: [ "float", "float", "float", "float" ] }
+            }),
+            {
+                ...instruction(4, "resinfo", [
+                    register("output", 0, { mask: "xyzw" }),
+                    immediate([ 0 ]),
+                    register("resource", 0, { swizzle: "xyww" })
+                ]),
+                resinfoReturnTypeName: "uint",
+                saturate: true
+            },
+            instruction(8, "ret", [])
+        ]
+    };
+    assert.throws(() => CjsFormatWebgpu.buildWgsl(program, { source: "synthetic-resinfo-uint-saturate" }),
         /resinfo instruction \d+ cannot saturate/u);
 });
 

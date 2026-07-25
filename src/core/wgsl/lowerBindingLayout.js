@@ -194,7 +194,7 @@ function sampledResourceLayout(program, binding)
         : structuredBufferLayout(binding);
 }
 
-function uavBufferLayout(program, binding)
+function uavBufferLayout(program, binding, policy)
 {
     // Writable storage is admitted for fragment and compute shaders. Vertex
     // storage writes remain outside the current portability contract.
@@ -229,14 +229,22 @@ function uavBufferLayout(program, binding)
         };
     }
     const returns = binding.returnType?.returnTypeNames || [];
+    const identity = `storage-resource:${bindingSpace(binding)}:${bindingRegister(binding)}`;
+    const signedAtomic = policy.signedAtomicI32Identities.has(identity);
+    const scalar = signedAtomic ? "sint" : "uint";
     if (binding.resourceDimension !== "buffer"
-        || returns.length !== 4 || returns.some((entry) => entry !== "uint"))
+        || returns.length !== 4 || returns.some((entry) => entry !== scalar))
     {
-        throw new Error(`WGSL storage resource ${binding.id} shape is not supported; only typed uint buffer UAVs are supported`);
+        throw new Error(
+            `WGSL storage resource ${binding.id} shape is not supported; `
+            + (signedAtomic
+                ? "the exact profile requires a uniform sint typed buffer UAV"
+                : "only typed uint buffer UAVs are supported")
+        );
     }
     return {
         declaration: "var<storage, read_write>",
-        type: "array<atomic<u32>>",
+        type: `array<atomic<${signedAtomic ? "i32" : "u32"}>>`,
         buffer: {
             type: "storage",
             hasDynamicOffset: false,
@@ -260,7 +268,7 @@ function samplerLayout(program, binding)
     };
 }
 
-function lowerOne(program, binding, bindingIndex)
+function lowerOne(program, binding, bindingIndex, policy)
 {
     const registerIndex = bindingRegister(binding);
     const registerSpace = bindingSpace(binding);
@@ -277,7 +285,10 @@ function lowerOne(program, binding, bindingIndex)
     if (binding.resourceKind === "uniform-buffer") layout = uniformLayout(program, binding);
     else if (binding.resourceKind === "sampled-resource") layout = sampledResourceLayout(program, binding);
     else if (binding.resourceKind === "sampler") layout = samplerLayout(program, binding);
-    else if (binding.resourceKind === "storage-resource") layout = uavBufferLayout(program, binding);
+    else if (binding.resourceKind === "storage-resource")
+    {
+        layout = uavBufferLayout(program, binding, policy);
+    }
     else throw new Error(`WGSL binding ${binding.id} has unsupported kind ${binding.resourceKind}`);
     const identity = `${binding.resourceKind}:${registerSpace}:${registerIndex}`;
     const visibility = STAGE_VISIBILITY[program.stage];
@@ -396,6 +407,30 @@ function normalizeBindingPlan(plan, stage)
     };
 }
 
+function normalizeLayoutPolicy(value)
+{
+    if (value === undefined || value === null)
+    {
+        return { signedAtomicI32Identities: new Set() };
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).length !== 1
+        || !Array.isArray(value.signedAtomicI32Identities)
+        || value.signedAtomicI32Identities.some((identity) =>
+            typeof identity !== "string"
+            || !/^storage-resource:\d+:\d+$/u.test(identity))
+        || new Set(value.signedAtomicI32Identities).size
+            !== value.signedAtomicI32Identities.length)
+    {
+        throw new TypeError(
+            "WGSL binding layout profile policy must contain unique signedAtomicI32Identities"
+        );
+    }
+    return {
+        signedAtomicI32Identities: new Set(value.signedAtomicI32Identities)
+    };
+}
+
 /**
  * Converts D3D register declarations to one deterministic WebGPU bind group.
  * Register spaces participate in ordering and identity; SM 5.1 range ids are
@@ -403,14 +438,16 @@ function normalizeBindingPlan(plan, stage)
  *
  * @param {object} program Frozen CJS shader IR.
  * @param {object|null} [bindingPlan] Optional pass-global canonical binding plan.
+ * @param {object|null} [layoutPolicy] Exact-profile-only typed-layout policy.
  * @returns {object[]} Frozen WebGPU binding records.
  */
-export function lowerBindingLayout(program, bindingPlan = null)
+export function lowerBindingLayout(program, bindingPlan = null, layoutPolicy = null)
 {
     if (program?.format !== "CJS_SHADER_IR" || program.formatVersion !== 1)
     {
         throw new TypeError("WGSL binding lowering expects CJS_SHADER_IR version 1 input");
     }
+    const policy = normalizeLayoutPolicy(layoutPolicy);
     const planned = normalizeBindingPlan(bindingPlan, program.stage);
     const sorted = Array.from(program.bindings).sort((left, right) =>
         bindingSpace(left) - bindingSpace(right)
@@ -424,7 +461,8 @@ export function lowerBindingLayout(program, bindingPlan = null)
         if (identities.has(identity)) throw new Error(`WGSL binding layout contains duplicate ${identity}`);
         identities.add(identity);
     }
-    const lowered = sorted.map((binding, index) => lowerOne(program, binding, index));
+    const lowered = sorted.map((binding, index) =>
+        lowerOne(program, binding, index, policy));
     const symbols = new Map();
     for (const binding of lowered)
     {
