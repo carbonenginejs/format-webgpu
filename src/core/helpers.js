@@ -65,6 +65,13 @@ function cloneValues(values)
     };
 }
 
+/**
+ * Rejects class override keys outside a format reader's supported class set.
+ *
+ * @param {string[]} classKeys Supported class override keys.
+ * @param {string} key Candidate override key.
+ * @param {string} readerName Reader name used in diagnostics.
+ */
 export function validateClassKey(classKeys, key, readerName)
 {
     if (!classKeys.includes(key))
@@ -73,6 +80,14 @@ export function validateClassKey(classKeys, key, readerName)
     }
 }
 
+/**
+ * Validates one constructor supplied through a format reader class override.
+ *
+ * @param {string[]} classKeys Supported class override keys.
+ * @param {string} type Candidate override key.
+ * @param {Function} Class Candidate constructor.
+ * @param {string} readerName Reader name used in diagnostics.
+ */
 export function validateClass(classKeys, type, Class, readerName)
 {
     validateClassKey(classKeys, type, readerName);

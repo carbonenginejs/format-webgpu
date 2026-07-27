@@ -1,4 +1,5 @@
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
+import { normalizeResourceTransformPlan } from "./buildResourceTransformPlan.js";
 import {
     particleClearSignedAtomicLayoutPolicy
 } from "./lowerParticleClearComputePrograms.js";
@@ -32,6 +33,12 @@ function portableBinding(binding)
         registerSpace: binding.registerSpace,
         registerIndex: binding.registerIndex,
         type: binding.type,
+        ...(typeof binding.transformId === "string"
+            ? {
+                transformId: binding.transformId,
+                arrayLayerCount: binding.arrayLayerCount
+            }
+            : {}),
         ...(Number.isInteger(binding.structureStride) ? { structureStride: binding.structureStride } : {}),
         ...(binding.buffer ? { buffer: binding.buffer } : {}),
         ...(binding.texture ? { texture: binding.texture } : {}),
@@ -81,6 +88,9 @@ export function buildWgslBindingPlan(programs, options = {})
         throw new TypeError("BuildWgslBindingPlan sharedIdentities must contain unique D3D resource identities");
     }
     const sharedIdentities = new Set(requestedShared);
+    const resourceTransformPlan = normalizeResourceTransformPlan(
+        options.resourceTransformPlan
+    );
     const identities = new Map();
     const programStages = new Set();
     for (const [ index, program ] of programs.entries())
@@ -103,7 +113,12 @@ export function buildWgslBindingPlan(programs, options = {})
             program,
             options.effectProfileProof ?? null
         ) ?? particleEmitSignedAtomicLayoutPolicy(program);
-        for (const binding of lowerBindingLayout(program, null, layoutPolicy))
+        for (const binding of lowerBindingLayout(
+            program,
+            null,
+            layoutPolicy,
+            resourceTransformPlan
+        ))
         {
             const key = identity(binding);
             const entry = portableBinding(binding);
@@ -179,9 +194,12 @@ export function buildWgslBindingPlan(programs, options = {})
 
     return deepFreeze({
         format: "CJS_WGSL_BINDING_PLAN",
-        formatVersion: 2,
+        formatVersion: resourceTransformPlan ? 3 : 2,
         ...(sharedIdentities.size ? { sharedIdentities: Object.freeze([ ...sharedIdentities ].sort()) } : {}),
         ...(Object.keys(varyingInterpolation).length ? { varyingInterpolation } : {}),
+        ...(resourceTransformPlan
+            ? { resourceTransforms: resourceTransformPlan.resourceTransforms }
+            : {}),
         bindings: plannedBindings
     });
 }

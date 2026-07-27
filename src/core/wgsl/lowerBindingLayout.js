@@ -1,3 +1,5 @@
+import { normalizeResourceTransformPlan } from "./buildResourceTransformPlan.js";
+
 const KIND_ORDER = Object.freeze({
     "uniform-buffer": 0,
     "sampled-resource": 1,
@@ -29,7 +31,7 @@ function bindingSpace(binding)
 
 function bindingIdentity(binding)
 {
-    return `${binding.resourceKind}:${binding.registerSpace}:${binding.registerIndex}`;
+    return `${binding.resourceKind}:${bindingSpace(binding)}:${bindingRegister(binding)}`;
 }
 
 function validateScopeIdentity(identity, scopeIdentity, stages)
@@ -49,6 +51,8 @@ function bindingFingerprint(binding)
         registerSpace: binding.registerSpace,
         registerIndex: binding.registerIndex,
         type: binding.type,
+        transformId: binding.transformId ?? null,
+        arrayLayerCount: binding.arrayLayerCount ?? null,
         structureStride: binding.structureStride ?? null,
         buffer: binding.buffer || null,
         texture: binding.texture || null,
@@ -287,6 +291,12 @@ function lowerOne(program, binding, bindingIndex, policy)
         binding: bindingIndex,
         visibility,
         declarationOffset: binding.declarationOffset,
+        ...(typeof binding.transformId === "string"
+            ? {
+                transformId: binding.transformId,
+                arrayLayerCount: binding.arrayLayerCount
+            }
+            : {}),
         ...layout
     };
 }
@@ -302,10 +312,21 @@ function normalizeBindingPlan(plan, stage)
 {
     if (plan === null || plan === undefined) return null;
     if (plan?.format !== "CJS_WGSL_BINDING_PLAN"
-        || (plan.formatVersion !== 1 && plan.formatVersion !== 2)
+        || ![ 1, 2, 3 ].includes(plan.formatVersion)
         || !Array.isArray(plan.bindings))
     {
-        throw new TypeError("WGSL binding plan must be a CJS_WGSL_BINDING_PLAN version 1 or 2 document");
+        throw new TypeError("WGSL binding plan must be a CJS_WGSL_BINDING_PLAN version 1, 2, or 3 document");
+    }
+    const resourceTransformPlan = plan.resourceTransforms === undefined
+        ? null
+        : normalizeResourceTransformPlan({
+            format: "CJS_WGSL_RESOURCE_TRANSFORM_PLAN",
+            formatVersion: 1,
+            resourceTransforms: plan.resourceTransforms
+        });
+    if ((plan.formatVersion === 3) !== Boolean(resourceTransformPlan))
+    {
+        throw new Error("WGSL binding plan version 3 requires resource transforms, and earlier versions cannot contain them");
     }
     const visibility = STAGE_VISIBILITY[stage];
     if (!visibility) throw new Error(`WGSL binding plan cannot target unsupported stage ${stage || "unknown"}`);
@@ -353,7 +374,7 @@ function normalizeBindingPlan(plan, stage)
         {
             throw new Error(`WGSL shared identity ${identity} does not cover multiple stages`);
         }
-        else if (plan.formatVersion === 2 && scopeIdentity === identity)
+        else if (plan.formatVersion >= 2 && scopeIdentity === identity)
         {
             throw new Error(`WGSL binding plan uses unshared base identity ${identity}`);
         }
@@ -383,8 +404,61 @@ function normalizeBindingPlan(plan, stage)
     }
     return {
         bindings: identities.get(visibility),
-        exactStageCoverage: plan.formatVersion === 2
+        exactStageCoverage: plan.formatVersion >= 2,
+        resourceTransformPlan
     };
+}
+
+function transformBindings(bindings, plan, stage)
+{
+    if (!plan) return bindings;
+    const transforms = plan.resourceTransforms.filter((transform) =>
+        transform.stage === stage);
+    if (!transforms.length) return bindings;
+    const byIdentity = new Map(bindings.map((binding) => [ bindingIdentity(binding), binding ]));
+    const inputs = new Map();
+    for (const transform of transforms)
+    {
+        for (const input of transform.inputs)
+        {
+            if (inputs.has(input.identity))
+            {
+                throw new Error(`WGSL resource transforms overlap ${input.identity}`);
+            }
+            if (!byIdentity.has(input.identity))
+            {
+                throw new Error(`WGSL resource transform ${transform.id} references missing ${input.identity}`);
+            }
+            inputs.set(input.identity, { transform, input });
+        }
+    }
+    const output = [];
+    for (const binding of bindings)
+    {
+        const identity = bindingIdentity(binding);
+        const mapped = inputs.get(identity);
+        if (!mapped)
+        {
+            output.push(binding);
+            continue;
+        }
+        if (mapped.input.layer !== 0) continue;
+        const { transform } = mapped;
+        if (transform.output.identity !== identity
+            || binding.resourceKind !== "sampled-resource"
+            || binding.resourceDimension !== "texture2d"
+            || binding.structureStride !== null)
+        {
+            throw new Error(`WGSL resource transform ${transform.id} cannot replace ${identity}`);
+        }
+        output.push({
+            ...binding,
+            resourceDimension: "texture2darray",
+            transformId: transform.id,
+            arrayLayerCount: transform.output.layerCount
+        });
+    }
+    return output;
 }
 
 function normalizeLayoutPolicy(value)
@@ -419,9 +493,15 @@ function normalizeLayoutPolicy(value)
  * @param {object} program Frozen CJS shader IR.
  * @param {object|null} [bindingPlan] Optional pass-global canonical binding plan.
  * @param {object|null} [layoutPolicy] Exact-profile-only typed-layout policy.
+ * @param {object|null} [resourceTransformPlan] Validated physical-resource overlay.
  * @returns {object[]} Frozen WebGPU binding records.
  */
-export function lowerBindingLayout(program, bindingPlan = null, layoutPolicy = null)
+export function lowerBindingLayout(
+    program,
+    bindingPlan = null,
+    layoutPolicy = null,
+    resourceTransformPlan = null
+)
 {
     if (program?.format !== "CJS_SHADER_IR" || program.formatVersion !== 1)
     {
@@ -429,11 +509,18 @@ export function lowerBindingLayout(program, bindingPlan = null, layoutPolicy = n
     }
     const policy = normalizeLayoutPolicy(layoutPolicy);
     const planned = normalizeBindingPlan(bindingPlan, program.stage);
-    const sorted = Array.from(program.bindings).sort((left, right) =>
+    const explicitTransforms = normalizeResourceTransformPlan(resourceTransformPlan);
+    if (planned?.resourceTransformPlan && explicitTransforms
+        && JSON.stringify(planned.resourceTransformPlan) !== JSON.stringify(explicitTransforms))
+    {
+        throw new Error("WGSL binding plan and explicit resource transform plan disagree");
+    }
+    const transforms = planned?.resourceTransformPlan || explicitTransforms;
+    const sorted = transformBindings(Array.from(program.bindings).sort((left, right) =>
         bindingSpace(left) - bindingSpace(right)
         || (KIND_ORDER[left.resourceKind] ?? 99) - (KIND_ORDER[right.resourceKind] ?? 99)
         || bindingRegister(left) - bindingRegister(right)
-        || left.declarationOffset - right.declarationOffset);
+        || left.declarationOffset - right.declarationOffset), transforms, STAGE_VISIBILITY[program.stage]);
     const identities = new Set();
     for (const binding of sorted)
     {

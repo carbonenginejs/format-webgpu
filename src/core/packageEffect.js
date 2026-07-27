@@ -4,6 +4,7 @@ import { lowerDxbcToIr } from "./ir/lowerDxbcToIr.js";
 import { buildWgslBindingPlan } from "./wgsl/buildWgslBindingPlan.js";
 import { buildWgsl } from "./wgsl/emitWgsl.js";
 import { buildWgslSet } from "./wgsl/buildWgslSet.js";
+import { buildResourceTransformPlan } from "./wgsl/buildResourceTransformPlan.js";
 import {
     isParticleClearEffectCandidate,
     particleClearEffectProofFor,
@@ -72,6 +73,10 @@ export function buildEffectPackage(input, options = {})
         key: stage.key,
         passKey: `${stage.techniqueName}.pass${stage.passIndex}`,
         ir: programForKey(stage.key),
+        semanticBindings: analysis.stages.find((candidate) =>
+            candidate.techniqueName === stage.techniqueName
+            && candidate.passIndex === stage.passIndex
+            && candidate.stageName === stage.stageName)?.bindings || [],
         effectProfileProof: particleClearEffectProofFor(
             effectProfileContext,
             stage.key
@@ -89,17 +94,29 @@ export function buildEffectPackage(input, options = {})
         programsByPass.get(entry.passKey).push(entry);
     }
 
+    const resourceTransformPlans = new Map(Array.from(programsByPass, ([ key, entries ]) => [
+        key,
+        buildResourceTransformPlan(
+            entries.map((entry) => ({
+                ir: entry.ir,
+                semanticBindings: entry.semanticBindings
+            })),
+            { layoutKey: key }
+        )
+    ]));
     const plans = new Map(Array.from(programsByPass, ([ key, entries ]) =>
     {
         const proof = entries.find((entry) => entry.effectProfileProof)
             ?.effectProfileProof ?? null;
+        const resourceTransformPlan = resourceTransformPlans.get(key);
         return [
             key,
             buildWgslBindingPlan(
                 entries.map((entry) => entry.ir),
                 {
                     ...(options.bindingPolicy ?? {}),
-                    ...(proof ? { effectProfileProof: proof } : {})
+                    ...(proof ? { effectProfileProof: proof } : {}),
+                    ...(resourceTransformPlan ? { resourceTransformPlan } : {})
                 }
             )
         ];
@@ -108,6 +125,9 @@ export function buildEffectPackage(input, options = {})
         key: entry.key,
         shader: buildWgsl(entry.ir, {
             bindingPlan: plans.get(entry.passKey),
+            ...(resourceTransformPlans.get(entry.passKey)
+                ? { resourceTransformPlan: resourceTransformPlans.get(entry.passKey) }
+                : {}),
             ...(entry.effectProfileProof
                 ? { effectProfileProof: entry.effectProfileProof }
                 : {})

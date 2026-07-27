@@ -6,6 +6,7 @@ import {
 } from "../ir/indexableTemps.js";
 import { hoistEscapingValues } from "./hoistEscapingValues.js";
 import { lowerBindingLayout } from "./lowerBindingLayout.js";
+import { normalizeResourceTransformPlan } from "./buildResourceTransformPlan.js";
 import { requireRefactoringAllowed, validatePreciseInstruction } from "./precisionControls.js";
 import { buildSelectionPlans, cloneWritten, terminatesAllPaths } from "./selectionPlans.js";
 import { computeVaryingValues, conditionIsUniform } from "./uniformity.js";
@@ -353,6 +354,54 @@ function bindingForOperand(bindings, resourceKind, operand)
     return resourceKind === "uniform-buffer"
         ? binding
         : validateFixedHandleBinding(operand, binding, "fragment");
+}
+
+function originalBindingForOperand(program, resourceKind, operand)
+{
+    const rangeId = operand.resourceReference?.rangeId;
+    const candidates = program.bindings.filter((entry) =>
+        entry.resourceKind === resourceKind);
+    const matches = Number.isInteger(rangeId)
+        ? candidates.filter((entry) => entry.range?.rangeId === rangeId)
+        : candidates.filter((entry) =>
+            (entry.range?.lowerBound ?? entry.registerIndex) === operand.registerIndex);
+    if (matches.length > 1)
+    {
+        throw new Error(`WGSL fragment ${resourceKind} source identity is ambiguous`);
+    }
+    const binding = matches[0] || null;
+    if (!binding) return null;
+    const absoluteIndex = operand.resourceReference?.absoluteIndex;
+    const registerIndex = binding.range?.lowerBound ?? binding.registerIndex;
+    if (absoluteIndex !== undefined
+        && (absoluteIndex?.relative
+            || absoluteIndex?.values?.length !== 1
+            || absoluteIndex.values[0] !== registerIndex))
+    {
+        throw new Error(`WGSL fragment ${resourceKind} source identity is out of range`);
+    }
+    const registerSpace = binding.range?.registerSpace ?? 0;
+    return {
+        binding,
+        identity: `${resourceKind}:${registerSpace}:${registerIndex}`
+    };
+}
+
+function transformedSampleForOperand(program, operand, bindings, context)
+{
+    if (!context?.transformedInputs?.size) return null;
+    const original = originalBindingForOperand(program, "sampled-resource", operand);
+    const input = original ? context.transformedInputs.get(original.identity) : null;
+    if (!input) return null;
+    const textureBinding = bindings.find((binding) =>
+        binding.resourceKind === "sampled-resource"
+        && binding.identity === input.transform.output.identity
+        && binding.transformId === input.transform.id) || null;
+    if (!textureBinding)
+    {
+        throw new Error(`WGSL fragment resource transform ${input.transform.id} has no physical binding`);
+    }
+    return { textureBinding, layer: input.layer };
 }
 
 function cbufferVectorIndex(program, instruction, operandIndex, operand, inputs)
@@ -783,7 +832,7 @@ function structuredLoadExpression(program, instruction, write, type, inputs, bin
     return vectorCode(parts, type.scalarType);
 }
 
-function expressionFor(program, instruction, write, inputs, bindings)
+function expressionFor(program, instruction, write, inputs, bindings, context = null)
 {
     const mask = write.mask;
     const count = mask.length;
@@ -974,7 +1023,14 @@ function expressionFor(program, instruction, write, inputs, bindings)
     {
         const resource = validateFixedHandleOperand(instruction, 2, "resource", "fragment");
         const sampler = validateFixedHandleOperand(instruction, 3, "sampler", "fragment");
-        const textureBinding = bindingForOperand(bindings, "sampled-resource", resource);
+        const transformed = transformedSampleForOperand(
+            program,
+            resource,
+            bindings,
+            context
+        );
+        const textureBinding = transformed?.textureBinding
+            || bindingForOperand(bindings, "sampled-resource", resource);
         const samplerBinding = bindingForOperand(bindings, "sampler", sampler);
         if (!textureBinding || !samplerBinding) throw new Error(`WGSL fragment instruction ${instruction.index} has unresolved sample bindings`);
         const viewDimension = textureBinding.texture?.viewDimension;
@@ -982,7 +1038,16 @@ function expressionFor(program, instruction, write, inputs, bindings)
         const gradientComponents = [ "2d", "2d-array" ].includes(viewDimension) ? 2 : 3;
         let coord;
         let arrayArg = "";
-        if (viewDimension === "2d-array")
+        if (transformed)
+        {
+            if (viewDimension !== "2d-array")
+            {
+                throw new Error(`WGSL fragment resource transform ${textureBinding.transformId} is not a 2d-array binding`);
+            }
+            coord = source(1, 2);
+            arrayArg = `, ${transformed.layer}i`;
+        }
+        else if (viewDimension === "2d-array")
         {
             const coord3 = source(1, 3);
             coord = `${coord3}.xy`;
@@ -1174,7 +1239,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             const intrinsic = instruction.typeInfo.resultType;
             if (localSsaDestination && scalarTypeName(intrinsic) && instruction.opcodeName !== "mov")
             {
-                let packedCode = expressionFor(program, instruction, write, inputs, bindings);
+                let packedCode = expressionFor(program, instruction, write, inputs, bindings, context);
                 if (instruction.saturate)
                 {
                     if (intrinsic !== "float32")
@@ -1249,7 +1314,7 @@ function lowerInstruction(program, instruction, inputs, outputs, bindings, writt
             }));
         }
     const type = valueType(program, write);
-    let expression = expressionFor(program, instruction, write, inputs, bindings);
+    let expression = expressionFor(program, instruction, write, inputs, bindings, context);
     if (instruction.saturate)
     {
         const clampBounds = `${floatBound(write.mask.length, "0.0")}, ${floatBound(write.mask.length, "1.0")}`;
@@ -1418,10 +1483,44 @@ export function lowerFragmentProgram(program, options = {})
     const outputs = program.signatures.output.map((entry) => interfaceField([ entry ], "output"));
     if (!outputs.length) throw new Error("WGSL fragment body slice requires output signatures");
     inputs.forEach((input) => validateInterpolation(program, input));
-    const bindings = lowerBindingLayout(program, options.bindingPlan);
+    const planFromBinding = options.bindingPlan?.resourceTransforms === undefined
+        ? null
+        : normalizeResourceTransformPlan({
+            format: "CJS_WGSL_RESOURCE_TRANSFORM_PLAN",
+            formatVersion: 1,
+            resourceTransforms: options.bindingPlan.resourceTransforms
+        });
+    const explicitPlan = normalizeResourceTransformPlan(options.resourceTransformPlan);
+    if (planFromBinding && explicitPlan
+        && JSON.stringify(planFromBinding) !== JSON.stringify(explicitPlan))
+    {
+        throw new Error("WGSL fragment binding and resource transform plans disagree");
+    }
+    const resourceTransformPlan = planFromBinding || explicitPlan;
+    const bindings = lowerBindingLayout(
+        program,
+        options.bindingPlan,
+        null,
+        resourceTransformPlan
+    );
     const plans = buildSelectionPlans(program, "fragment");
     const varying = computeVaryingValues(program);
-    const context = { requiresDerivativeUniformityOptOut: false };
+    const transformedInputs = new Map();
+    for (const transform of resourceTransformPlan?.resourceTransforms || [])
+    {
+        if (transform.stage !== "fragment") continue;
+        for (const input of transform.inputs)
+        {
+            transformedInputs.set(input.identity, {
+                transform,
+                layer: input.layer
+            });
+        }
+    }
+    const context = {
+        requiresDerivativeUniformityOptOut: false,
+        transformedInputs
+    };
     const written = new Map(outputs.map((field) => [ field.id, new Set() ]));
     const readValueIds = new Set([
         ...program.instructions.flatMap((instruction) =>
@@ -1744,6 +1843,9 @@ export function lowerFragmentProgram(program, options = {})
         entryPoint: "main",
         interface: { inputs, outputs },
         bindings,
+        ...(resourceTransformPlan
+            ? { resourceTransforms: resourceTransformPlan.resourceTransforms }
+            : {}),
         immediateConstantBuffer: program.immediateConstantBuffer || null,
         constTables: program.constTables || null,
         requiresDerivativeUniformityOptOut: context.requiresDerivativeUniformityOptOut,

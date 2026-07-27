@@ -67,6 +67,12 @@ function registerKey(program, operand, role)
     return `${operand.typeName}[${indices.join(",")}]`;
 }
 
+/**
+ * Classifies decoded instruction operands as register sources or destinations.
+ *
+ * @param {object} instruction Decoded instruction.
+ * @returns {Array<{operand: object, role: string}>} Ordered operand roles.
+ */
 export function operandRoles(instruction)
 {
     const operands = instruction.operands || [];

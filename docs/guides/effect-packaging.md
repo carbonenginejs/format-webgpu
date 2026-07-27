@@ -62,6 +62,14 @@ The returned record contains:
 The CEWGPU package retains full effect analysis while emitting WGSL only for
 the selected complete pass.
 
+When exact semantic metadata and shader use prove an allowed physical resource
+coalescing, the returned WGSL document is a `CJS_WGSL_SET` version 3 record.
+Its `resourceTransforms` recipes are required runtime work, not optional
+diagnostics: the consumer must build the described resource and bind it through
+the matching transformed layout entry. See the package-format contract before
+passing version 3 output to an engine. Packages without transforms remain WGSL
+set version 2.
+
 ## Binding scope
 
 A D3D resource tuple is stage-local unless the caller has authoritative

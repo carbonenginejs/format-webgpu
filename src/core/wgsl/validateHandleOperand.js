@@ -1,3 +1,12 @@
+/**
+ * Requires one fixed, unmodified, default-precision resource-handle operand.
+ *
+ * @param {object} instruction Decoded instruction.
+ * @param {number} operandIndex Handle operand index.
+ * @param {string} expectedType Required operand type.
+ * @param {string} stage Stage name used in diagnostics.
+ * @returns {object} Validated operand.
+ */
 export function validateFixedHandleOperand(instruction, operandIndex, expectedType, stage)
 {
     const operand = instruction.operands[operandIndex];
@@ -13,6 +22,14 @@ export function validateFixedHandleOperand(instruction, operandIndex, expectedTy
     return operand;
 }
 
+/**
+ * Confirms an operand's absolute handle index matches its resolved binding.
+ *
+ * @param {object} operand Validated handle operand.
+ * @param {object|null} binding Resolved binding.
+ * @param {string} stage Stage name used in diagnostics.
+ * @returns {object|null} The unchanged binding.
+ */
 export function validateFixedHandleBinding(operand, binding, stage)
 {
     const absoluteIndex = operand?.resourceReference?.absoluteIndex;

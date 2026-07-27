@@ -1018,6 +1018,47 @@ sample form and in both stages.
 
 ## Bounded / temporary
 
+- **Carbon Detail maps → one physical 2D-array texture (fragment stage).**
+  The late resource-transform planner recognizes exactly two logical
+  `Detail1Map`/`Detail2Map` inputs or exactly three consecutive
+  `Detail1Map`/`Detail2Map`/`Detail3Map` inputs. Each must be a scalar,
+  non-sRGB, float4 Texture2D in the same register space, and every shader use
+  must be an unmodified, fixed-register `sample_b` using the same sampler and
+  bias operand. Relative/non-uniform handles, sample offsets, other opcodes,
+  incompatible metadata, incomplete names, missing samples, or ambiguous
+  bindings reject the transform.
+
+  The source IR and semantic parameter names remain unchanged. Physical
+  lowering replaces the inputs with one `texture_2d_array<f32>`, reuses the
+  first input identity, removes the later bindings only from the owning pass,
+  and emits fixed layers 0/1 or 0/1/2. The WGSL set becomes version 3 and
+  carries the complete realization recipe. Every named layer is required; the
+  runtime may use a compatible native array representation or decode all
+  layers to RGBA8, but it may not silently supply a missing layer.
+
+  Exact high (`.sm_depth`) and medium (`.sm_hi`) exhaustive matrices qualify
+  all 160 DX11 bodies of `unpackedskinned_quaddetailv5` and all 32 DX11 bodies
+  of `unpackedskinned_quadheatdetailv5`, with zero failed bodies. Their DX12
+  matrices have the same axes/topology and zero failures; bindless bodies
+  retain the pre-existing comparison-only unbounded-range boundary. The
+  representative non-bindless, PPT-on, unclipped, opaque, debug-off body is
+  body 4 (overlay blend for Detail): Detail falls from 17 source textures to
+  15 physical textures through a three-layer recipe, while HeatDetail falls
+  from 17 to 16 through a two-layer recipe. All four DX11 and four DX12
+  representative fragment modules across high and medium compile in the
+  browser with zero WGSL warnings.
+
+  The exact-build corpus remains 507 qualified, 30 unsupported, and 0 failed.
+  Twelve package hashes change, all within the static/skinned,
+  packed/unpacked Quad Detail, HeatDetail, and Environment families; the other
+  495 qualified packages are byte-identical. Every changed package carries
+  exactly one two- or three-layer Detail transform.
+
+  This closes the compiler-side sampled-texture binding limit only. WGSL-set
+  version 3 is not yet accepted by the committed engine reader, and raw module
+  compilation does not prove resource realization or rendering. Runtime
+  support must consume the recipe explicitly before these packages are
+  render-ready.
 - **Immediate 2D sample offsets** — `sample`, `sample_b`, `sample_d`, and
   `sample_l` lower their signed `_aoffimmi(u,v,w)` record to WGSL's final
   constant `vec2<i32>(u, v)` sampling argument. Both APIs apply that

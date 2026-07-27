@@ -1,3 +1,5 @@
+import { normalizeResourceTransformPlan } from "./buildResourceTransformPlan.js";
+
 const KEY_PATTERN = /^(.*)\.pass([0-9]+)\.(vertex|pixel|compute)$/;
 const KEY_STAGE = Object.freeze({ vertex: "vertex", pixel: "fragment", compute: "compute" });
 const STAGE_TYPES = Object.freeze({ vertex: 0, pixel: 1, compute: 2 });
@@ -94,6 +96,17 @@ function portableBinding(binding, visibility)
     {
         throw new Error(`WGSL binding ${binding.generatedSymbol} has inconsistent D3D identity ${binding.identity}`);
     }
+    const hasTransform = binding.transformId !== undefined
+        || binding.arrayLayerCount !== undefined;
+    if (hasTransform
+        && (binding.resourceKind !== "sampled-resource"
+            || typeof binding.transformId !== "string" || !binding.transformId
+            || !Number.isInteger(binding.arrayLayerCount) || binding.arrayLayerCount < 2
+            || binding.type !== "texture_2d_array<f32>"
+            || binding.texture?.viewDimension !== "2d-array"))
+    {
+        throw new Error(`WGSL binding ${binding.generatedSymbol} has invalid resource transform metadata`);
+    }
     if (scopeIdentity !== identity && scopeIdentity !== `${identity}@${visibility}`)
     {
         throw new Error(`WGSL binding ${binding.generatedSymbol} has invalid scope identity ${scopeIdentity}`);
@@ -120,6 +133,12 @@ function portableBinding(binding, visibility)
         binding: binding.binding,
         visibility: [ visibility ],
         type: binding.type,
+        ...(hasTransform
+            ? {
+                transformId: binding.transformId,
+                arrayLayerCount: binding.arrayLayerCount
+            }
+            : {}),
         ...(Number.isInteger(binding.structureStride) ? { structureStride: binding.structureStride } : {}),
         ...(binding.buffer ? { buffer: clonePlain(binding.buffer) } : {}),
         ...(binding.texture ? { texture: clonePlain(binding.texture) } : {}),
@@ -144,6 +163,8 @@ function bindingFingerprint(binding)
         group: binding.group,
         binding: binding.binding,
         type: binding.type,
+        transformId: binding.transformId ?? null,
+        arrayLayerCount: binding.arrayLayerCount ?? null,
         structureStride: binding.structureStride ?? null,
         buffer: binding.buffer || null,
         texture: binding.texture || null,
@@ -254,6 +275,71 @@ function validatePassTopologies(entries)
     }
 }
 
+function buildResourceTransforms(entries, layouts)
+{
+    const raw = entries.flatMap((entry) => entry.shader.program.resourceTransforms || []);
+    const transformedBindings = layouts.flatMap((layout) =>
+        layout.bindGroups.flatMap((group) =>
+            group.bindings.filter((binding) => binding.transformId)
+                .map((binding) => ({ layoutKey: layout.key, binding }))));
+    if (!raw.length)
+    {
+        if (transformedBindings.length)
+        {
+            throw new Error("WGSL set has transformed bindings without resource recipes");
+        }
+        return [];
+    }
+    const plan = normalizeResourceTransformPlan({
+        format: "CJS_WGSL_RESOURCE_TRANSFORM_PLAN",
+        formatVersion: 1,
+        resourceTransforms: raw
+    });
+    const ids = new Set(plan.resourceTransforms.map((transform) => transform.id));
+    for (const { binding } of transformedBindings)
+    {
+        if (!ids.has(binding.transformId))
+        {
+            throw new Error(`WGSL binding ${binding.generatedSymbol} references missing transform ${binding.transformId}`);
+        }
+    }
+    for (const transform of plan.resourceTransforms)
+    {
+        const stageKey = `${transform.layoutKey}.pixel`;
+        if (!entries.some((entry) => entry.key === stageKey))
+        {
+            throw new Error(`WGSL resource transform ${transform.id} has no fragment shader ${stageKey}`);
+        }
+        const links = transformedBindings.filter(({ layoutKey, binding }) =>
+            layoutKey === transform.layoutKey
+            && binding.transformId === transform.id);
+        if (links.length !== 1)
+        {
+            throw new Error(`WGSL resource transform ${transform.id} must link exactly one physical binding`);
+        }
+        const binding = links[0].binding;
+        if (binding.identity !== transform.output.identity
+            || binding.scopeIdentity !== transform.output.scopeIdentity
+            || binding.texture?.viewDimension !== transform.output.viewDimension
+            || binding.arrayLayerCount !== transform.output.layerCount)
+        {
+            throw new Error(`WGSL resource transform ${transform.id} does not match its physical binding`);
+        }
+        const transformLayout = layouts.find((layout) =>
+            layout.key === transform.layoutKey);
+        const physicalScopes = new Set((transformLayout?.bindGroups || []).flatMap((group) =>
+            group.bindings.map((entry) => entry.scopeIdentity)));
+        for (const input of transform.inputs.slice(1))
+        {
+            if (physicalScopes.has(input.scopeIdentity))
+            {
+                throw new Error(`WGSL resource transform ${transform.id} retains removed input ${input.scopeIdentity}`);
+            }
+        }
+    }
+    return plan.resourceTransforms;
+}
+
 /**
  * Builds the portable JSON document stored in a CEWGPU `WGSL` chunk.
  * Existing numeric bindings are validated and never reassigned.
@@ -287,10 +373,13 @@ export function buildWgslSet(input)
         || left.passIndex - right.passIndex
         || STAGE_NAME_ORDER.indexOf(left.stageName) - STAGE_NAME_ORDER.indexOf(right.stageName));
     validatePassTopologies(entries);
+    const layouts = buildLayouts(entries);
+    const resourceTransforms = buildResourceTransforms(entries, layouts);
     return deepFreeze({
         format: "CJS_WGSL_SET",
-        formatVersion: 2,
+        formatVersion: resourceTransforms.length ? 3 : 2,
         shaders,
-        layouts: buildLayouts(entries)
+        layouts,
+        ...(resourceTransforms.length ? { resourceTransforms } : {})
     });
 }
