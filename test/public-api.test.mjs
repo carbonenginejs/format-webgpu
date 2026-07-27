@@ -86,7 +86,7 @@ test("implemented metadata advertises the package surface", () =>
     assert.equal(CjsFormatWebgpu.implementationStatus, "partial");
     assert.equal(CjsFormatWebgpu.format, "CEWGPU");
     assert.equal(CjsFormatWebgpu.analysisFormat, "CEWGPU_ANALYSIS");
-    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.4");
+    assert.equal(CjsFormatWebgpu.packageVersion, "0.5.0");
     assert.equal(CjsFormatWebgpu.packageVersion, PACKAGE_MANIFEST.version);
 });
 
@@ -263,6 +263,33 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     assert.equal(compatibilityResult.info.bodyMode, "selected");
 });
 
+test("version 15 buildEffect exposes source-complete selected-backend coverage", () =>
+{
+    const result = CjsFormatWebgpu.buildEffect(
+        buildMinimalStagedEffectBytes({ version: 15 }),
+        { source: "synthetic.sm_depth" }
+    );
+
+    assert.equal(result.info.formatVersion, 3);
+    assert.equal(result.info.sourceBodyCoverage, "all-unique");
+    assert.equal(result.info.backendBodyCoverage, "selected");
+    assert.equal(result.info.bodyMode, "selected");
+    assert.deepEqual(result.info.completeness, {
+        packageValid: true,
+        sourceComplete: true,
+        backendComplete: false,
+        runtimeComplete: false
+    });
+    assert.equal(result.qualification.sourceComplete, true);
+    assert.equal(result.qualification.backendComplete, false);
+    assert.equal(result.qualification.runtimeComplete, false);
+    assert.equal(result.reflection.formatVersion, 2);
+    assert.equal(result.reflection.coverage.bodies, "all-unique");
+    assert.equal(result.info.effectReflection.bodyCount, 1);
+    assert.match(result.info.permutationGraph.sha256, /^[0-9a-f]{64}$/u);
+    assert.match(result.info.effectReflection.sha256, /^[0-9a-f]{64}$/u);
+});
+
 test("buildEffect rejects a caller source hash that disagrees with its exact bytes", () =>
 {
     assert.throws(
@@ -297,14 +324,14 @@ test("buildEffect rejects unsupported all-body packaging explicitly", () =>
             buildMinimalStagedEffectBytes(),
             { mode: "all" }
         ),
-        /all-body packaging requires portable complete effect reflection/u
+        /all-body backend packaging requires translated programs/u
     );
     assert.throws(
         () => CjsFormatWebgpu.buildEffect(
             buildMinimalStagedEffectBytes(),
             { allPermutations: true }
         ),
-        /all-body packaging requires portable complete effect reflection/u
+        /all-body backend packaging requires translated programs/u
     );
     assert.throws(
         () => CjsFormatWebgpu.buildEffect(

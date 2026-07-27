@@ -292,6 +292,8 @@ export function buildEffectBytes(options = {})
  * @param {Array<object>} [options.permutations] Permutation axis descriptions.
  * @param {8|14|15} [options.version] Compiled effect version.
  * @param {1|2} [options.passCount] Number of identical minimal passes.
+ * @param {Array<1|2>} [options.bodyPassCounts] Per-permutation pass counts.
+ * @param {boolean} [options.distinctBodyRanges] Store aliases at separate ranges.
  * @returns {Uint8Array} Synthetic compiled effect bytes.
  */
 export function buildMinimalStagedEffectBytes(options = {})
@@ -342,57 +344,61 @@ export function buildMinimalStagedEffectBytes(options = {})
         table.raw(stage.dxbc);
     }
 
-    const body = new ByteWriter();
-    body.u8(1);
-    body.u32(mainOffset);
-    body.u8(passCount);
-    for (let passIndex = 0; passIndex < passCount; passIndex += 1)
+    const buildBody = (bodyPassCount) =>
     {
-        body.u8(stages.length);
-        for (const stage of stages)
+        const body = new ByteWriter();
+        body.u8(1);
+        body.u32(mainOffset);
+        body.u8(bodyPassCount);
+        for (let passIndex = 0; passIndex < bodyPassCount; passIndex += 1)
         {
-            body.u8(stage.stageType);
-            if (version === 8)
+            body.u8(stages.length);
+            for (const stage of stages)
             {
-                body.u8(0);
-                body.u32(stage.dxbc.length);
-                body.u32(stage.dxbcOffset);
-                body.u32(0);
-                body.u32(0);
-                body.u32(1);
-                body.u32(1);
-                body.u32(1);
-                body.u32(0);
-                body.u32(0);
-                body.u32(0);
-                body.u8(0);
-                body.u8(0);
-                body.u8(0);
-                body.u8(0);
+                body.u8(stage.stageType);
+                if (version === 8)
+                {
+                    body.u8(0);
+                    body.u32(stage.dxbc.length);
+                    body.u32(stage.dxbcOffset);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u32(1);
+                    body.u32(1);
+                    body.u32(1);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u8(0);
+                }
+                else
+                {
+                    body.u32(stage.dxbc.length);
+                    body.u32(stage.dxbcOffset);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u32(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u8(0);
+                    body.u8(0);
+                }
             }
-            else
-            {
-                body.u32(stage.dxbc.length);
-                body.u32(stage.dxbcOffset);
-                body.u32(0);
-                body.u32(0);
-                body.u32(0);
-                body.u8(0);
-                body.u8(0);
-                body.u8(0);
-                body.u32(0);
-                body.u32(0);
-                body.u32(0);
-                body.u8(0);
-                body.u8(0);
-                body.u8(0);
-                body.u8(0);
-            }
+            body.u8(0);
         }
-        body.u8(0);
-    }
-    if (version > 13) body.u8(0);
-    body.u16(0);
+        if (version > 13) body.u8(0);
+        body.u16(0);
+        return body.toBytes();
+    };
 
     const writer = new ByteWriter();
     writer.u32(version);
@@ -425,15 +431,68 @@ export function buildMinimalStagedEffectBytes(options = {})
         (product, permutation) => product * (permutation.options || []).length,
         1
     );
+    const bodyPassCounts = options.bodyPassCounts
+        ?? Array.from({ length: bodyCount }, () => passCount);
+    if (!Array.isArray(bodyPassCounts)
+        || bodyPassCounts.length !== bodyCount
+        || bodyPassCounts.some((count) => ![ 1, 2 ].includes(count)))
+    {
+        throw new TypeError(
+            "Minimal staged effect bodyPassCounts must contain one 1 or 2 per permutation"
+        );
+    }
+    if (options.distinctBodyRanges !== undefined
+        && typeof options.distinctBodyRanges !== "boolean")
+    {
+        throw new TypeError(
+            "Minimal staged effect distinctBodyRanges must be boolean"
+        );
+    }
+    const uniqueBodies = [];
+    const bodyByPassCount = new Map();
+    const bodyRecords = [];
+    for (const bodyPassCount of bodyPassCounts)
+    {
+        if (options.distinctBodyRanges)
+        {
+            const bytes = buildBody(bodyPassCount);
+            const record = {
+                offset: 0,
+                byteLength: bytes.byteLength,
+                bytes
+            };
+            uniqueBodies.push(record);
+            bodyRecords.push(record);
+            continue;
+        }
+        if (!bodyByPassCount.has(bodyPassCount))
+        {
+            const bytes = buildBody(bodyPassCount);
+            const record = {
+                offset: 0,
+                byteLength: bytes.byteLength,
+                bytes
+            };
+            bodyByPassCount.set(bodyPassCount, record);
+            uniqueBodies.push(record);
+        }
+        bodyRecords.push(bodyByPassCount.get(bodyPassCount));
+    }
     writer.u32(bodyCount);
-    const bodyOffset = writer.length + bodyCount * 12;
+    let bodyOffset = writer.length + bodyCount * 12;
+    for (const body of uniqueBodies)
+    {
+        body.offset = bodyOffset;
+        bodyOffset += body.byteLength;
+    }
     for (let index = 0; index < bodyCount; index += 1)
     {
+        const body = bodyRecords[index];
         writer.u32(index);
-        writer.u32(bodyOffset);
-        writer.u32(body.length);
+        writer.u32(body.offset);
+        writer.u32(body.byteLength);
     }
-    writer.raw(body.toBytes());
+    for (const body of uniqueBodies) writer.raw(body.bytes);
 
     return writer.toBytes();
 }

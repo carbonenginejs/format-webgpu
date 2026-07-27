@@ -1,11 +1,15 @@
 import { CjsBinaryReader, cjsNormalizeBytes } from "./binary.js";
 import { validateCewgpuChunkTag } from "./tags.js";
 import { sha256Bytes } from "../sha256.js";
+import {
+    hydrateEffectReflectionForPermutation
+} from "../effectReflectionPackage.js";
 
 const CEWGPU_MAGIC = "CWGP";
 const CEWGPU_FORMAT = "CEWGPU";
 const CEWGPU_VERSION = 1;
 const textDecoder = new TextDecoder("utf-8", { fatal: false });
+const jsonTextDecoder = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * Reader for CarbonEngineJS CEWGPU shader packages.
@@ -20,6 +24,8 @@ export class CewgpuPackage
         this.version = 0;
         this.chunks = [];
         this.chunkMap = new Map();
+        this.jsonCache = new Map();
+        this.reflectionBlobIndex = null;
         this.readError = null;
         this.sourcePath = "";
     }
@@ -37,6 +43,8 @@ export class CewgpuPackage
         this.version = 0;
         this.chunks = [];
         this.chunkMap = new Map();
+        this.jsonCache = new Map();
+        this.reflectionBlobIndex = null;
         this.readError = null;
         this.sourcePath = options.sourcePath || "";
 
@@ -90,6 +98,8 @@ export class CewgpuPackage
             this.readError = error;
             this.chunks = [];
             this.chunkMap = new Map();
+            this.jsonCache = new Map();
+            this.reflectionBlobIndex = null;
             return false;
         }
     }
@@ -135,8 +145,7 @@ export class CewgpuPackage
    */
     GetJson(tag)
     {
-        const text = this.GetText(tag);
-        return text === null ? null : JSON.parse(text);
+        return cloneJson(getCachedJson(this, tag));
     }
 
     /**
@@ -170,7 +179,7 @@ export class CewgpuPackage
     }
 
     /**
-     * Gets complete selected-body effect reflection when present.
+     * Gets complete source effect reflection when present.
      *
      * @returns {object|null} Parsed reflection document.
      */
@@ -201,8 +210,16 @@ export class CewgpuPackage
     GetReflectionBlob(value)
     {
         const key = typeof value === "string" ? value : value?.blobKey;
-        const entry = this.reflection?.blobStore?.blobs
-            ?.find((candidate) => candidate.blobKey === key);
+        if (!this.reflectionBlobIndex)
+        {
+            this.reflectionBlobIndex = new Map(
+                (getCachedJson(this, "RFLX")?.blobStore?.blobs ?? []).map((entry) => [
+                    entry.blobKey,
+                    entry
+                ])
+            );
+        }
+        const entry = this.reflectionBlobIndex.get(key);
         const bytes = this.reflectionBlobBytes;
         if (!entry || !bytes) return null;
         if (typeof value !== "string"
@@ -225,6 +242,33 @@ export class CewgpuPackage
     }
 
     /**
+     * Gets fully hydrated portable source reflection for one permutation.
+     *
+     * The optional index defaults to `META.bodyIndex`. Every reflected byte
+     * field is returned as a fresh owned `Uint8Array`.
+     *
+     * @param {number} [permutationIndex] Exact PGRF permutation index.
+     * @returns {object|null} Validated portable reflection, or null when absent.
+     */
+    GetPortableEffectReflection(
+        permutationIndex
+    )
+    {
+        const reflection = getCachedJson(this, "RFLX");
+        const permutationGraph = getCachedJson(this, "PGRF");
+        if (!reflection || !permutationGraph) return null;
+        const selectedIndex = permutationIndex
+            ?? getCachedJson(this, "META")?.bodyIndex
+            ?? 0;
+        return hydrateEffectReflectionForPermutation(
+            reflection,
+            permutationGraph,
+            selectedIndex,
+            (reference) => this.GetReflectionBlob(reference)
+        );
+    }
+
+    /**
    * Gets normalized shader analysis from the `ANLS` chunk.
    *
    * @returns {string|null} Analysis text.
@@ -242,11 +286,9 @@ export class CewgpuPackage
    */
     get analysisJson()
     {
-        const text = this.analysis;
-        if (text === null) return null;
         try
         {
-            return JSON.parse(text);
+            return this.GetJson("ANLS");
         }
         catch
         {
@@ -271,11 +313,9 @@ export class CewgpuPackage
    */
     get wgslJson()
     {
-        const text = this.wgsl;
-        if (text === null) return null;
         try
         {
-            return JSON.parse(text);
+            return this.GetJson("WGSL");
         }
         catch
         {
@@ -305,6 +345,45 @@ export class CewgpuPackage
             } : null
         };
     }
+}
+
+/**
+ * Decode and cache one private JSON document.
+ *
+ * @param {CewgpuPackage} pkg Package reader.
+ * @param {string} tag Chunk tag.
+ * @returns {object|null} Private parsed JSON, or null when absent.
+ */
+function getCachedJson(pkg, tag)
+{
+    if (!pkg.jsonCache.has(tag))
+    {
+        const chunk = pkg.GetChunk(tag);
+        pkg.jsonCache.set(
+            tag,
+            chunk ? JSON.parse(jsonTextDecoder.decode(chunk.bytes)) : null
+        );
+    }
+    return pkg.jsonCache.get(tag);
+}
+
+/**
+ * Copy JSON-compatible data without reparsing its source chunk.
+ *
+ * @param {any} value Cached JSON value.
+ * @returns {any} Structurally independent JSON value.
+ */
+function cloneJson(value)
+{
+    if (Array.isArray(value)) return value.map(cloneJson);
+    if (value && typeof value === "object")
+    {
+        return Object.fromEntries(Object.entries(value).map(([ key, entry ]) => [
+            key,
+            cloneJson(entry)
+        ]));
+    }
+    return value;
 }
 
 /**

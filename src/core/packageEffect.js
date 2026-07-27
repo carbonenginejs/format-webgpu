@@ -12,7 +12,7 @@ import {
     EFFECT_PERMUTATION_GRAPH_VERSION
 } from "./effectPermutationGraph.js";
 import {
-    buildSelectedEffectReflection,
+    buildCompleteEffectReflection,
     EFFECT_REFLECTION_BLOB_CHUNK,
     EFFECT_REFLECTION_CHUNK
 } from "./effectReflectionPackage.js";
@@ -23,7 +23,7 @@ import {
     FORMAT_WEBGPU_PACKAGE_VERSION,
     WEBGPU_BACKEND_NAME
 } from "./packageMetadata.js";
-import { sha256Bytes } from "./sha256.js";
+import { sha256Bytes, sha256Utf8 } from "./sha256.js";
 import {
     isParticleClearEffectCandidate,
     particleClearEffectProofFor,
@@ -37,11 +37,11 @@ import {
 } from "./packageEffectSelection.js";
 
 /**
- * Build one structurally valid selected-body CEWGPU package from compiled
- * Tr2 effect bytes.
+ * Build one structurally valid CEWGPU package from compiled Tr2 effect bytes.
  *
- * This browser-safe path resolves one effect body and emits complete passes
- * within the requested stage selection. Filesystem concerns remain in callers.
+ * Version-15 packages preserve every unique body's source reflection while
+ * resolving one backend body and emitting complete passes within the requested
+ * stage selection. Filesystem concerns remain in callers.
  *
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
  * @param {object} [options] Source, body-mode, permutation, and stage-selection policy.
@@ -165,22 +165,21 @@ export function buildEffectPackage(input, options = {})
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);
     const permutationGraph = buildEffectPermutationGraph(resolved.effectRes);
     const effectReflection = resolved.effectRes.m_version === 15
-        ? buildSelectedEffectReflection(
+        ? buildCompleteEffectReflection(
             resolved.effectRes,
-            resolved.selection.bodyIndex,
             permutationGraph,
             { sourceIdentity, sourcePath: source }
         )
         : null;
     const completeness = Object.freeze({
         packageValid: true,
-        sourceComplete: false,
+        sourceComplete: effectReflection !== null,
         backendComplete: false,
         runtimeComplete: false
     });
     const info = {
         format: "CEWGPU",
-        formatVersion: 2,
+        formatVersion: effectReflection ? 3 : 2,
         packageKind: "tr2-effect-webgpu",
         sourcePath: source,
         outputPath,
@@ -194,11 +193,18 @@ export function buildEffectPackage(input, options = {})
             chunk: EFFECT_PERMUTATION_GRAPH_CHUNK,
             format: EFFECT_PERMUTATION_GRAPH_FORMAT,
             formatVersion: EFFECT_PERMUTATION_GRAPH_VERSION,
+            ...(effectReflection ? {
+                sha256: sha256Utf8(`${JSON.stringify(permutationGraph)}\n`)
+            } : {}),
             permutationCount: permutationGraph.variants.length,
             uniqueBodyCount: permutationGraph.bodies.length
         }),
         ...(effectReflection
-            ? { effectReflection: effectReflection.pointer }
+            ? {
+                effectReflection: effectReflection.pointer,
+                sourceBodyCoverage: "all-unique",
+                backendBodyCoverage: "selected"
+            }
             : {}),
         bodyMode: mode,
         completeness,
@@ -269,7 +275,8 @@ function normalizeMode(value, allPermutations)
     {
         throw new Error(
             `Effect package mode ${mode || "<empty>"} is not supported; `
-            + "all-body packaging requires portable complete effect reflection"
+            + "all-body backend packaging requires translated programs, layouts, "
+            + "and resource transforms for every body"
         );
     }
 

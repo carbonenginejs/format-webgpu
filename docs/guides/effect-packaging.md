@@ -3,7 +3,7 @@
 Status: Evolving
 Scope: `@carbonenginejs/format-webgpu`
 Audience: Shader-tool authors and engine integrators
-Summary: Shows how to select one complete compiled-effect pass and package its supported stages as CEWGPU data.
+Summary: Shows how to package the complete supported pass scope of one selected compiled-effect body as CEWGPU data.
 
 ## Purpose
 
@@ -55,24 +55,26 @@ fields. Its logical path need not equal the diagnostic label. `BuildEffect`
 always computes the lower-case SHA-256 digest over the exact input byte view;
 when a caller supplies `sha256`, the build fails if it does not match.
 
-Selected-effect packages use INFO schema version 2 while the binary CEWGPU
-container remains version 1. INFO v2 identifies the `webgpu` target, the
+Version-15 packages use INFO schema version 3 while the binary CEWGPU
+container remains version 1. INFO v3 identifies the `webgpu` target, the
 producing `@carbonenginejs/format-webgpu` package version, and the
-`dxbc-js-wgsl` translator version. The reader continues to accept legacy
-selected-effect INFO v1 packages and pre-PGRF INFO v2 packages when both the
-INFO pointer and PGRF chunk are absent.
+`dxbc-js-wgsl` translator version. Versions 8-14 use INFO v2 without
+reflection. The reader continues to accept legacy INFO v1 packages, INFO v2
+packages without PGRF, and INFO v2 packages with selected-body RFLX v1.
 
 Every new selected-effect package also includes a complete source permutation
 graph in `PGRF`. This preserves every axis, Cartesian permutation index,
 option-index tuple, compiler alias, and unique raw body identity even though
-only one selected body's reflection and WGSL are currently packaged.
+only one selected body's WGSL is currently packaged. INFO v3 binds the exact
+PGRF bytes with SHA-256.
 
 For version-15 input, the package also includes complete portable reflection
-for that selected body in `RFLX` and its exact immutable byte payloads in
-`RBLB`. These include authored parameter/resource metadata, constant defaults,
-stage/library source programs, signatures, static samplers, annotations, and
-the opaque native source hash. Earlier source versions keep the legacy package
-surface because portable reflection version 1 is intentionally version-15-only.
+for every unique source body in RFLX v2 and its exact immutable byte payloads
+in one shared `RBLB`. These include authored parameter/resource metadata,
+constant defaults, stage/library source programs, signatures, static samplers,
+annotations, and the opaque native source hash. Earlier source versions keep
+the legacy package surface because portable reflection version 1 is
+intentionally version-15-only.
 
 ## Result
 
@@ -84,28 +86,32 @@ The returned record contains:
 | `info` | Translator and package information. |
 | `metadata` | Selection and caller provenance. |
 | `permutationGraph` | Complete source permutation topology and identity-only body table. |
-| `reflection` | Complete selected-body portable reflection for version-15 input, otherwise `null`. |
+| `reflection` | Complete all-unique portable source reflection for version-15 input, otherwise `null`. |
 | `reflectionBlobs` | Exact RBLB bytes for reflected programs/defaults/native hash, otherwise `null`. |
 | `analysis` | Compact selected-body diagnostic binding/stage data; not lossless effect reflection. |
 | `wgsl` | Portable shader set and pass layouts. |
 | `inspection` | Summary produced by reading the built package. |
 | `qualification` | Structural conversion outcome. |
 
-`mode: "selected"` is the default and currently the only supported body mode.
-The package retains normalized analysis for that resolved body while emitting
-WGSL for the selected complete passes. PGRF retains the complete source
-permutation graph and identity of every unique raw body, while RFLX/RBLB make
-the selected version-15 body sufficient to reconstruct its portable reflection
-inputs. Other unique bodies' reflection and backend programs are not retained,
-so the package is still insufficient to hydrate a complete all-permutation
-`Tr2EffectRes`. `mode: "all"` fails explicitly until all-body serialization is
-available.
+`mode: "selected"` is the default and currently the only supported backend
+body mode. The package retains normalized analysis for that resolved body while
+emitting WGSL for the selected complete passes. PGRF retains the complete
+source permutation graph and RFLX/RBLB retain every unique version-15 body's
+portable source reflection. `META.bodyIndex` selects a PGRF variant; its
+`bodyKey` selects the matching RFLX body. A raw reader exposes that join as
+`GetPortableEffectReflection(permutationIndex)`, returning a freshly owned,
+format-hlsl-validated single-body document with every byte reference expanded
+to `Uint8Array`. Turning that portable document into a live `Tr2EffectRes`
+remains consumer/engine work. `mode: "all"` fails until translated programs,
+layouts, and resource transforms are packaged for every body.
 
 JSON `Read` output exposes `reflection` with byte references and
 `reflectionBlobByteLength`. Consumers that need exact defaults or source
 program bytes use `Read(bytes, { emit: "raw" })`, then call
-`GetReflectionBlob(referenceOrKey)`. The returned `Uint8Array` is an owned
-copy. An object reference must exactly match its RFLX inventory entry.
+`GetPortableEffectReflection(permutationIndex)`. Omit the index to use
+`META.bodyIndex`. For individual payload access,
+`GetReflectionBlob(referenceOrKey)` returns an owned `Uint8Array`; an object
+reference must exactly match its RFLX inventory entry.
 
 Raw stage bytecode, decoded DXBC instruction trees, and compiler IR are
 transient build inputs and are not embedded in `ANLS`. Use `AnalyzeEffect`
@@ -114,15 +120,21 @@ when return-only DXBC/IR diagnostics are required.
 The qualification record distinguishes structural package validity from
 broader completeness. `packageValid` means only that the selected CEWGPU
 container passed required-chunk, schema, cross-document, key, layout, and
-selection reconciliation. `sourceComplete` would require the graph now carried
-by PGRF plus every unique body's full portable reflection and immutable exact
-defaults. RFLX/RBLB currently satisfy that reflection requirement only for the
-selected body.
+selection reconciliation. Version-15 INFO v3 reports `sourceComplete: true`
+because PGRF plus RFLX/RBLB cover every unique body's portable reflection and
+immutable exact defaults for that exact input file. This does not embed raw
+body records or make CEWGPU an archive of the original `.sm_*` bytes.
 `backendComplete` would additionally require every required translated
 program, layout, and transform. `runtimeComplete` would require
 complete-resource hydration and selection. None of these fields is
 prepared-pipeline or rendered evidence. The same four booleans are retained
 under `INFO.completeness` in the package.
+
+Shader-tier and permutation evidence remain orthogonal to source reflection.
+High is `.sm_depth`; Medium is `.sm_hi`; Low is `.sm_lo`. Source completeness
+applies only to the exact input tier. For unpacked Quad ship gates, explicitly
+select `SPACE_OBJECT_PPT_ENABLED=SOPPT_ENABLED`: an all-unique RFLX does not
+turn a PPT-disabled selected WGSL body into PPT-on backend evidence.
 
 When exact semantic metadata and shader use prove an allowed physical resource
 coalescing, the returned WGSL document is a `CJS_WGSL_SET` version 3 record.

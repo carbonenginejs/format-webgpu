@@ -58,7 +58,7 @@ Builds CarbonEngineJS CEWGPU package bytes.
 <!-- class:ReflectionBlobStore -->
 ## `ReflectionBlobStore`
 
-Builds the deterministic deduplicated byte arena for selected effect reflection.
+Builds the deterministic deduplicated byte arena for complete source reflection.
 
 - Export: None
 - Source: `src/core/effectReflectionPackage.js`

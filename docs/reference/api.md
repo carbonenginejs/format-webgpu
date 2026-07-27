@@ -41,7 +41,7 @@ const reader = new WebgpuFormat({
 | `Inspect(bytes, options?)` | Returns a package summary. |
 | `Build(chunks)` | Builds CEWGPU bytes from ordered chunks. |
 | `AnalyzeEffect(bytes, options?)` | Builds normalized analysis from compiled effect bytes. |
-| `BuildEffect(bytes, options?)` | Converts one selected effect pass into CEWGPU data. |
+| `BuildEffect(bytes, options?)` | Converts one selected effect body/pass scope into CEWGPU data. |
 | `BuildShaderIr(input, options?)` | Builds validated shader IR from DXBC bytes or decoded input. |
 | `BuildWgsl(input, options?)` | Emits a supported typed shader as WGSL. |
 | `BuildWgslBindingPlan(programs, options?)` | Allocates one binding layout across a complete pass. |
@@ -50,6 +50,8 @@ const reader = new WebgpuFormat({
 
 `Read` currently returns plain data. Class registrations are validated and
 stored for forward compatibility but do not hydrate the returned package.
+Raw output is an internal zero-copy package view; callers must treat its chunk
+bytes as immutable and reread/rebuild after any byte change.
 
 ## One-shot static helpers
 
@@ -63,7 +65,7 @@ instance methods:
 | `inspect(bytes, options?)` | Inspects one package. |
 | `build(chunks)` | Builds one package. |
 | `analyzeEffect(bytes, options?)` | Analyzes one compiled effect. |
-| `buildEffect(bytes, options?)` | Builds one selected effect pass. |
+| `buildEffect(bytes, options?)` | Builds one selected effect body/pass scope. |
 | `buildShaderIr(input, options?)` | Builds shader IR. |
 | `buildWgsl(input, options?)` | Emits WGSL. |
 | `buildWgslBindingPlan(programs, options?)` | Allocates a pass binding plan. |
@@ -91,10 +93,10 @@ unresolved permutation assertions rather than silently selecting a default.
 ## Effect-package options
 
 `BuildEffect` and `buildEffect` accept `mode: "selected"`, which is the default
-and currently the only supported body mode. They resolve one permutation body
-and emit complete passes within the requested stage selection. `mode: "all"`
-fails explicitly until portable reflection is serialized for every unique
-body.
+and currently the only supported backend body mode. They resolve one
+permutation body and emit complete passes within the requested stage
+selection. `mode: "all"` fails until translated programs, layouts, and
+resource transforms are packaged for every body.
 The orchestration compatibility option `allPermutations: false` also means
 selected mode; `allPermutations: true` fails by the same rule instead of
 silently emitting one body.
@@ -106,11 +108,11 @@ source byte length and computes a lower-case SHA-256 digest over the active
 input byte view. A caller-supplied `sourceIdentity.sha256` is accepted only
 when it matches that digest.
 
-`BuildEffect` emits selected-effect INFO schema version 2 with explicit WebGPU
-target, backend-package name/version, and translator name/version provenance.
-The CEWGPU binary container remains version 1, and the reader retains legacy
-selected-effect INFO version 1 support. Pre-PGRF INFO version 2 packages also
-remain readable when both the INFO graph pointer and PGRF chunk are absent.
+For version-15 input, `BuildEffect` emits INFO schema version 3 with explicit
+WebGPU target, backend-package name/version, translator provenance, and
+source/backend body coverage. Versions 8-14 emit INFO v2 without reflection.
+The CEWGPU binary container remains version 1. The reader retains legacy INFO
+v1, pre-PGRF INFO v2, and selected-body INFO v2/RFLX v1 support.
 
 New packages also emit a `PGRF` permutation graph and expose it as
 `result.permutationGraph`, JSON-read `permutationGraph`, and raw
@@ -118,23 +120,35 @@ New packages also emit a `PGRF` permutation graph and expose it as
 Cartesian permutation index, option-index tuple, source record, and
 package-local unique-body key/digest. `Inspect` reports `permutationCount` and
 `uniqueBodyCount`. This is complete source topology with identity-only bodies;
-it does not make `mode: "all"` available.
+it does not provide backend translation by itself.
 
-For version-15 input, new packages also emit complete selected-body reflection
-in `RFLX` and exact referenced byte payloads in `RBLB`. Build results expose
+For version-15 input, new packages emit complete all-unique source reflection
+in RFLX v2 and exact referenced byte payloads in one shared `RBLB`. Build
+results expose
 these as `result.reflection` and `result.reflectionBlobs`. JSON reads expose
 `reflection` plus `reflectionBlobByteLength`; raw reads expose
 `CewgpuPackage.reflection`, `reflectionBlobBytes`, and
-`GetReflectionBlob(referenceOrKey)`. The latter returns an owned byte copy and
-requires an object reference to match its stored key, offset, byte length, and
-digest exactly. `Inspect` reports selected reflection body/source-program/blob
-counts and blob byte length. Earlier source versions omit both chunks.
+`GetReflectionBlob(referenceOrKey)`. Raw reads also expose
+`GetPortableEffectReflection(permutationIndex)`: it performs the PGRF/RFLX
+join, expands every referenced payload to fresh owned `Uint8Array` values, and
+reruns the format-hlsl portable validator. Its optional index defaults to
+`META.bodyIndex`; legacy selected-body RFLX v1 accepts only its selected
+permutation. `GetReflectionBlob` remains the lower-level accessor and requires
+an object reference to match its stored key, offset, byte length, and digest
+exactly. `Inspect` reports reflection body/source-program/blob counts and blob
+byte length. The body count covers every PGRF unique body. The selector joins
+`META.bodyIndex -> PGRF.variants[index].bodyKey -> RFLX.bodies[].bodyKey`.
+Earlier source versions omit both chunks.
 
-The returned structural qualification does not claim a complete effect
-resource. `packageValid` reports successful container construction;
-`sourceComplete`, `backendComplete`, and `runtimeComplete` remain false for
-the selected-body package because other unique permutation bodies are not
-reflected or translated.
+The returned structural qualification separates preservation from execution.
+`packageValid` reports successful container construction. Version-15 INFO v3
+reports `sourceComplete: true` for the exact input's portable semantic graph
+while `backendComplete` and `runtimeComplete` remain false. Versions 8-14
+report all three completeness flags false. Source completeness does not embed
+raw body records, translate every body, construct a live `Tr2EffectRes`, or
+prove prepared pipelines/rendering. `GetPortableEffectReflection` hydrates the
+portable source document; it does not construct renderer-owned handles,
+layouts, caches, resource sets, or stage programs.
 
 ## Static metadata
 
@@ -151,11 +165,12 @@ Duplicate/non-ASCII chunk tags are rejected. A declared
 `tr2-effect-webgpu` package also fails closed on missing or malformed JSON
 chunks, unsupported document versions, or inconsistent INFO/META/ANLS/WGSL
 identity, counts, keys, layouts, selection, and completeness fields. Declared
-PGRF pointers, schemas, counts, variant tuples, body references, and the
-selected index/options are reconciled as part of the same gate. Optional
-INFO/RFLX/RBLB reflection units additionally reconcile source/body identity,
-portable closed schemas, exact blob references/digests, and ANLS pass/stage
-source identities.
+PGRF pointers, exact INFO-v3 chunk digests, schemas, counts, variant tuples,
+body references, and the selected index/options are reconciled as part of the
+same gate. Optional
+INFO/RFLX/RBLB reflection units additionally reconcile the exact RFLX digest,
+every PGRF body and representative, portable closed schemas, exact blob
+references/digests, and the selected body's ANLS pass/stage source identities.
 Strict effect validation is activated by the `INFO.packageKind` marker;
 effect-only consumers must require that marker because unmarked CEWGPU
 containers intentionally remain generic.

@@ -1,6 +1,6 @@
 {
   "name": "@carbonenginejs/format-webgpu",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "CarbonEngineJS WebGPU format package reader/builder for .cewgpu packages, plus offline effect analysis built on format-hlsl and format-dxbc.",
   "type": "module",
   "main": "src/index.js",
@@ -34,7 +34,7 @@
   "license": "MIT",
   "dependencies": {
     "@carbonenginejs/format-dxbc": "^0.1.4",
-    "@carbonenginejs/format-hlsl": "^0.1.5"
+    "@carbonenginejs/format-hlsl": "^0.1.8"
   },
   "repository": {
     "type": "git",

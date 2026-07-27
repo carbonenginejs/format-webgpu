@@ -2,17 +2,19 @@ import {
     buildEffectBodyReflection,
     EFFECT_BODY_REFLECTION_FORMAT,
     EFFECT_BODY_REFLECTION_VERSION,
+    enumerateUniqueEffectBodies,
     validateEffectBodyReflection
 } from "@carbonenginejs/format-hlsl/portable";
 
-import { sha256Bytes } from "./sha256.js";
+import { sha256Bytes, sha256Utf8 } from "./sha256.js";
 
 export const EFFECT_REFLECTION_CHUNK = "RFLX";
 export const EFFECT_REFLECTION_BLOB_CHUNK = "RBLB";
 export const EFFECT_REFLECTION_FORMAT = "CJS_CEWGPU_EFFECT_REFLECTION";
-export const EFFECT_REFLECTION_VERSION = 1;
+export const EFFECT_REFLECTION_VERSION = 2;
 
 const SHA256 = /^[0-9a-f]{64}$/u;
+const SELECTED_EFFECT_REFLECTION_VERSION = 1;
 
 /**
  * Build selected-body source reflection plus its deduplicated binary store.
@@ -71,7 +73,7 @@ export function buildSelectedEffectReflection(
     }
     const reflection = {
         format: EFFECT_REFLECTION_FORMAT,
-        formatVersion: EFFECT_REFLECTION_VERSION,
+        formatVersion: SELECTED_EFFECT_REFLECTION_VERSION,
         portableFormat: EFFECT_BODY_REFLECTION_FORMAT,
         portableFormatVersion: EFFECT_BODY_REFLECTION_VERSION,
         keyScope: portable.keyScope,
@@ -120,9 +122,176 @@ export function buildSelectedEffectReflection(
     const pointer = {
         chunk: EFFECT_REFLECTION_CHUNK,
         format: EFFECT_REFLECTION_FORMAT,
-        formatVersion: EFFECT_REFLECTION_VERSION,
+        formatVersion: SELECTED_EFFECT_REFLECTION_VERSION,
         blobChunk: EFFECT_REFLECTION_BLOB_CHUNK,
         bodyCount: 1,
+        sourceProgramCount: counts.sourceProgramCount,
+        blobCount: counts.blobCount,
+        blobByteLength: counts.blobByteLength
+    };
+
+    return Object.freeze({
+        reflection: deepFreeze(reflection),
+        blobBytes,
+        pointer: Object.freeze(pointer),
+        counts
+    });
+}
+
+/**
+ * Build complete unique-body source reflection plus one deduplicated byte
+ * arena while retaining body-local portable keys.
+ *
+ * @param {object} effectRes Loaded format-hlsl Tr2EffectRes.
+ * @param {object} permutationGraph Complete source PGRF document.
+ * @param {object} options Source identity and diagnostic label.
+ * @param {object} options.sourceIdentity Canonical INFO source identity.
+ * @param {string} options.sourcePath Diagnostic INFO/META/ANLS source label.
+ * @returns {{reflection:object,blobBytes:Uint8Array,pointer:object,counts:object}}
+ *   Frozen all-unique reflection documents and owned blob bytes.
+ */
+export function buildCompleteEffectReflection(
+    effectRes,
+    permutationGraph,
+    options
+)
+{
+    const sourceBytes = effectRes?.m_data;
+    if (!(sourceBytes instanceof Uint8Array)
+        || options?.sourceIdentity?.byteLength !== sourceBytes.byteLength
+        || options?.sourceIdentity?.sha256 !== sha256Bytes(sourceBytes))
+    {
+        throw new Error(
+            "Complete effect reflection source identity disagrees with exact source bytes"
+        );
+    }
+
+    const inventory = enumerateUniqueEffectBodies(effectRes);
+    if (inventory.length !== permutationGraph?.bodies?.length)
+    {
+        throw new Error(
+            "Complete effect reflection body inventory disagrees with PGRF"
+        );
+    }
+
+    const store = new ReflectionBlobStore();
+    let source = null;
+    const bodies = inventory.map((group, bodyIndex) =>
+    {
+        const graphBody = permutationGraph.bodies[bodyIndex];
+        const representative = selectedVariant(
+            permutationGraph,
+            group.permutationIndex
+        );
+        if (representative.bodyKey !== graphBody?.key
+            || group.variants.some((variant) =>
+            {
+                const graphVariant = selectedVariant(
+                    permutationGraph,
+                    variant.permutationIndex
+                );
+                return graphVariant.bodyKey !== graphBody.key
+                    || graphVariant.sourceRecord.offset
+                        !== variant.sourceRecord.offset
+                    || graphVariant.sourceRecord.byteLength
+                        !== variant.sourceRecord.byteLength;
+            }))
+        {
+            throw new Error(
+                `Complete effect reflection body ${bodyIndex} aliases disagree with PGRF`
+            );
+        }
+
+        const portable = buildEffectBodyReflection(
+            effectRes,
+            group.permutationIndex
+        );
+        if (portable.sourceRecord.offset !== group.sourceRecord.offset
+            || portable.sourceRecord.byteLength !== group.sourceRecord.byteLength)
+        {
+            throw new Error(
+                `Complete effect reflection body ${bodyIndex} source record changed`
+            );
+        }
+        if (!source)
+        {
+            source = {
+                label: portable.source.label,
+                effectVersion: portable.source.effectVersion,
+                compilerVersion: portable.source.compilerVersion,
+                nativeHash: store.add(portable.source.nativeHash),
+                stringTableByteLength: portable.source.stringTableByteLength,
+                byteLength: portable.source.byteLength,
+                sha256: options.sourceIdentity.sha256
+            };
+        }
+        else if (!samePortableSource(source, portable.source, store))
+        {
+            throw new Error(
+                `Complete effect reflection body ${bodyIndex} source envelope changed`
+            );
+        }
+
+        const exactBodyBytes = sourceBytes.subarray(
+            portable.sourceRecord.offset,
+            portable.sourceRecord.offset + portable.sourceRecord.byteLength
+        );
+        if (graphBody.byteLength !== exactBodyBytes.byteLength
+            || graphBody.sha256 !== sha256Bytes(exactBodyBytes))
+        {
+            throw new Error(
+                `Complete effect reflection body ${bodyIndex} identity disagrees with PGRF`
+            );
+        }
+        return {
+            bodyKey: graphBody.key,
+            representativePermutationIndex: group.permutationIndex,
+            byteLength: graphBody.byteLength,
+            sha256: graphBody.sha256,
+            effect: packByteArrays(portable.effect, store)
+        };
+    });
+    const blobBytes = store.finish();
+    const reflection = {
+        format: EFFECT_REFLECTION_FORMAT,
+        formatVersion: EFFECT_REFLECTION_VERSION,
+        portableFormat: EFFECT_BODY_REFLECTION_FORMAT,
+        portableFormatVersion: EFFECT_BODY_REFLECTION_VERSION,
+        keyScope: "body-local",
+        coverage: {
+            bodies: "all-unique",
+            reflection: "complete-for-listed",
+            sourcePrograms: "complete-for-listed",
+            constantDefaults: "exact-for-listed"
+        },
+        source,
+        bodies,
+        blobStore: {
+            chunk: EFFECT_REFLECTION_BLOB_CHUNK,
+            byteLength: blobBytes.byteLength,
+            sha256: sha256Bytes(blobBytes),
+            blobCount: store.entries.length,
+            blobs: store.entries.map((entry) => ({ ...entry }))
+        }
+    };
+    const counts = validateCompleteEffectReflection(
+        reflection,
+        blobBytes,
+        {
+            permutationGraph,
+            sourceIdentity: options.sourceIdentity,
+            sourcePath: options.sourcePath
+        }
+    );
+    const pointer = {
+        chunk: EFFECT_REFLECTION_CHUNK,
+        format: EFFECT_REFLECTION_FORMAT,
+        formatVersion: EFFECT_REFLECTION_VERSION,
+        blobChunk: EFFECT_REFLECTION_BLOB_CHUNK,
+        sha256: sha256Utf8(`${JSON.stringify(reflection)}\n`),
+        coverage: "all-unique",
+        permutationCount: permutationGraph.variants.length,
+        bodyCount: counts.bodyCount,
         sourceProgramCount: counts.sourceProgramCount,
         blobCount: counts.blobCount,
         blobByteLength: counts.blobByteLength
@@ -175,7 +344,7 @@ export function validateSelectedEffectReflection(
         "constantDefaults"
     ], "CEWGPU RFLX.coverage");
     if (reflection.format !== EFFECT_REFLECTION_FORMAT
-        || reflection.formatVersion !== EFFECT_REFLECTION_VERSION
+        || reflection.formatVersion !== SELECTED_EFFECT_REFLECTION_VERSION
         || reflection.portableFormat !== EFFECT_BODY_REFLECTION_FORMAT
         || reflection.portableFormatVersion !== EFFECT_BODY_REFLECTION_VERSION
         || reflection.keyScope !== "body-local"
@@ -317,12 +486,199 @@ export function validateSelectedEffectReflection(
 }
 
 /**
+ * Validate complete unique-body reflection against PGRF and its shared byte
+ * arena.
+ *
+ * @param {object} reflection Parsed RFLX v2 document.
+ * @param {Uint8Array} blobBytes Raw RBLB bytes.
+ * @param {object} options Reconciliation context.
+ * @param {object} options.permutationGraph Validated complete PGRF document.
+ * @param {object} options.sourceIdentity Validated INFO source identity.
+ * @param {string} options.sourcePath Validated INFO source label.
+ * @returns {{permutationCount:number,bodyCount:number,sourceProgramCount:number,blobCount:number,blobByteLength:number}}
+ *   Validated complete source-reflection counts.
+ */
+export function validateCompleteEffectReflection(
+    reflection,
+    blobBytes,
+    options
+)
+{
+    requireExactKeys(reflection, [
+        "format",
+        "formatVersion",
+        "portableFormat",
+        "portableFormatVersion",
+        "keyScope",
+        "coverage",
+        "source",
+        "bodies",
+        "blobStore"
+    ], "CEWGPU RFLX");
+    requireExactKeys(reflection.coverage, [
+        "bodies",
+        "reflection",
+        "sourcePrograms",
+        "constantDefaults"
+    ], "CEWGPU RFLX.coverage");
+    if (reflection.format !== EFFECT_REFLECTION_FORMAT
+        || reflection.formatVersion !== EFFECT_REFLECTION_VERSION
+        || reflection.portableFormat !== EFFECT_BODY_REFLECTION_FORMAT
+        || reflection.portableFormatVersion !== EFFECT_BODY_REFLECTION_VERSION
+        || reflection.keyScope !== "body-local"
+        || reflection.coverage.bodies !== "all-unique"
+        || reflection.coverage.reflection !== "complete-for-listed"
+        || reflection.coverage.sourcePrograms !== "complete-for-listed"
+        || reflection.coverage.constantDefaults !== "exact-for-listed"
+        || !Array.isArray(reflection.bodies))
+    {
+        throw new Error("CEWGPU RFLX schema or coverage is unsupported");
+    }
+
+    const graph = requireRecord(
+        options?.permutationGraph,
+        "CEWGPU RFLX permutation graph"
+    );
+    const sourceIdentity = requireRecord(
+        options?.sourceIdentity,
+        "CEWGPU RFLX source identity"
+    );
+    const sourcePath = requireString(
+        options?.sourcePath,
+        "CEWGPU RFLX sourcePath"
+    );
+    if (reflection.bodies.length !== graph.bodies?.length)
+    {
+        throw new Error("CEWGPU RFLX does not cover every PGRF body");
+    }
+
+    const source = requireRecord(reflection.source, "CEWGPU RFLX.source");
+    requireExactKeys(source, [
+        "label",
+        "effectVersion",
+        "compilerVersion",
+        "nativeHash",
+        "stringTableByteLength",
+        "byteLength",
+        "sha256"
+    ], "CEWGPU RFLX.source");
+    if (source.label !== sourcePath
+        || source.byteLength !== sourceIdentity.byteLength
+        || source.sha256 !== sourceIdentity.sha256)
+    {
+        throw new Error("CEWGPU RFLX source identity disagrees with INFO");
+    }
+    requireSha256(source.sha256, "CEWGPU RFLX source sha256");
+
+    const blobInventory = validateBlobStore(reflection.blobStore, blobBytes);
+    const usedBlobKeys = new Set();
+    const nativeHash = unpackBlobReference(
+        source.nativeHash,
+        blobInventory,
+        blobBytes,
+        usedBlobKeys
+    );
+    const representativeByBodyKey = new Map();
+    for (const variant of graph.variants)
+    {
+        if (!representativeByBodyKey.has(variant.bodyKey))
+        {
+            representativeByBodyKey.set(variant.bodyKey, variant);
+        }
+    }
+    let sourceProgramCount = 0;
+    for (const [ bodyIndex, reflectedBody ] of reflection.bodies.entries())
+    {
+        requireExactKeys(reflectedBody, [
+            "bodyKey",
+            "representativePermutationIndex",
+            "byteLength",
+            "sha256",
+            "effect"
+        ], `CEWGPU RFLX body ${bodyIndex}`);
+        const graphBody = graph.bodies[bodyIndex];
+        requireString(reflectedBody.bodyKey, `CEWGPU RFLX body ${bodyIndex} key`);
+        requireUint(
+            reflectedBody.representativePermutationIndex,
+            `CEWGPU RFLX body ${bodyIndex} representative`
+        );
+        requireUint(
+            reflectedBody.byteLength,
+            `CEWGPU RFLX body ${bodyIndex} byteLength`,
+            true
+        );
+        requireSha256(
+            reflectedBody.sha256,
+            `CEWGPU RFLX body ${bodyIndex} sha256`
+        );
+        const representative = representativeByBodyKey.get(
+            reflectedBody.bodyKey
+        );
+        if (!graphBody
+            || reflectedBody.bodyKey !== graphBody.key
+            || reflectedBody.byteLength !== graphBody.byteLength
+            || reflectedBody.sha256 !== graphBody.sha256
+            || !representative
+            || reflectedBody.representativePermutationIndex
+                !== representative.permutationIndex)
+        {
+            throw new Error(
+                `CEWGPU RFLX body ${bodyIndex} disagrees with PGRF`
+            );
+        }
+        const portable = {
+            format: reflection.portableFormat,
+            formatVersion: reflection.portableFormatVersion,
+            mode: "single-body",
+            keyScope: reflection.keyScope,
+            coverage: {
+                bodies: "single",
+                reflection: "complete",
+                sourcePrograms: "complete",
+                constantDefaults: "exact"
+            },
+            source: {
+                label: source.label,
+                effectVersion: source.effectVersion,
+                compilerVersion: source.compilerVersion,
+                nativeHash: Uint8Array.from(nativeHash),
+                stringTableByteLength: source.stringTableByteLength,
+                byteLength: source.byteLength
+            },
+            permutationIndex: representative.permutationIndex,
+            sourceRecord: { ...representative.sourceRecord },
+            effect: unpackByteReferences(
+                reflectedBody.effect,
+                blobInventory,
+                blobBytes,
+                usedBlobKeys
+            )
+        };
+        sourceProgramCount += validateEffectBodyReflection(portable)
+            .sourceProgramCount;
+    }
+    if (usedBlobKeys.size !== blobInventory.size)
+    {
+        throw new Error("CEWGPU RFLX blob store contains unreferenced payloads");
+    }
+
+    return Object.freeze({
+        permutationCount: graph.variants.length,
+        bodyCount: reflection.bodies.length,
+        sourceProgramCount,
+        blobCount: blobInventory.size,
+        blobByteLength: blobBytes.byteLength
+    });
+}
+
+/**
  * Validate an INFO reflection pointer against parsed RFLX/RBLB payloads.
  *
  * @param {object} pointer INFO reflection pointer.
  * @param {object} reflection Parsed RFLX document.
  * @param {Uint8Array} blobBytes Raw RBLB bytes.
  * @param {object} options Reconciliation context for RFLX.
+ * @param {Uint8Array} [options.reflectionBytes] Exact RFLX chunk bytes for v2.
  * @returns {object} Validated reflection counts.
  */
 export function validateEffectReflectionPointer(
@@ -332,7 +688,20 @@ export function validateEffectReflectionPointer(
     options
 )
 {
-    requireExactKeys(pointer, [
+    const version = pointer?.formatVersion;
+    requireExactKeys(pointer, version === EFFECT_REFLECTION_VERSION ? [
+        "chunk",
+        "format",
+        "formatVersion",
+        "blobChunk",
+        "sha256",
+        "coverage",
+        "permutationCount",
+        "bodyCount",
+        "sourceProgramCount",
+        "blobCount",
+        "blobByteLength"
+    ] : [
         "chunk",
         "format",
         "formatVersion",
@@ -344,7 +713,10 @@ export function validateEffectReflectionPointer(
     ], "CEWGPU INFO.effectReflection");
     if (pointer.chunk !== EFFECT_REFLECTION_CHUNK
         || pointer.format !== EFFECT_REFLECTION_FORMAT
-        || pointer.formatVersion !== EFFECT_REFLECTION_VERSION
+        || ![
+            SELECTED_EFFECT_REFLECTION_VERSION,
+            EFFECT_REFLECTION_VERSION
+        ].includes(version)
         || pointer.blobChunk !== EFFECT_REFLECTION_BLOB_CHUNK)
     {
         throw new Error("CEWGPU INFO.effectReflection is malformed");
@@ -359,11 +731,46 @@ export function validateEffectReflectionPointer(
         requireUint(pointer[field], `CEWGPU INFO.effectReflection.${field}`);
     }
 
-    const counts = validateSelectedEffectReflection(
-        reflection,
-        blobBytes,
-        options
-    );
+    let counts;
+    if (version === EFFECT_REFLECTION_VERSION)
+    {
+        requireSha256(pointer.sha256, "CEWGPU INFO.effectReflection.sha256");
+        if (!(options?.reflectionBytes instanceof Uint8Array)
+            || sha256Bytes(options.reflectionBytes) !== pointer.sha256)
+        {
+            throw new Error(
+                "CEWGPU INFO effect-reflection digest disagrees with RFLX"
+            );
+        }
+        if (pointer.coverage !== "all-unique")
+        {
+            throw new Error("CEWGPU INFO.effectReflection is malformed");
+        }
+        requireUint(
+            pointer.permutationCount,
+            "CEWGPU INFO.effectReflection.permutationCount",
+            true
+        );
+        counts = validateCompleteEffectReflection(
+            reflection,
+            blobBytes,
+            options
+        );
+        if (pointer.permutationCount !== counts.permutationCount)
+        {
+            throw new Error(
+                "CEWGPU INFO effect-reflection counts disagree with RFLX/RBLB"
+            );
+        }
+    }
+    else
+    {
+        counts = validateSelectedEffectReflection(
+            reflection,
+            blobBytes,
+            options
+        );
+    }
     if (pointer.bodyCount !== counts.bodyCount
         || pointer.sourceProgramCount !== counts.sourceProgramCount
         || pointer.blobCount !== counts.blobCount
@@ -372,6 +779,106 @@ export function validateEffectReflectionPointer(
         throw new Error("CEWGPU INFO effect-reflection counts disagree with RFLX/RBLB");
     }
     return counts;
+}
+
+/**
+ * Selects the body-local reflected effect for one PGRF permutation.
+ *
+ * @param {object} reflection Validated RFLX v1 or v2 document.
+ * @param {object} permutationGraph Validated PGRF document.
+ * @param {number} permutationIndex Exact package-selected permutation index.
+ * @returns {object} Reflected body-local effect graph.
+ */
+export function effectReflectionForPermutation(
+    reflection,
+    permutationGraph,
+    permutationIndex
+)
+{
+    const variant = selectedVariant(permutationGraph, permutationIndex);
+    if (reflection?.formatVersion === SELECTED_EFFECT_REFLECTION_VERSION)
+    {
+        if (reflection.selectedBody?.permutationIndex !== permutationIndex
+            || reflection.selectedBody?.bodyKey !== variant.bodyKey)
+        {
+            throw new Error("CEWGPU selected RFLX body disagrees with PGRF");
+        }
+        return requireRecord(reflection.effect, "CEWGPU RFLX.effect");
+    }
+    if (reflection?.formatVersion === EFFECT_REFLECTION_VERSION)
+    {
+        const body = reflection.bodies?.find((entry) =>
+            entry.bodyKey === variant.bodyKey);
+        return requireRecord(body?.effect, "CEWGPU RFLX selected effect");
+    }
+    throw new Error("CEWGPU RFLX schema or coverage is unsupported");
+}
+
+/**
+ * Hydrates one package permutation into the validated portable reflection
+ * contract owned by format-hlsl.
+ *
+ * @param {object} reflection Validated RFLX v1 or v2 document.
+ * @param {object} permutationGraph Validated PGRF document.
+ * @param {number} permutationIndex Exact package permutation index.
+ * @param {(reference:object)=>Uint8Array|null} resolveBlob Exact RBLB resolver.
+ * @returns {object} Fresh portable single-body reflection with owned bytes.
+ */
+export function hydrateEffectReflectionForPermutation(
+    reflection,
+    permutationGraph,
+    permutationIndex,
+    resolveBlob
+)
+{
+    if (typeof resolveBlob !== "function")
+    {
+        throw new TypeError("CEWGPU reflection blob resolver must be a function");
+    }
+    const variant = selectedVariant(permutationGraph, permutationIndex);
+    const selected = reflection?.formatVersion
+        === SELECTED_EFFECT_REFLECTION_VERSION
+        ? reflection.selectedBody
+        : variant;
+    const cache = new Map();
+    const portable = {
+        format: reflection?.portableFormat,
+        formatVersion: reflection?.portableFormatVersion,
+        mode: "single-body",
+        keyScope: reflection?.keyScope,
+        coverage: {
+            bodies: "single",
+            reflection: "complete",
+            sourcePrograms: "complete",
+            constantDefaults: "exact"
+        },
+        source: {
+            label: reflection?.source?.label,
+            effectVersion: reflection?.source?.effectVersion,
+            compilerVersion: reflection?.source?.compilerVersion,
+            nativeHash: hydrateResolvedBytes(
+                reflection?.source?.nativeHash,
+                resolveBlob,
+                cache
+            ),
+            stringTableByteLength:
+                reflection?.source?.stringTableByteLength,
+            byteLength: reflection?.source?.byteLength
+        },
+        permutationIndex,
+        sourceRecord: { ...selected?.sourceRecord },
+        effect: hydrateResolvedBytes(
+            effectReflectionForPermutation(
+                reflection,
+                permutationGraph,
+                permutationIndex
+            ),
+            resolveBlob,
+            cache
+        )
+    };
+    validateEffectBodyReflection(portable);
+    return portable;
 }
 
 /**
@@ -447,6 +954,20 @@ class ReflectionBlobStore
         }
         return out;
     }
+}
+
+function samePortableSource(source, portableSource, store)
+{
+    const nativeHash = store.add(portableSource.nativeHash);
+    return source.label === portableSource.label
+        && source.effectVersion === portableSource.effectVersion
+        && source.compilerVersion === portableSource.compilerVersion
+        && source.stringTableByteLength === portableSource.stringTableByteLength
+        && source.byteLength === portableSource.byteLength
+        && source.nativeHash.blobKey === nativeHash.blobKey
+        && source.nativeHash.offset === nativeHash.offset
+        && source.nativeHash.byteLength === nativeHash.byteLength
+        && source.nativeHash.sha256 === nativeHash.sha256;
 }
 
 function packByteArrays(value, store)
@@ -609,6 +1130,44 @@ function isBlobReference(value)
         && Object.prototype.hasOwnProperty.call(value, "offset")
         && Object.prototype.hasOwnProperty.call(value, "byteLength")
         && Object.prototype.hasOwnProperty.call(value, "sha256");
+}
+
+function hydrateResolvedBytes(value, resolveBlob, cache)
+{
+    if (isBlobReference(value))
+    {
+        const key = [
+            value.blobKey,
+            value.offset,
+            value.byteLength,
+            value.sha256
+        ].join(":");
+        if (!cache.has(key))
+        {
+            const bytes = resolveBlob(value);
+            if (!(bytes instanceof Uint8Array))
+            {
+                throw new Error(
+                    `CEWGPU reflection blob ${value.blobKey} is unavailable`
+                );
+            }
+            cache.set(key, bytes);
+        }
+        return Uint8Array.from(cache.get(key));
+    }
+    if (Array.isArray(value))
+    {
+        return value.map((entry) =>
+            hydrateResolvedBytes(entry, resolveBlob, cache));
+    }
+    if (isRecord(value))
+    {
+        return Object.fromEntries(Object.entries(value).map(([ key, entry ]) => [
+            key,
+            hydrateResolvedBytes(entry, resolveBlob, cache)
+        ]));
+    }
+    return value;
 }
 
 function requireExactKeys(value, allowed, context)

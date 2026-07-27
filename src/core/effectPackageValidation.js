@@ -11,10 +11,13 @@ import {
     validateEffectPermutationGraph
 } from "./effectPermutationGraph.js";
 import {
+    effectReflectionForPermutation,
     EFFECT_REFLECTION_BLOB_CHUNK,
     EFFECT_REFLECTION_CHUNK,
+    EFFECT_REFLECTION_VERSION,
     validateEffectReflectionPointer
 } from "./effectReflectionPackage.js";
+import { sha256Bytes } from "./sha256.js";
 
 const REQUIRED_EFFECT_CHUNKS = Object.freeze([ "INFO", "META", "ANLS", "WGSL" ]);
 const EFFECT_PACKAGE_KIND = "tr2-effect-webgpu";
@@ -91,6 +94,25 @@ function requireJsonObject(pkg, tag)
         throw new Error(`CEWGPU ${tag} must contain a JSON object`);
     }
 
+    return value;
+}
+
+/**
+ * Require one closed-schema JSON object.
+ *
+ * @param {object} value Candidate object.
+ * @param {string[]} allowed Exact field names.
+ * @param {string} context Diagnostic context.
+ * @returns {object} Validated object.
+ */
+function requireExactKeys(value, allowed, context)
+{
+    const keys = Object.keys(value);
+    if (keys.length !== allowed.length
+        || keys.some((key) => !allowed.includes(key)))
+    {
+        throw new Error(`${context} has unsupported or missing fields`);
+    }
     return value;
 }
 
@@ -260,9 +282,26 @@ function validatePermutationGraphReference(pkg, info)
     const chunk = pkg.GetChunk(EFFECT_PERMUTATION_GRAPH_CHUNK);
     if (pointer === undefined && !chunk) return null;
 
-    if (info.formatVersion !== 2
-        || !pointer || typeof pointer !== "object" || Array.isArray(pointer)
-        || pointer.chunk !== EFFECT_PERMUTATION_GRAPH_CHUNK
+    if (![ 2, 3 ].includes(info.formatVersion)
+        || !pointer || typeof pointer !== "object" || Array.isArray(pointer))
+    {
+        throw new Error("CEWGPU INFO.permutationGraph is malformed");
+    }
+    requireExactKeys(pointer, info.formatVersion === 3 ? [
+        "chunk",
+        "format",
+        "formatVersion",
+        "sha256",
+        "permutationCount",
+        "uniqueBodyCount"
+    ] : [
+        "chunk",
+        "format",
+        "formatVersion",
+        "permutationCount",
+        "uniqueBodyCount"
+    ], "CEWGPU INFO.permutationGraph");
+    if (pointer.chunk !== EFFECT_PERMUTATION_GRAPH_CHUNK
         || pointer.format !== EFFECT_PERMUTATION_GRAPH_FORMAT
         || pointer.formatVersion !== EFFECT_PERMUTATION_GRAPH_VERSION)
     {
@@ -272,6 +311,15 @@ function validatePermutationGraphReference(pkg, info)
     {
         throw new Error(
             `CEWGPU INFO.permutationGraph requires ${EFFECT_PERMUTATION_GRAPH_CHUNK}`
+        );
+    }
+    if (info.formatVersion === 3
+        && (typeof pointer.sha256 !== "string"
+            || !/^[0-9a-f]{64}$/u.test(pointer.sha256)
+            || sha256Bytes(chunk.bytes) !== pointer.sha256))
+    {
+        throw new Error(
+            "CEWGPU INFO permutation-graph digest disagrees with PGRF"
         );
     }
 
@@ -306,9 +354,16 @@ function readEffectReflectionReference(pkg, info)
     const pointer = info.effectReflection;
     const reflectionChunk = pkg.GetChunk(EFFECT_REFLECTION_CHUNK);
     const blobChunk = pkg.GetChunk(EFFECT_REFLECTION_BLOB_CHUNK);
-    if (pointer === undefined && !reflectionChunk && !blobChunk) return null;
+    if (pointer === undefined && !reflectionChunk && !blobChunk)
+    {
+        if (info.formatVersion === 3)
+        {
+            throw new Error("CEWGPU INFO v3 requires complete effect reflection");
+        }
+        return null;
+    }
 
-    if (info.formatVersion !== 2 || pointer === undefined)
+    if (![ 2, 3 ].includes(info.formatVersion) || pointer === undefined)
     {
         throw new Error("CEWGPU INFO.effectReflection is malformed");
     }
@@ -328,6 +383,7 @@ function readEffectReflectionReference(pkg, info)
     return {
         pointer,
         reflection: requireJsonObject(pkg, EFFECT_REFLECTION_CHUNK),
+        reflectionBytes: reflectionChunk.bytes,
         blobBytes: blobChunk.bytes
     };
 }
@@ -825,13 +881,32 @@ function validateSelection(metadata, stages, shaderKeys)
 function validatePartialBoundary(info, stages, effectName)
 {
     const completeness = info.completeness;
+    const sourceComplete = info.formatVersion === 3;
     if (!completeness || typeof completeness !== "object"
         || completeness.packageValid !== true
-        || completeness.sourceComplete !== false
+        || completeness.sourceComplete !== sourceComplete
         || completeness.backendComplete !== false
         || completeness.runtimeComplete !== false)
     {
-        throw new Error("CEWGPU INFO.completeness is inconsistent with selected-body packaging");
+        throw new Error(
+            "CEWGPU INFO.completeness is inconsistent with source/backend coverage"
+        );
+    }
+    if (sourceComplete
+        && (info.sourceBodyCoverage !== "all-unique"
+            || info.backendBodyCoverage !== "selected"))
+    {
+        throw new Error(
+            "CEWGPU INFO v3 source/backend body coverage is inconsistent"
+        );
+    }
+    if (!sourceComplete
+        && (Object.prototype.hasOwnProperty.call(info, "sourceBodyCoverage")
+            || Object.prototype.hasOwnProperty.call(info, "backendBodyCoverage")))
+    {
+        throw new Error(
+            "CEWGPU legacy INFO cannot declare version 3 body coverage"
+        );
     }
 
     for (const stage of stages)
@@ -1062,11 +1137,14 @@ export function validateEffectPackageEnvelope(pkg)
     {
         info = pkg.GetJson("INFO");
     }
-    catch
+    catch (error)
     {
-        return true;
+        throw new Error(`CEWGPU INFO must contain valid JSON: ${error.message}`);
     }
-    if (!info || typeof info !== "object" || Array.isArray(info)) return true;
+    if (!info || typeof info !== "object" || Array.isArray(info))
+    {
+        throw new Error("CEWGPU INFO must contain a JSON object");
+    }
     if (info.packageKind !== EFFECT_PACKAGE_KIND) return true;
 
     for (const tag of REQUIRED_EFFECT_CHUNKS)
@@ -1081,9 +1159,9 @@ export function validateEffectPackageEnvelope(pkg)
     const analysis = requireJsonObject(pkg, "ANLS");
     const wgsl = requireJsonObject(pkg, "WGSL");
 
-    if (info.format !== "CEWGPU" || ![ 1, 2 ].includes(info.formatVersion))
+    if (info.format !== "CEWGPU" || ![ 1, 2, 3 ].includes(info.formatVersion))
     {
-        throw new Error("CEWGPU INFO schema must be selected-effect version 1 or 2");
+        throw new Error("CEWGPU INFO schema must be selected-effect version 1, 2, or 3");
     }
     if (analysis.format !== "CEWGPU_ANALYSIS" || analysis.formatVersion !== 1)
     {
@@ -1116,7 +1194,7 @@ export function validateEffectPackageEnvelope(pkg)
     {
         throw new Error("CEWGPU INFO.translator must identify dxbc-js-wgsl");
     }
-    if (info.formatVersion === 2)
+    if (info.formatVersion >= 2)
     {
         if (info.targetBackend !== WEBGPU_BACKEND_NAME)
         {
@@ -1135,7 +1213,7 @@ export function validateEffectPackageEnvelope(pkg)
             throw new Error("CEWGPU INFO.translator provenance is malformed");
         }
     }
-    validateSourceIdentity(info.sourceIdentity, info.formatVersion === 2);
+    validateSourceIdentity(info.sourceIdentity, info.formatVersion >= 2);
     const permutationGraph = validatePermutationGraphReference(pkg, info);
     const effectReflection = readEffectReflectionReference(pkg, info);
     if (info.outputPath !== null
@@ -1187,7 +1265,7 @@ export function validateEffectPackageEnvelope(pkg)
         {
             throw new Error("CEWGPU effect reflection requires PGRF");
         }
-        validateEffectReflectionPointer(
+        const reflectionCounts = validateEffectReflectionPointer(
             effectReflection.pointer,
             effectReflection.reflection,
             effectReflection.blobBytes,
@@ -1195,9 +1273,30 @@ export function validateEffectPackageEnvelope(pkg)
                 permutationGraph,
                 permutationIndex: bodyIndex,
                 sourceIdentity: info.sourceIdentity,
-                sourcePath
+                sourcePath,
+                reflectionBytes: effectReflection.reflectionBytes
             }
         );
+        if (info.formatVersion === 3)
+        {
+            if (effectReflection.pointer.formatVersion
+                    !== EFFECT_REFLECTION_VERSION
+                || info.sourceBodyCoverage !== "all-unique"
+                || info.backendBodyCoverage !== "selected"
+                || reflectionCounts.permutationCount
+                    !== permutationGraph.variants.length
+                || reflectionCounts.bodyCount !== permutationGraph.bodies.length)
+            {
+                throw new Error(
+                    "CEWGPU INFO v3 source/backend body coverage is inconsistent"
+                );
+            }
+        }
+        else if (effectReflection.pointer.formatVersion
+            === EFFECT_REFLECTION_VERSION)
+        {
+            throw new Error("CEWGPU complete RFLX requires INFO version 3");
+        }
         if (effectReflection.reflection.source.effectVersion !== analysis.effectVersion
             || effectReflection.reflection.source.compilerVersion !== analysis.compilerVersion)
         {
@@ -1210,7 +1309,11 @@ export function validateEffectPackageEnvelope(pkg)
     if (effectReflection)
     {
         validateReflectionAnalysis(
-            effectReflection.reflection,
+            effectReflectionForPermutation(
+                effectReflection.reflection,
+                permutationGraph,
+                bodyIndex
+            ),
             passes,
             stages
         );
@@ -1244,16 +1347,20 @@ export function validateEffectPackageEnvelope(pkg)
 /**
  * Reconcile complete source reflection with compact ANLS identities.
  *
- * @param {object} reflection Validated RFLX document.
+ * @param {object} reflectedEffect Selected body-local reflected effect graph.
  * @param {object[]} analysisPasses Validated ANLS pass records.
  * @param {object[]} analysisStages Validated ANLS stage records.
  * @returns {true} True when the two documents agree.
  */
-function validateReflectionAnalysis(reflection, analysisPasses, analysisStages)
+function validateReflectionAnalysis(
+    reflectedEffect,
+    analysisPasses,
+    analysisStages
+)
 {
     const reflectedPasses = new Map();
     const reflectedStages = new Map();
-    for (const technique of reflection.effect.techniques)
+    for (const technique of reflectedEffect.techniques)
     {
         for (const [ passIndex, pass ] of technique.passes.entries())
         {

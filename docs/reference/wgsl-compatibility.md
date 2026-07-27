@@ -1331,6 +1331,42 @@ canonical bindings and zero WGSL warnings. The high-tier
 480 bodies, 4,480 emitted stage occurrences, and 2,240 ready pass occurrences;
 the envelope slice changes none of its WGSL.
 
+The 0.5.0 all-source-reflection checkpoint replaces selected-only RFLX v1
+output with INFO v3 plus all-unique RFLX v2/RBLB. It records complete portable
+reflection for every unique version-15 source body while ANLS/WGSL remain
+selected-backend data. `GetPortableEffectReflection(permutationIndex)` exposes
+any package permutation as a fresh, format-hlsl-validated document with owned
+byte payloads. A live `Tr2EffectRes` and renderer-owned handles remain a
+consumer concern.
+
+An exhaustive build-3444265 oracle retains 507 qualified, 30 unsupported, and
+zero failed/unqualified results. For all 507 emitted packages, `META`, `PGRF`,
+`ANLS`, and `WGSL` are byte-identical to 0.4.4 after the expected INFO/RFLX
+schema change. Reconstructing all 8,257 permutations deep-equals fresh source
+reflection across 3,331 unique bodies, 23,949 source programs, 11,549
+techniques, 11,963 passes, 68,367 constants, 38,335 resources, 10,858
+samplers, 16 UAVs, and 1,241,456 exact constant-default bytes. The shared
+RBLB stores 5,901 deduplicated payloads / 20,625,492 bytes. Candidate packages
+total 132,688,092 bytes versus 39,643,003 bytes at 0.4.4; the median package
+ratio is 1.008 and p95 is 8.51. A second fresh build using format-hlsl 0.1.8
+produces all 507 packages byte-for-byte identically.
+
+The format-hlsl 0.1.8 prerequisite preserves Carbon's authored zero-count
+bindless descriptor ranges and requires every resource/UAV map entry to match
+exactly one signature record. The real DX12 High unpacked-Quad source validates
+all 288 unique bodies, including its zero/unbounded SRV, UAV, and sampler
+ranges. The exact DX11/DX12
+`managed/space/spaceobject/v5/quad/unpacked_quadv5.sm_depth` matrix remains
+qualified across 480 bodies per backend; DX11 emits all 4,480 stage
+occurrences and 2,240 passes, while DX12's expected unbounded-range backend
+boundary remains comparison-only for 480 pass occurrences.
+
+Explicit `SPACE_OBJECT_PPT_ENABLED=SOPPT_ENABLED` body-4 packages were then
+prepared through the unchanged engine-webgpu reader on a real WebGPU adapter.
+The DX11 package contains 144 reflected bodies and the DX12 package 288; each
+selected Main pass exposes two modules and 25 canonical bindings. Both browser
+gates compile with zero WGSL warnings.
+
 ## Verification contract
 
 Every shader-emission, layout, or transform compatibility change requires the

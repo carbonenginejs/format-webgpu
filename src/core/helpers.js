@@ -287,17 +287,21 @@ export function readWithValues(input, values)
 export function inspectWithValues(input, values)
 {
     const pkg = readRaw(input, values);
+    const info = pkg.info;
+    const permutationGraph = pkg.permutationGraph;
     return {
         source: values.source,
         isCewgpu: true,
         version: pkg.version,
         chunks: pkg.chunks.map(({ tag, size, offset }) => ({ tag, size, offset })),
-        permutationCount: pkg.permutationGraph?.variants?.length ?? 0,
-        uniqueBodyCount: pkg.permutationGraph?.bodies?.length ?? 0,
-        reflectionBodyCount: pkg.reflection ? 1 : 0,
-        reflectionSourceProgramCount: pkg.info?.effectReflection?.sourceProgramCount ?? 0,
-        reflectionBlobCount: pkg.reflection?.blobStore?.blobs?.length ?? 0,
-        reflectionBlobByteLength: pkg.reflectionBlobBytes?.byteLength ?? 0,
+        permutationCount: permutationGraph?.variants?.length ?? 0,
+        uniqueBodyCount: permutationGraph?.bodies?.length ?? 0,
+        reflectionBodyCount: info?.effectReflection?.bodyCount ?? 0,
+        reflectionSourceProgramCount:
+            info?.effectReflection?.sourceProgramCount ?? 0,
+        reflectionBlobCount: info?.effectReflection?.blobCount ?? 0,
+        reflectionBlobByteLength:
+            info?.effectReflection?.blobByteLength ?? 0,
         stageCount: analysisStages(pkg).length,
         shaderCount: wgslShaders(pkg).length,
         layoutCount: wgslLayouts(pkg).length

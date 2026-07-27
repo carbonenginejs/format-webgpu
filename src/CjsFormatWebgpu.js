@@ -191,8 +191,8 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Builds a structurally valid selected-body CEWGPU package from compiled
-     * Tr2 effect bytes.
+     * Builds a CEWGPU package with complete version-15 source reflection and
+     * selected-body WebGPU output from compiled Tr2 effect bytes.
      *
      * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
      * @param {object} [options] Source, body-mode, permutation, and stage-selection policy.
