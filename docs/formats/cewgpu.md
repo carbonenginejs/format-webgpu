@@ -33,6 +33,7 @@ an unsupported version, truncated chunk, invalid magic, or trailing bytes.
 | --- | --- | --- |
 | `INFO` | JSON | Format and translator information. |
 | `META` | JSON | Caller provenance and effect-selection metadata. |
+| `PGRF` | JSON | Complete source permutation topology and identity-only body records. |
 | `ANLS` | JSON or text | Compact selected-body diagnostic stage/binding data; not lossless effect reflection. |
 | `WGSL` | WGSL text or JSON | One raw module or a structured shader set with layouts. |
 
@@ -44,11 +45,13 @@ ASCII characters, and duplicate tags are rejected by both builder and reader.
 
 Generic CEWGPU containers may omit common chunks and may retain raw WGSL text.
 A package declaring `INFO.packageKind: "tr2-effect-webgpu"` has a stricter
-contract. The reader requires JSON `INFO`, `META`, `ANLS`, and `WGSL` chunks;
-validates their current schema versions; and reconciles translator/source/body
-identity, selected options, counts, pass/stage metadata, emitted shader and
-layout descriptors, explicit selection coverage, WGSL-set version features,
-and selected-body completeness flags. Declared effect layouts use unique bind
+contract. The reader requires JSON `INFO`, `META`, `ANLS`, and `WGSL` chunks.
+Current producers also declare and emit `PGRF`; legacy INFO v1/v2 packages may
+omit it. The reader validates current schema versions and reconciles
+translator/source/body identity, the complete source permutation topology,
+selected options, counts, pass/stage metadata, emitted shader and layout
+descriptors, explicit selection coverage, WGSL-set version features, and
+selected-body completeness flags. Declared effect layouts use unique bind
 groups contiguous from group zero and unique binding slots and physical
 identities.
 
@@ -76,9 +79,16 @@ counts.
   "packageKind": "tr2-effect-webgpu",
   "targetBackend": "webgpu",
   "backendPackage": "@carbonenginejs/format-webgpu",
-  "backendPackageVersion": "0.4.2",
+  "backendPackageVersion": "0.4.3",
   "translator": "dxbc-js-wgsl",
-  "translatorVersion": "0.4.2",
+  "translatorVersion": "0.4.3",
+  "permutationGraph": {
+    "chunk": "PGRF",
+    "format": "CJS_EFFECT_PERMUTATION_GRAPH",
+    "formatVersion": 1,
+    "permutationCount": 1,
+    "uniqueBodyCount": 1
+  },
   "sourceIdentity": {
     "logicalPath": "res:/graphics/effect.dx11/example.sm_hi",
     "game": "Eve",
@@ -99,6 +109,95 @@ The selected-effect validator also requires compact `ANLS` stages to omit raw
 byte arrays and retain null DXBC/IR fields. `BuildEffect` runs the same reader
 validation before returning `qualification.ok: true`.
 
+## Source permutation graph
+
+`BuildEffect` emits `CJS_EFFECT_PERMUTATION_GRAPH` version 1 in `PGRF`.
+INFO v2 points to the chunk and records its exact permutation and unique-body
+counts. A pointer without the chunk, the chunk without a pointer, or
+disagreeing counts fail closed. Older selected-effect INFO v1/v2 packages
+without either remain readable.
+
+PGRF preserves:
+
+- ordered axes with index, exact name/options/default, description, and type;
+- one variant for every first-axis-least-significant mixed-radix permutation
+  index;
+- the exact option-index tuple and source body record for every variant;
+- deterministic package-local body keys; and
+- the byte length and lower-case SHA-256 digest of every unique raw source body
+  record.
+
+The complete version-1 document shape is:
+
+```json
+{
+  "format": "CJS_EFFECT_PERMUTATION_GRAPH",
+  "formatVersion": 1,
+  "coverage": {
+    "permutations": "complete",
+    "bodies": "identity-only",
+    "reflection": "absent"
+  },
+  "axes": [
+    {
+      "index": 0,
+      "name": "QUALITY",
+      "options": [ "LOW", "HIGH" ],
+      "defaultOption": 1,
+      "description": "quality tier",
+      "type": 0
+    }
+  ],
+  "variants": [
+    {
+      "permutationIndex": 0,
+      "optionIndices": [ 0 ],
+      "bodyKey": "body0",
+      "sourceRecord": { "offset": 256, "byteLength": 64 }
+    },
+    {
+      "permutationIndex": 1,
+      "optionIndices": [ 1 ],
+      "bodyKey": "body0",
+      "sourceRecord": { "offset": 256, "byteLength": 64 }
+    }
+  ],
+  "bodies": [
+    {
+      "key": "body0",
+      "byteLength": 64,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}
+```
+
+Axis and option counts plus `axes[].type` use the source format's unsigned
+8-bit limits. Permutation indices, `bodies[].byteLength`, and source-record
+offset/length fields use unsigned 32-bit limits. A `sourceRecord.offset` is an
+absolute byte offset from the beginning of the exact compiled-effect input,
+and `offset + byteLength` must not exceed `INFO.sourceIdentity.byteLength`.
+Source ranges may be exact aliases or disjoint; partial overlaps fail closed.
+The synchronous browser-safe producer and reader add an implementation
+resource limit of 65,536 Cartesian permutations per effect; larger graphs fail
+explicitly before variant materialization.
+
+Raw body bytes are deduplicated with SHA-256 as a lookup accelerator and exact
+byte equality as the final identity check. A body entry therefore provides one
+package-local identity for a unique raw source-body byte sequence; the bytes
+themselves are not embedded, and duplicate body digests are invalid. Body keys
+are package-local because compiled body records refer to the enclosing
+effect's shared string table; they are not cross-package content identities.
+
+The graph's `coverage` declares `permutations: "complete"`,
+`bodies: "identity-only"`, and `reflection: "absent"`. It records
+builder-derived source topology that can be verified against the original
+compiled effect; a package reader can validate only the graph's schema and
+internal relationships because raw bodies are not embedded. It does not claim
+all-body reflection or backend translation. `META.bodyIndex` remains the
+selected permutation index; the matching PGRF variant supplies its body key.
+Stage filtering remains selected-body-local and does not change the graph.
+
 The package-kind marker is the opt-in discriminator: without it, a container is
 generic even when it happens to use the standard chunk tags. A consumer that
 expects an effect package must therefore require the marker as well as calling
@@ -117,10 +216,10 @@ body:
 
 Analysis is retained as provenance even when `BuildEffect` emits WGSL for only
 some complete selected passes. `ANLS` is not lossless source reflection. It
-omits the ordered axes/options and total permutation-index-to-body mapping,
-unselected bodies, exact constant-default bytes, complete nested
-reflection/libraries, and some typed annotations needed to hydrate a complete
-source effect resource.
+omits unselected body reflection, exact constant-default bytes, complete
+nested reflection/libraries, and some typed annotations needed to hydrate a
+complete source effect resource. Ordered axes and the total
+permutation-index-to-body mapping live in PGRF rather than ANLS.
 
 `AnalyzeEffect` uses transient selected-body bytecode to return DXBC and,
 when requested, shader-IR diagnostics. `BuildEffect` uses the same transient
@@ -135,9 +234,11 @@ mistaken for complete source reflection, all-body translation, or runtime
 validation. The same booleans are embedded under `INFO.completeness`.
 All-body packaging is not yet supported.
 
-`@carbonenginejs/format-hlsl` owns source parsing, permutation enumeration, and
-portable reflection. `format-webgpu` owns only transient byte indexing for
-diagnostics/translation plus backend programs, layouts, and transforms.
+`@carbonenginejs/format-hlsl` owns source parsing and selected-body resolution.
+`format-webgpu` validates the parsed header into PGRF, owns transient byte
+indexing for diagnostics/translation, and owns backend programs, layouts, and
+transforms. A future lossless portable reflection serializer still belongs in
+a shared browser-safe format layer rather than in ANLS.
 
 ## Structured WGSL set
 

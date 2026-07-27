@@ -86,7 +86,7 @@ test("implemented metadata advertises the package surface", () =>
     assert.equal(CjsFormatWebgpu.implementationStatus, "partial");
     assert.equal(CjsFormatWebgpu.format, "CEWGPU");
     assert.equal(CjsFormatWebgpu.analysisFormat, "CEWGPU_ANALYSIS");
-    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.2");
+    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.3");
     assert.equal(CjsFormatWebgpu.packageVersion, PACKAGE_MANIFEST.version);
 });
 
@@ -192,6 +192,13 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     );
     assert.equal(result.info.translator, "dxbc-js-wgsl");
     assert.equal(result.info.translatorVersion, CjsFormatWebgpu.packageVersion);
+    assert.deepEqual(result.info.permutationGraph, {
+        chunk: "PGRF",
+        format: "CJS_EFFECT_PERMUTATION_GRAPH",
+        formatVersion: 1,
+        permutationCount: 1,
+        uniqueBodyCount: 1
+    });
     assert.equal(result.info.sourceIdentity.build, "3430261");
     assert.equal(
         result.info.sourceIdentity.sha256,
@@ -218,6 +225,11 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
         assert.equal(result.info.completeness[field], result.qualification[field]);
     }
     assert.equal(result.metadata.bodyMode, "selected");
+    assert.equal(result.permutationGraph.coverage.permutations, "complete");
+    assert.equal(result.permutationGraph.coverage.bodies, "identity-only");
+    assert.equal(result.permutationGraph.coverage.reflection, "absent");
+    assert.equal(result.permutationGraph.variants.length, 1);
+    assert.equal(result.permutationGraph.bodies.length, 1);
     assert.equal(result.info.selectedStageCount, 1);
     assert.equal(result.analysis.stages[0].key, "Main.pass0.vertex");
     assert.equal(result.analysis.stages[0].shaderBytecode.bytes, undefined);
@@ -225,6 +237,8 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     assert.equal(result.analysis.stages[0].ir, null);
     assert.equal(result.wgsl.shaders.length, 1);
     assert.equal(result.inspection.shaderCount, 1);
+    assert.equal(result.inspection.permutationCount, 1);
+    assert.equal(result.inspection.uniqueBodyCount, 1);
     const packaged = CjsFormatWebgpu.read(result.bytes);
     assert.deepEqual(packaged.info.sourceIdentity, result.info.sourceIdentity);
     assert.equal(packaged.info.bodyMode, "selected");

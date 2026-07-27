@@ -252,6 +252,7 @@ export function packageToJson(pkg)
         chunks: pkg.chunks.map(({ tag, size, offset }) => ({ tag, size, offset })),
         info: pkg.info,
         metadata: pkg.metadata,
+        permutationGraph: pkg.permutationGraph,
         analysis: pkg.analysisJson !== null ? pkg.analysisJson : pkg.analysis,
         wgsl: pkg.wgslJson !== null ? pkg.wgslJson : pkg.wgsl,
         stages: analysisStages(pkg),
@@ -289,6 +290,8 @@ export function inspectWithValues(input, values)
         isCewgpu: true,
         version: pkg.version,
         chunks: pkg.chunks.map(({ tag, size, offset }) => ({ tag, size, offset })),
+        permutationCount: pkg.permutationGraph?.variants?.length ?? 0,
+        uniqueBodyCount: pkg.permutationGraph?.bodies?.length ?? 0,
         stageCount: analysisStages(pkg).length,
         shaderCount: wgslShaders(pkg).length,
         layoutCount: wgslLayouts(pkg).length

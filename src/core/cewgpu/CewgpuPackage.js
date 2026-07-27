@@ -159,6 +159,16 @@ export class CewgpuPackage
     }
 
     /**
+   * Gets the complete source permutation graph when present.
+   *
+   * @returns {object|null} Parsed permutation graph.
+   */
+    get permutationGraph()
+    {
+        return this.GetJson("PGRF");
+    }
+
+    /**
    * Gets normalized shader analysis from the `ANLS` chunk.
    *
    * @returns {string|null} Analysis text.

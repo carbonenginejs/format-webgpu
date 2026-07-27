@@ -37,6 +37,8 @@ then package data to the engine.
 
 - Reading, inspecting, and building the CEWGPU v1 chunk container.
 - Resolving one compiled-effect permutation and complete pass.
+- Validating and preserving every source permutation index and raw-body alias
+  in a backend-neutral identity-only graph.
 - Normalizing effect, stage, binding, and decoded DXBC analysis.
 - Building validated shader intermediate representation and structured control
   flow.
@@ -69,14 +71,15 @@ public operations. They are not a second compiler contract.
 
 ## Shader target
 
-The current translation target is DX11 SM5.0 vertex and fragment bytecode.
-DX12 SM5.1 input is useful for differential analysis where supported, but
-DX12-only bindless resource ranges are not part of the current translation
-target.
+The general translation target is DX11 SM5.0 vertex and fragment bytecode.
+The compiler also admits a finite, frozen set of exact bounded compute
+profiles. DX12 SM5.1 input is useful for differential analysis where
+supported, but DX12-only bindless resource ranges are not part of the current
+translation target.
 
-Compute, geometry, hull, and domain stages are not emitted by the current WGSL
-compiler. The exact supported and adapted boundaries are listed in
-[WGSL compatibility](reference/wgsl-compatibility.md).
+Geometry, hull, and domain stages, plus compute programs outside the admitted
+profiles, are not emitted. The exact supported and adapted boundaries are
+listed in [WGSL compatibility](reference/wgsl-compatibility.md).
 
 ## Related documentation
 

@@ -108,7 +108,16 @@ when it matches that digest.
 `BuildEffect` emits selected-effect INFO schema version 2 with explicit WebGPU
 target, backend-package name/version, and translator name/version provenance.
 The CEWGPU binary container remains version 1, and the reader retains legacy
-selected-effect INFO version 1 support.
+selected-effect INFO version 1 support. Pre-PGRF INFO version 2 packages also
+remain readable when both the INFO graph pointer and PGRF chunk are absent.
+
+New packages also emit a `PGRF` permutation graph and expose it as
+`result.permutationGraph`, JSON-read `permutationGraph`, and raw
+`CewgpuPackage.permutationGraph`. The graph contains every ordered axis,
+Cartesian permutation index, option-index tuple, source record, and
+package-local unique-body key/digest. `Inspect` reports `permutationCount` and
+`uniqueBodyCount`. This is complete source topology with identity-only bodies;
+it does not make `mode: "all"` available.
 
 The returned structural qualification does not claim a complete effect
 resource. `packageValid` reports successful container construction;
@@ -129,7 +138,9 @@ the operation, stage, and source context needed to identify the boundary.
 Duplicate/non-ASCII chunk tags are rejected. A declared
 `tr2-effect-webgpu` package also fails closed on missing or malformed JSON
 chunks, unsupported document versions, or inconsistent INFO/META/ANLS/WGSL
-identity, counts, keys, layouts, selection, and completeness fields.
+identity, counts, keys, layouts, selection, and completeness fields. Declared
+PGRF pointers, schemas, counts, variant tuples, body references, and the
+selected index/options are reconciled as part of the same gate.
 Strict effect validation is activated by the `INFO.packageKind` marker;
 effect-only consumers must require that marker because unmarked CEWGPU
 containers intentionally remain generic.

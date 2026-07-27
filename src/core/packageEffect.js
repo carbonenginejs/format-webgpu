@@ -6,6 +6,12 @@ import { buildWgsl } from "./wgsl/emitWgsl.js";
 import { buildWgslSet } from "./wgsl/buildWgslSet.js";
 import { buildResourceTransformPlan } from "./wgsl/buildResourceTransformPlan.js";
 import {
+    buildEffectPermutationGraph,
+    EFFECT_PERMUTATION_GRAPH_CHUNK,
+    EFFECT_PERMUTATION_GRAPH_FORMAT,
+    EFFECT_PERMUTATION_GRAPH_VERSION
+} from "./effectPermutationGraph.js";
+import {
     DXBC_WGSL_TRANSLATOR_NAME,
     DXBC_WGSL_TRANSLATOR_VERSION,
     FORMAT_WEBGPU_PACKAGE_NAME,
@@ -152,6 +158,7 @@ export function buildEffectPackage(input, options = {})
     }));
     const wgsl = buildWgslSet(shaderEntries);
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);
+    const permutationGraph = buildEffectPermutationGraph(resolved.effectRes);
     const completeness = Object.freeze({
         packageValid: true,
         sourceComplete: false,
@@ -170,6 +177,13 @@ export function buildEffectPackage(input, options = {})
         backendPackageVersion: FORMAT_WEBGPU_PACKAGE_VERSION,
         translator: DXBC_WGSL_TRANSLATOR_NAME,
         translatorVersion: DXBC_WGSL_TRANSLATOR_VERSION,
+        permutationGraph: Object.freeze({
+            chunk: EFFECT_PERMUTATION_GRAPH_CHUNK,
+            format: EFFECT_PERMUTATION_GRAPH_FORMAT,
+            formatVersion: EFFECT_PERMUTATION_GRAPH_VERSION,
+            permutationCount: permutationGraph.variants.length,
+            uniqueBodyCount: permutationGraph.bodies.length
+        }),
         bodyMode: mode,
         completeness,
         stageCount: analysis.stages.length,
@@ -188,6 +202,7 @@ export function buildEffectPackage(input, options = {})
     const bytes = buildPackage([
         [ "INFO", info ],
         [ "META", metadata ],
+        [ EFFECT_PERMUTATION_GRAPH_CHUNK, permutationGraph ],
         [ "ANLS", analysis ],
         [ "WGSL", wgsl ]
     ]);
@@ -211,6 +226,7 @@ export function buildEffectPackage(input, options = {})
         bytes,
         info: Object.freeze(info),
         metadata: Object.freeze(metadata),
+        permutationGraph,
         analysis,
         wgsl,
         inspection: Object.freeze(inspection),

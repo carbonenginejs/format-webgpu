@@ -20,6 +20,11 @@ assembly, and structural qualification.
   selection matters.
 - Permutation assertions for every axis whose value must not depend on effect
   defaults.
+- A complete, internally consistent source permutation header: every ordered
+  axis must have valid names/options/defaults, and every Cartesian permutation
+  must have one correctly indexed, in-bounds body record. PGRF construction
+  validates the whole header even though only one body is translated. The
+  synchronous builder accepts at most 65,536 Cartesian permutations.
 
 ## Build one pass
 
@@ -54,7 +59,13 @@ Selected-effect packages use INFO schema version 2 while the binary CEWGPU
 container remains version 1. INFO v2 identifies the `webgpu` target, the
 producing `@carbonenginejs/format-webgpu` package version, and the
 `dxbc-js-wgsl` translator version. The reader continues to accept legacy
-selected-effect INFO v1 packages.
+selected-effect INFO v1 packages and pre-PGRF INFO v2 packages when both the
+INFO pointer and PGRF chunk are absent.
+
+Every new selected-effect package also includes a complete source permutation
+graph in `PGRF`. This preserves every axis, Cartesian permutation index,
+option-index tuple, compiler alias, and unique raw body identity even though
+only one selected body's reflection and WGSL are currently packaged.
 
 ## Result
 
@@ -65,6 +76,7 @@ The returned record contains:
 | `bytes` | Encoded CEWGPU package bytes. |
 | `info` | Translator and package information. |
 | `metadata` | Selection and caller provenance. |
+| `permutationGraph` | Complete source permutation topology and identity-only body table. |
 | `analysis` | Compact selected-body diagnostic binding/stage data; not lossless effect reflection. |
 | `wgsl` | Portable shader set and pass layouts. |
 | `inspection` | Summary produced by reading the built package. |
@@ -72,11 +84,12 @@ The returned record contains:
 
 `mode: "selected"` is the default and currently the only supported body mode.
 The package retains normalized analysis for that resolved body while emitting
-WGSL for the selected complete passes. It does not retain lossless source
-reflection or other permutation bodies, so it is not sufficient by itself to
-hydrate a complete `Tr2EffectRes`. `mode: "all"` fails explicitly until the
-`@carbonenginejs/format-hlsl` reader exposes portable complete reflection and
-all-body enumeration.
+WGSL for the selected complete passes. PGRF retains the complete source
+permutation graph and identity of every unique raw body, but it does not retain
+those bodies' lossless reflection or backend programs. The package is
+therefore not sufficient by itself to hydrate a complete `Tr2EffectRes`.
+`mode: "all"` fails explicitly until a shared browser-safe format layer
+exposes portable complete reflection and all-body serialization.
 
 Raw stage bytecode, decoded DXBC instruction trees, and compiler IR are
 transient build inputs and are not embedded in `ANLS`. Use `AnalyzeEffect`
@@ -85,8 +98,9 @@ when return-only DXBC/IR diagnostics are required.
 The qualification record distinguishes structural package validity from
 broader completeness. `packageValid` means only that the selected CEWGPU
 container passed required-chunk, schema, cross-document, key, layout, and
-selection reconciliation. `sourceComplete` would require
-every axis, permutation mapping, unique body, and full portable reflection.
+selection reconciliation. `sourceComplete` would require the graph now carried
+by PGRF plus every unique body's full portable reflection and immutable exact
+defaults.
 `backendComplete` would additionally require every required translated
 program, layout, and transform. `runtimeComplete` would require
 complete-resource hydration and selection. None of these fields is
@@ -126,6 +140,11 @@ numeric binding slots.
 Conversion fails explicitly when:
 
 - a permutation assertion is unknown or unresolved;
+- any axis/default/option or positional body record in the complete source
+  permutation header is malformed, out of bounds, partially overlapping, or
+  inconsistent, even when the selected body itself is translatable;
+- the Cartesian permutation product exceeds the 65,536-entry synchronous-build
+  limit;
 - the technique, pass, or requested stage does not exist;
 - the requested stage list is incomplete or duplicated;
 - the selected shader uses unsupported semantics;

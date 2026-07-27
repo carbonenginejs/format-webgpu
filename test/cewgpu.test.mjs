@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import CjsFormatWebgpu from "../src/index.js";
 import { buildEffectAnalysis } from "../src/core/helpers.js";
+import {
+    buildEffectPermutationGraph,
+    validateEffectPermutationGraph
+} from "../src/core/effectPermutationGraph.js";
 import {
     buildCewgpuPackage,
     buildEffectBytes,
@@ -146,6 +151,235 @@ function analysisBinding(overrides = {})
         ...overrides
     };
 }
+
+test("effect permutation graph preserves mixed-radix variants and body aliases", () =>
+{
+    const source = Uint8Array.from([
+        1, 2, 3,
+        1, 2, 3,
+        4, 5, 6
+    ]);
+    const graph = buildEffectPermutationGraph({
+        m_data: source,
+        m_permutations: [
+            {
+                name: "A",
+                options: [ "A0", "A1" ],
+                defaultOption: 1,
+                description: "first",
+                type: 2
+            },
+            {
+                name: "B",
+                options: [ "B0", "B1" ],
+                defaultOption: 0,
+                description: "second",
+                type: 3
+            }
+        ],
+        m_offsetCount: 4,
+        m_offsets: [
+            { index: 0, offset: 0, size: 3, end: 3 },
+            { index: 1, offset: 0, size: 3, end: 3 },
+            { index: 2, offset: 3, size: 3, end: 6 },
+            { index: 3, offset: 6, size: 3, end: 9 }
+        ]
+    });
+
+    assert.equal(graph.format, "CJS_EFFECT_PERMUTATION_GRAPH");
+    assert.equal(graph.formatVersion, 1);
+    assert.deepEqual(graph.variants.map((variant) => variant.optionIndices), [
+        [ 0, 0 ],
+        [ 1, 0 ],
+        [ 0, 1 ],
+        [ 1, 1 ]
+    ]);
+    assert.deepEqual(graph.variants.map((variant) => variant.bodyKey), [
+        "body0",
+        "body0",
+        "body0",
+        "body1"
+    ]);
+    assert.equal(graph.bodies.length, 2);
+    assert.equal(
+        graph.bodies[0].sha256,
+        createHash("sha256").update(Uint8Array.from([ 1, 2, 3 ])).digest("hex")
+    );
+    assert.equal(
+        graph.bodies[1].sha256,
+        createHash("sha256").update(Uint8Array.from([ 4, 5, 6 ])).digest("hex")
+    );
+    assert.deepEqual(validateEffectPermutationGraph(graph), {
+        permutationCount: 4,
+        uniqueBodyCount: 2
+    });
+
+    const wrongIndex = structuredClone(graph);
+    wrongIndex.variants[1].permutationIndex = 2;
+    assert.throws(
+        () => validateEffectPermutationGraph(wrongIndex),
+        /variant 1 is malformed/
+    );
+
+    const wrongTuple = structuredClone(graph);
+    wrongTuple.variants[2].optionIndices = [ 1, 0 ];
+    assert.throws(
+        () => validateEffectPermutationGraph(wrongTuple),
+        /variant 2 is malformed/
+    );
+
+    const missingReference = structuredClone(graph);
+    missingReference.variants = missingReference.variants.map((variant) => ({
+        ...variant,
+        bodyKey: "body0"
+    }));
+    assert.throws(
+        () => validateEffectPermutationGraph(missingReference),
+        /body body1 is unreferenced/
+    );
+
+    const partialOverlap = structuredClone(graph);
+    partialOverlap.variants[3].sourceRecord.offset = 5;
+    assert.throws(
+        () => validateEffectPermutationGraph(partialOverlap),
+        /source body records partially overlap/
+    );
+
+    assert.throws(
+        () => validateEffectPermutationGraph(graph, { sourceByteLength: 8 }),
+        /source record is malformed/
+    );
+
+    const unsafeSourceRecord = structuredClone(graph);
+    unsafeSourceRecord.variants[3].sourceRecord.offset = Number.MAX_SAFE_INTEGER;
+    assert.throws(
+        () => validateEffectPermutationGraph(unsafeSourceRecord),
+        /source record is malformed/
+    );
+
+    const duplicateDigest = structuredClone(graph);
+    duplicateDigest.bodies[1].sha256 = duplicateDigest.bodies[0].sha256;
+    assert.throws(
+        () => validateEffectPermutationGraph(duplicateDigest),
+        /body 1 is malformed or duplicated/
+    );
+
+    const oversizedBody = structuredClone(graph);
+    oversizedBody.bodies[1].byteLength = 0x100000000;
+    assert.throws(
+        () => validateEffectPermutationGraph(oversizedBody),
+        /body 1 is malformed/
+    );
+
+    const danglingBody = structuredClone(graph);
+    danglingBody.variants[3].bodyKey = "missing";
+    assert.throws(
+        () => validateEffectPermutationGraph(danglingBody),
+        /variant 3 is malformed/
+    );
+
+    const tooManyAxes = structuredClone(graph);
+    tooManyAxes.axes = Array.from({ length: 256 }, (_, index) => ({
+        index,
+        name: `A${index}`,
+        options: [ "ON" ],
+        defaultOption: 0,
+        description: "",
+        type: 0
+    }));
+    assert.throws(
+        () => validateEffectPermutationGraph(tooManyAxes),
+        /axes must be an array/
+    );
+
+    const tooManyOptions = structuredClone(graph);
+    tooManyOptions.axes = [ {
+        index: 0,
+        name: "A",
+        options: Array.from({ length: 256 }, (_, index) => `O${index}`),
+        defaultOption: 0,
+        description: "",
+        type: 0
+    } ];
+    assert.throws(
+        () => validateEffectPermutationGraph(tooManyOptions),
+        /axis 0 is malformed/
+    );
+
+    const tooManyPermutations = structuredClone(graph);
+    tooManyPermutations.axes = [ 41, 40, 40 ].map((count, index) => ({
+        index,
+        name: `A${index}`,
+        options: Array.from({ length: count }, (_, optionIndex) => `O${optionIndex}`),
+        defaultOption: 0,
+        description: "",
+        type: 0
+    }));
+    assert.throws(
+        () => validateEffectPermutationGraph(tooManyPermutations),
+        /implementation limit 65536/
+    );
+
+    const maximumNativeRange = {
+        format: "CJS_EFFECT_PERMUTATION_GRAPH",
+        formatVersion: 1,
+        coverage: {
+            permutations: "complete",
+            bodies: "identity-only",
+            reflection: "absent"
+        },
+        axes: [],
+        variants: [ {
+            permutationIndex: 0,
+            optionIndices: [],
+            bodyKey: "body0",
+            sourceRecord: {
+                offset: 0xFFFFFFFF,
+                byteLength: 0xFFFFFFFF
+            }
+        } ],
+        bodies: [ {
+            key: "body0",
+            byteLength: 0xFFFFFFFF,
+            sha256: "0".repeat(64)
+        } ]
+    };
+    assert.deepEqual(validateEffectPermutationGraph(maximumNativeRange, {
+        sourceByteLength: 0x1FFFFFFFE
+    }), {
+        permutationCount: 1,
+        uniqueBodyCount: 1
+    });
+
+    assert.throws(
+        () => buildEffectPermutationGraph({
+            m_data: source,
+            m_permutations: [],
+            m_offsetCount: 1,
+            m_offsets: [ { index: 7, offset: 0, size: 3, end: 3 } ]
+        }),
+        /invalid source body record/
+    );
+
+    assert.throws(
+        () => buildEffectPermutationGraph({
+            m_data: source,
+            m_permutations: [ {
+                name: "A",
+                options: [ "A0", "A1" ],
+                defaultOption: 0,
+                description: "",
+                type: 0
+            } ],
+            m_offsetCount: 2,
+            m_offsets: [
+                { index: 0, offset: 0, size: 6, end: 6 },
+                { index: 1, offset: 3, size: 6, end: 9 }
+            ]
+        }),
+        /source body records partially overlap/
+    );
+});
 
 test("static build and instance Build share one code path", () =>
 {
@@ -313,7 +547,7 @@ test("CEWGPU reading rejects truncated, trailing, and invalid-tag bytes", () =>
 
 test("canonical effect packages require all versioned JSON documents", () =>
 {
-    for (const tag of [ "META", "ANLS", "WGSL" ])
+    for (const tag of [ "META", "PGRF", "ANLS", "WGSL" ])
     {
         assert.throws(
             () => CjsFormatWebgpu.read(mutateCanonicalEffect({}, [ tag ])),
@@ -327,7 +561,7 @@ test("canonical effect packages require all versioned JSON documents", () =>
     assert.equal(genericWithoutInfo.info, null);
     assert.equal(genericWithoutInfo.shaders.length, 1);
 
-    for (const tag of [ "META", "ANLS", "WGSL" ])
+    for (const tag of [ "META", "PGRF", "ANLS", "WGSL" ])
     {
         assert.throws(
             () => CjsFormatWebgpu.read(mutateCanonicalEffect({ [tag]: "{" })),
@@ -337,6 +571,7 @@ test("canonical effect packages require all versioned JSON documents", () =>
 
     const invalidVersions = [
         [ "INFO", (value) => { value.formatVersion = 99; }, /INFO schema/ ],
+        [ "PGRF", (value) => { value.formatVersion = 99; }, /PGRF schema/ ],
         [ "ANLS", (value) => { value.formatVersion = 99; }, /ANLS schema/ ],
         [ "WGSL", (value) => { value.formatVersion = 99; }, /WGSL schema/ ]
     ];
@@ -360,12 +595,220 @@ test("canonical effect packages retain legacy INFO version 1 readability", () =>
             delete value.backendPackageVersion;
             delete value.translatorVersion;
             delete value.sourceIdentity.sha256;
+            delete value.permutationGraph;
         }
-    });
+    }, [ "PGRF" ]);
 
     const result = CjsFormatWebgpu.read(bytes);
     assert.equal(result.info.formatVersion, 1);
     assert.equal(result.info.translator, "dxbc-js-wgsl");
+    assert.equal(CjsFormatWebgpu.inspect(bytes).permutationCount, 0);
+    assert.equal(CjsFormatWebgpu.inspect(bytes).uniqueBodyCount, 0);
+});
+
+test("canonical effect packages retain pre-PGRF INFO version 2 readability", () =>
+{
+    const bytes = mutateCanonicalEffect({
+        INFO: (value) => { delete value.permutationGraph; }
+    }, [ "PGRF" ]);
+
+    const result = CjsFormatWebgpu.read(bytes);
+    assert.equal(result.info.formatVersion, 2);
+    assert.equal(result.permutationGraph, null);
+});
+
+test("canonical effect packages reconcile INFO and complete PGRF topology", () =>
+{
+    const canonical = CjsFormatWebgpu.buildEffect(
+        buildMinimalStagedEffectBytes(),
+        { source: "synthetic.sm_hi" }
+    );
+    assert.equal(canonical.info.permutationGraph.chunk, "PGRF");
+    assert.equal(canonical.info.permutationGraph.permutationCount, 1);
+    assert.equal(canonical.info.permutationGraph.uniqueBodyCount, 1);
+    assert.equal(canonical.permutationGraph.variants.length, 1);
+    assert.equal(canonical.permutationGraph.bodies.length, 1);
+
+    const parsed = CjsFormatWebgpu.read(canonical.bytes);
+    assert.deepEqual(parsed.permutationGraph, canonical.permutationGraph);
+    const raw = CjsFormatWebgpu.read(canonical.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+    assert.deepEqual(raw.permutationGraph, canonical.permutationGraph);
+
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({}, [ "PGRF" ])),
+        /permutationGraph requires PGRF/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            INFO: (value) => { delete value.permutationGraph; }
+        })),
+        /INFO\.permutationGraph is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            INFO: (value) => { value.permutationGraph.permutationCount = 2; }
+        })),
+        /counts disagree/
+    );
+    for (const [ field, value ] of [
+        [ "chunk", "NOPE" ],
+        [ "format", "OTHER" ],
+        [ "formatVersion", 2 ]
+    ])
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+                INFO: (info) => { info.permutationGraph[field] = value; }
+            })),
+            /INFO\.permutationGraph is malformed/
+        );
+    }
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            INFO: (value) => { value.permutationGraph.uniqueBodyCount = 2; }
+        })),
+        /counts disagree/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.variants[0].optionIndices = [ 0 ]; }
+        })),
+        /variant 0 is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) =>
+            {
+                value.axes.push({
+                    index: 0,
+                    name: "QUALITY",
+                    options: [ "HIGH" ],
+                    defaultOption: 0,
+                    description: "",
+                    type: 0
+                });
+                value.variants[0].optionIndices = [ 0 ];
+            }
+        })),
+        /selected body is absent from PGRF/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.coverage.bodies = "complete"; }
+        })),
+        /PGRF schema or coverage is unsupported/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.bodies[0].sha256 = "A".repeat(64); }
+        })),
+        /body 0 is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.bodies[0].byteLength += 1; }
+        })),
+        /body length disagrees/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.variants[0].bodyKey = "missing"; }
+        })),
+        /variant 0 is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            PGRF: (value) => { value.variants[0].sourceRecord.offset += 1; }
+        })),
+        /source record is malformed/
+    );
+});
+
+test("multi-axis effect packages reconcile selection and preserve PGRF across stage filtering", () =>
+{
+    const source = buildMinimalStagedEffectBytes({
+        permutations: [
+            {
+                name: "QUALITY",
+                options: [ "LOW", "HIGH" ],
+                defaultOption: 0,
+                description: "quality",
+                type: 1
+            },
+            {
+                name: "MODE",
+                options: [ "A", "B", "C" ],
+                defaultOption: 1,
+                description: "mode",
+                type: 2
+            }
+        ]
+    });
+    const options = {
+        source: "synthetic-multi.sm_hi",
+        permutation: [
+            { name: "QUALITY", value: "HIGH" },
+            { name: "MODE", value: "C" }
+        ]
+    };
+    const complete = CjsFormatWebgpu.buildEffect(source, options);
+    const filtered = CjsFormatWebgpu.buildEffect(source, {
+        ...options,
+        selection: {
+            techniqueName: "Main",
+            passIndex: 0,
+            stageNames: [ "vertex" ]
+        }
+    });
+
+    assert.equal(complete.metadata.bodyIndex, 5);
+    assert.deepEqual(complete.metadata.selectedOptions.map((option) => ({
+        name: option.name,
+        value: option.value,
+        optionIndex: option.optionIndex
+    })), [
+        { name: "QUALITY", value: "HIGH", optionIndex: 1 },
+        { name: "MODE", value: "C", optionIndex: 2 }
+    ]);
+    assert.equal(complete.permutationGraph.variants.length, 6);
+    assert.deepEqual(
+        complete.permutationGraph.variants.map((variant) => variant.optionIndices),
+        [
+            [ 0, 0 ],
+            [ 1, 0 ],
+            [ 0, 1 ],
+            [ 1, 1 ],
+            [ 0, 2 ],
+            [ 1, 2 ]
+        ]
+    );
+    assert.deepEqual(filtered.permutationGraph, complete.permutationGraph);
+
+    const completeRaw = CjsFormatWebgpu.read(complete.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+    const filteredRaw = CjsFormatWebgpu.read(filtered.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+    assert.deepEqual(
+        Array.from(filteredRaw.GetChunk("PGRF").bytes),
+        Array.from(completeRaw.GetChunk("PGRF").bytes)
+    );
+
+    const chunks = completeRaw.chunks.map((chunk) => [
+        chunk.tag,
+        structuredClone(completeRaw.GetJson(chunk.tag))
+    ]);
+    const metadata = chunks.find(([ tag ]) => tag === "META")[1];
+    const analysis = chunks.find(([ tag ]) => tag === "ANLS")[1];
+    metadata.selectedOptions[1].value = "B";
+    analysis.selectedOptions[1].value = "B";
+    assert.throws(
+        () => CjsFormatWebgpu.read(CjsFormatWebgpu.build(chunks)),
+        /selected option 1 disagrees with PGRF/
+    );
 });
 
 test("canonical effect packages accept every binding-manifest source form", () =>

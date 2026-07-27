@@ -4,6 +4,12 @@ import {
     FORMAT_WEBGPU_PACKAGE_NAME,
     WEBGPU_BACKEND_NAME
 } from "./packageMetadata.js";
+import {
+    EFFECT_PERMUTATION_GRAPH_CHUNK,
+    EFFECT_PERMUTATION_GRAPH_FORMAT,
+    EFFECT_PERMUTATION_GRAPH_VERSION,
+    validateEffectPermutationGraph
+} from "./effectPermutationGraph.js";
 
 const REQUIRED_EFFECT_CHUNKS = Object.freeze([ "INFO", "META", "ANLS", "WGSL" ]);
 const EFFECT_PACKAGE_KIND = "tr2-effect-webgpu";
@@ -230,6 +236,89 @@ function validateSourceIdentity(value, requireSha256)
         throw new Error("CEWGPU INFO.sourceIdentity is malformed");
     }
     return value;
+}
+
+/**
+ * Validate an optional INFO-to-PGRF reference and its graph.
+ *
+ * Legacy selected-effect INFO v1/v2 packages may omit the graph. New
+ * producers declare both the pointer and chunk; either without the other is
+ * invalid.
+ *
+ * @param {object} pkg Loaded CEWGPU package.
+ * @param {object} info Validated INFO document.
+ * @returns {object|null} Validated graph, or null for a legacy package.
+ */
+function validatePermutationGraphReference(pkg, info)
+{
+    const pointer = info.permutationGraph;
+    const chunk = pkg.GetChunk(EFFECT_PERMUTATION_GRAPH_CHUNK);
+    if (pointer === undefined && !chunk) return null;
+
+    if (info.formatVersion !== 2
+        || !pointer || typeof pointer !== "object" || Array.isArray(pointer)
+        || pointer.chunk !== EFFECT_PERMUTATION_GRAPH_CHUNK
+        || pointer.format !== EFFECT_PERMUTATION_GRAPH_FORMAT
+        || pointer.formatVersion !== EFFECT_PERMUTATION_GRAPH_VERSION)
+    {
+        throw new Error("CEWGPU INFO.permutationGraph is malformed");
+    }
+    if (!chunk)
+    {
+        throw new Error(
+            `CEWGPU INFO.permutationGraph requires ${EFFECT_PERMUTATION_GRAPH_CHUNK}`
+        );
+    }
+
+    const graph = requireJsonObject(pkg, EFFECT_PERMUTATION_GRAPH_CHUNK);
+    const counts = validateEffectPermutationGraph(graph, {
+        sourceByteLength: info.sourceIdentity.byteLength
+    });
+    if (requireCount(
+        pointer.permutationCount,
+        "INFO.permutationGraph.permutationCount"
+    ) !== counts.permutationCount
+        || requireCount(
+            pointer.uniqueBodyCount,
+            "INFO.permutationGraph.uniqueBodyCount"
+        ) !== counts.uniqueBodyCount)
+    {
+        throw new Error("CEWGPU INFO permutation-graph counts disagree with PGRF");
+    }
+    return graph;
+}
+
+/**
+ * Reconcile the selected-body documents with a complete permutation graph.
+ *
+ * @param {object} graph Validated permutation graph.
+ * @param {number} bodyIndex Selected permutation index.
+ * @param {object[]} selectedOptions Selected option metadata.
+ */
+function validatePermutationGraphSelection(graph, bodyIndex, selectedOptions)
+{
+    const variant = graph.variants[bodyIndex];
+    if (!variant || selectedOptions.length !== graph.axes.length)
+    {
+        throw new Error("CEWGPU selected body is absent from PGRF");
+    }
+
+    for (let axisIndex = 0; axisIndex < graph.axes.length; axisIndex += 1)
+    {
+        const axis = graph.axes[axisIndex];
+        const optionIndex = variant.optionIndices[axisIndex];
+        const selected = selectedOptions[axisIndex];
+        if (selected.name !== axis.name
+            || selected.optionIndex !== optionIndex
+            || selected.value !== axis.options[optionIndex]
+            || selected.defaultOption !== axis.defaultOption
+            || selected.defaultValue !== axis.options[axis.defaultOption])
+        {
+            throw new Error(
+                `CEWGPU selected option ${axisIndex} disagrees with PGRF`
+            );
+        }
+    }
 }
 
 /**
@@ -1003,6 +1092,7 @@ export function validateEffectPackageEnvelope(pkg)
         }
     }
     validateSourceIdentity(info.sourceIdentity, info.formatVersion === 2);
+    const permutationGraph = validatePermutationGraphReference(pkg, info);
     if (info.outputPath !== null
         && (typeof info.outputPath !== "string" || !info.outputPath))
     {
@@ -1037,6 +1127,14 @@ export function validateEffectPackageEnvelope(pkg)
         || !jsonEqual(metadataOptions, analysis.selectedOptions))
     {
         throw new Error("CEWGPU META and ANLS effect selection disagree");
+    }
+    if (permutationGraph)
+    {
+        validatePermutationGraphSelection(
+            permutationGraph,
+            bodyIndex,
+            metadataOptions
+        );
     }
 
     const analysisPassKeys = collectAnalysisPassKeys(passes);

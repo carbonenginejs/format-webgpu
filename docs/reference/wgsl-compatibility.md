@@ -1273,19 +1273,42 @@ digest computed over the exact compiled-effect input byte view. A conflicting
 caller digest fails closed. The reader retains legacy selected-effect INFO v1
 support and rejects unknown INFO schema versions.
 
-This is a metadata/container checkpoint, not a shader-emission capability. The
-exact-build corpus retains 507 qualified and 30 unsupported packages with no
-failures; all 537 status/error results are unchanged. Every one of the 507
-qualified package byte streams changes only in INFO, while all 507 `META`,
-`ANLS`, and `WGSL` payloads remain byte-identical. No new browser gate is
-required because no emitted WGSL, layout, or transform changed.
+The 0.4.2 strong-provenance checkpoint was metadata/container-only. Its
+exact-build corpus retained 507 qualified and 30 unsupported packages with no
+failures; all 537 status/error results were unchanged. Every qualified package
+changed only in INFO, while all 507 `META`, `ANLS`, and `WGSL` payloads remained
+byte-identical.
+
+The 0.4.3 PGRF checkpoint additionally records the complete builder-derived
+source permutation topology and identity-only unique-body table. Exact build
+3444265 again retains 507 qualified and 30 unsupported packages with no
+failures and all 537 status/error results unchanged. Across the 507 qualified
+packages:
+
+- all 1,521 `META`, `ANLS`, and `WGSL` chunks are byte-identical to 0.4.2;
+- all INFO documents equal 0.4.2 after removing only the PGRF pointer and
+  normalizing the producer/translator versions;
+- an independent source-byte comparison matches all 507 PGRF documents,
+  covering 8,257 permutation variants and 3,331 unique body identities; and
+- a full 537-source header audit finds no anomalies across 8,722 permutations,
+  3,567 unique body records, and 5,155 exact aliases (maximum 972
+  permutations in one source).
+
+The final DX11/DX12 quads matrix remains qualified with matching active
+topology and both stages emitted. A new browser gate is not required for this
+checkpoint because emitted WGSL, analysis, metadata, layouts, and transforms
+are unchanged; old readers tolerate the additive chunk.
 
 ## Verification contract
 
-Every compatibility change requires the package suite and a representative
-`engine-webgpu` browser gate on a real WebGPU device with zero WGSL warnings.
-Format-level qualification cannot detect every WGSL scoping or validator
-failure, so browser validation remains part of the compiler contract.
+Every shader-emission, layout, or transform compatibility change requires the
+package suite and a representative `engine-webgpu` browser gate on a real
+WebGPU device with zero WGSL warnings. Format-level qualification cannot detect
+every WGSL scoping or validator failure, so browser validation remains part of
+the compiler contract. A reviewed envelope-only schema change may omit a new
+browser run when corpus comparison proves unchanged status/errors and
+byte-identical runtime-consumed shader chunks, and downstream reader tolerance
+is separately confirmed.
 
 The browser gate proves the emitted WGSL is *valid and runs*; it does not by
 itself prove the translation is *semantically equivalent to D3D*. Semantic

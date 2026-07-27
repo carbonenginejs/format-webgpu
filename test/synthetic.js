@@ -288,9 +288,11 @@ export function buildEffectBytes(options = {})
 /**
  * Builds one complete synthetic effect with a minimal vertex DXBC stage.
  *
+ * @param {object} [options] Optional permutation axes.
+ * @param {Array<object>} [options.permutations] Permutation axis descriptions.
  * @returns {Uint8Array} Synthetic compiled effect bytes.
  */
-export function buildMinimalStagedEffectBytes()
+export function buildMinimalStagedEffectBytes(options = {})
 {
     const DCL_GLOBAL_FLAGS = 106;
     const DCL_TEMPS = 104;
@@ -307,10 +309,17 @@ export function buildMinimalStagedEffectBytes()
         fourCC: "SHEX",
         payload: new Uint8Array(tokens.buffer.slice(0))
     } ]);
+    const permutations = options.permutations || [];
+    const strings = [ "Main" ];
+    for (const permutation of permutations)
+    {
+        strings.push(permutation.name || "", permutation.description || "");
+        for (const option of permutation.options || []) strings.push(option);
+    }
+    const stringTable = buildStringTable(strings);
     const table = new ByteWriter();
-    const mainOffset = table.length;
-    table.raw(textEncoder.encode("Main"));
-    table.u8(0);
+    table.raw(stringTable.bytes);
+    const mainOffset = stringTable.offsets.get("Main");
     const dxbcOffset = table.length;
     table.raw(dxbc);
 
@@ -342,11 +351,33 @@ export function buildMinimalStagedEffectBytes()
     writer.u32(8);
     writer.u32(table.length);
     writer.raw(table.toBytes());
-    writer.u8(0);
-    writer.u32(1);
-    writer.u32(0);
-    writer.u32(writer.length + 8);
-    writer.u32(body.length);
+    writer.u8(permutations.length);
+    for (const permutation of permutations)
+    {
+        writer.u32(stringTable.offsets.get(permutation.name || ""));
+        writer.u8(permutation.defaultOption || 0);
+        writer.u32(stringTable.offsets.get(permutation.description || ""));
+        writer.u8(permutation.type || 0);
+        const permutationOptions = permutation.options || [];
+        writer.u8(permutationOptions.length);
+        for (const option of permutationOptions)
+        {
+            writer.u32(stringTable.offsets.get(option));
+        }
+    }
+
+    const bodyCount = permutations.reduce(
+        (product, permutation) => product * (permutation.options || []).length,
+        1
+    );
+    writer.u32(bodyCount);
+    const bodyOffset = writer.length + bodyCount * 12;
+    for (let index = 0; index < bodyCount; index += 1)
+    {
+        writer.u32(index);
+        writer.u32(bodyOffset);
+        writer.u32(body.length);
+    }
     writer.raw(body.toBytes());
 
     return writer.toBytes();
