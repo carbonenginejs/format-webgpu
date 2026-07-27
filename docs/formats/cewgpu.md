@@ -33,7 +33,7 @@ an unsupported version, truncated chunk, invalid magic, or trailing bytes.
 | --- | --- | --- |
 | `INFO` | JSON | Format and translator information. |
 | `META` | JSON | Caller provenance and effect-selection metadata. |
-| `ANLS` | JSON or text | Normalized effect, stage, binding, DXBC, and shader-IR analysis. |
+| `ANLS` | JSON or text | Selected-body diagnostic stage/binding data and optional DXBC/IR analysis; not lossless effect reflection. |
 | `WGSL` | WGSL text or JSON | One raw module or a structured shader set with layouts. |
 
 Unknown four-character chunks remain readable as raw bytes. The package
@@ -41,16 +41,30 @@ builder preserves the caller's chunk order.
 
 ## Analysis document
 
-The current analysis document records:
+The current analysis document records normalized data for one selected effect
+body:
 
 - selected permutation and effect body;
 - techniques, passes, and stage topology;
 - Carbon binding-manifest data;
-- per-stage DXBC metadata and decoded instructions when requested; and
-- validated shader IR for decoded stages.
+- per-stage DXBC metadata and decoded instructions when bytes are available and
+  decoding is requested; and
+- validated shader IR for successfully decoded stages.
 
 Analysis is retained as provenance even when `BuildEffect` emits WGSL for only
-one selected pass.
+some complete selected passes. `ANLS` is not lossless source reflection. It
+omits the ordered axes/options and total permutation-index-to-body mapping,
+unselected bodies, exact constant-default bytes, complete nested
+reflection/libraries, and some typed annotations needed to hydrate a complete
+source effect resource.
+
+`BuildEffect` records `bodyMode: "selected"` in `INFO` and `META`. Its returned
+qualification record uses `validator: "cewgpu-structural"` and reports
+`packageValid: true`, while `sourceComplete`, `backendComplete`, and
+`runtimeComplete` are false. These flags prevent container validity from being
+mistaken for complete source reflection, all-body translation, or runtime
+validation. The same booleans are embedded under `INFO.completeness`.
+All-body packaging is not yet supported.
 
 ## Structured WGSL set
 

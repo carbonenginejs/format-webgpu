@@ -149,7 +149,7 @@ test("toJSON converts typed arrays and nested structures", () =>
     assert.deepEqual(converted, { tokens: [ 1, 2 ], nested: [ { mask: [ 3 ] } ] });
 });
 
-test("buildEffect exposes browser-safe whole-effect CEWGPU packaging", () =>
+test("buildEffect exposes structurally qualified selected-body CEWGPU packaging", () =>
 {
     const source = buildMinimalStagedEffectBytes();
     const result = CjsFormatWebgpu.buildEffect(source, {
@@ -166,13 +166,62 @@ test("buildEffect exposes browser-safe whole-effect CEWGPU packaging", () =>
     assert.equal(result.info.sourceIdentity.build, "3430261");
     assert.equal(result.qualification.ok, true);
     assert.equal(result.qualification.level, "structural");
+    assert.equal(result.qualification.validator, "cewgpu-structural");
+    assert.equal(result.qualification.mode, "selected");
+    assert.equal(result.qualification.packageValid, true);
+    assert.equal(result.qualification.sourceComplete, false);
+    assert.equal(result.qualification.backendComplete, false);
+    assert.equal(result.qualification.runtimeComplete, false);
     assert.equal(result.qualification.nativeComparison, false);
+    assert.equal(result.info.bodyMode, "selected");
+    assert.deepEqual(result.info.completeness, {
+        packageValid: true,
+        sourceComplete: false,
+        backendComplete: false,
+        runtimeComplete: false
+    });
+    for (const field of Object.keys(result.info.completeness))
+    {
+        assert.equal(result.info.completeness[field], result.qualification[field]);
+    }
+    assert.equal(result.metadata.bodyMode, "selected");
     assert.equal(result.info.selectedStageCount, 1);
     assert.equal(result.analysis.stages[0].key, "Main.pass0.vertex");
     assert.equal(result.wgsl.shaders.length, 1);
     assert.equal(result.inspection.shaderCount, 1);
-    assert.deepEqual(
-        CjsFormatWebgpu.read(result.bytes).info.sourceIdentity,
-        result.info.sourceIdentity
+    const packaged = CjsFormatWebgpu.read(result.bytes);
+    assert.deepEqual(packaged.info.sourceIdentity, result.info.sourceIdentity);
+    assert.equal(packaged.info.bodyMode, "selected");
+    assert.deepEqual(packaged.info.completeness, result.info.completeness);
+    assert.equal(packaged.metadata.bodyMode, "selected");
+
+    const compatibilityResult = CjsFormatWebgpu.buildEffect(source, {
+        allPermutations: false
+    });
+    assert.equal(compatibilityResult.info.bodyMode, "selected");
+});
+
+test("buildEffect rejects unsupported all-body packaging explicitly", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.buildEffect(
+            buildMinimalStagedEffectBytes(),
+            { mode: "all" }
+        ),
+        /all-body packaging requires portable complete effect reflection/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildEffect(
+            buildMinimalStagedEffectBytes(),
+            { allPermutations: true }
+        ),
+        /all-body packaging requires portable complete effect reflection/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildEffect(
+            buildMinimalStagedEffectBytes(),
+            { allPermutations: "false" }
+        ),
+        /allPermutations compatibility option must be boolean/u
     );
 });

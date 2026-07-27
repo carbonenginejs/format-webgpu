@@ -12,8 +12,9 @@ converts supported compiled effect stages into portable WGSL package data. It
 owns effect analysis, DXBC-to-intermediate-representation lowering, WGSL
 emission, pass-global binding planning, and CEWGPU assembly.
 
-Unsupported shader semantics fail explicitly instead of producing a partial
-package that appears usable.
+Unsupported requested shader semantics fail explicitly instead of producing a
+partially translated selected pass. `BuildEffect` output remains selected-body
+data, not a complete effect resource.
 
 ## Use this package when
 

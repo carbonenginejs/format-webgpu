@@ -17,17 +17,19 @@ import {
 } from "./packageEffectSelection.js";
 
 /**
- * Build one complete CEWGPU package from compiled Tr2 effect bytes.
+ * Build one structurally valid selected-body CEWGPU package from compiled
+ * Tr2 effect bytes.
  *
- * This is the browser-safe whole-effect pipeline used by both live resource
- * conversion and Node orchestration. Filesystem concerns remain in callers.
+ * This browser-safe path resolves one effect body and emits complete passes
+ * within the requested stage selection. Filesystem concerns remain in callers.
  *
  * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
- * @param {object} [options] Source, permutation, and stage-selection policy.
+ * @param {object} [options] Source, body-mode, permutation, and stage-selection policy.
  * @returns {object} Package bytes plus inspection and provenance documents.
  */
 export function buildEffectPackage(input, options = {})
 {
+    const mode = normalizeMode(options.mode, options.allPermutations);
     const source = normalizeSource(options.source);
     const outputPath = normalizeOptionalString(options.outputPath, "Effect outputPath");
     const permutation = normalizePermutation(options.permutation);
@@ -136,6 +138,12 @@ export function buildEffectPackage(input, options = {})
     const wgsl = buildWgslSet(shaderEntries);
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);
     const sourceIdentity = normalizeSourceIdentity(options.sourceIdentity, source, input);
+    const completeness = Object.freeze({
+        packageValid: true,
+        sourceComplete: false,
+        backendComplete: false,
+        runtimeComplete: false
+    });
     const info = {
         format: "CEWGPU",
         formatVersion: 1,
@@ -144,6 +152,8 @@ export function buildEffectPackage(input, options = {})
         outputPath,
         sourceIdentity,
         translator: "dxbc-js-wgsl",
+        bodyMode: mode,
+        completeness,
         stageCount: analysis.stages.length,
         selectedStageCount: selectedStages.length,
         shaderCount: wgsl.shaders.length,
@@ -152,6 +162,7 @@ export function buildEffectPackage(input, options = {})
     const metadata = {
         effectName: analysis.effectName,
         sourcePath: source,
+        bodyMode: mode,
         bodyIndex: analysis.bodyIndex,
         selectedOptions: analysis.selectedOptions,
         ...(wgslSelection ? { wgslSelection } : {})
@@ -169,7 +180,9 @@ export function buildEffectPackage(input, options = {})
     const qualification = Object.freeze({
         ok: true,
         level: "structural",
-        validator: "browser-wgsl-pipeline",
+        validator: "cewgpu-structural",
+        mode,
+        ...completeness,
         selectedStageCount: selectedStages.length,
         shaderCount: wgsl.shaders.length,
         layoutCount: wgsl.layouts.length,
@@ -185,6 +198,26 @@ export function buildEffectPackage(input, options = {})
         inspection: Object.freeze(inspection),
         qualification
     });
+}
+
+function normalizeMode(value, allPermutations)
+{
+    if (allPermutations !== undefined && typeof allPermutations !== "boolean")
+    {
+        throw new TypeError("Effect allPermutations compatibility option must be boolean");
+    }
+
+    const mode = String(allPermutations === true ? "all" : value ?? "selected").trim();
+
+    if (mode !== "selected")
+    {
+        throw new Error(
+            `Effect package mode ${mode || "<empty>"} is not supported; `
+            + "all-body packaging requires portable complete effect reflection"
+        );
+    }
+
+    return mode;
 }
 
 function collectStageBytecode(effectDescription)

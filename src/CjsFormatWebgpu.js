@@ -190,10 +190,11 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Builds a complete CEWGPU package from compiled Tr2 effect bytes.
+     * Builds a structurally valid selected-body CEWGPU package from compiled
+     * Tr2 effect bytes.
      *
      * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
-     * @param {object} [options] Source, permutation, and stage-selection policy.
+     * @param {object} [options] Source, body-mode, permutation, and stage-selection policy.
      * @returns {object} Package bytes plus inspection and provenance documents.
      */
     BuildEffect(input, options = {})
@@ -321,10 +322,10 @@ export class CjsFormatWebgpu
     }
 
     /**
-     * Static whole-effect CEWGPU builder.
+     * Static selected-body CEWGPU builder.
      *
      * @param {Uint8Array|ArrayBuffer|ArrayBufferView} input Compiled effect bytes.
-     * @param {object} [options] Source, permutation, and stage-selection policy.
+     * @param {object} [options] Source, body-mode, permutation, and stage-selection policy.
      * @returns {object} Package bytes plus inspection and provenance documents.
      */
     static buildEffect(input, options = {})

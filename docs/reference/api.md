@@ -81,6 +81,21 @@ instance methods:
 | `schema` | Optional caller schema record retained by the profile. |
 | `classes` | Optional constructor registrations keyed by `CLASS_KEYS`. |
 
+## Effect-package options
+
+`BuildEffect` and `buildEffect` accept `mode: "selected"`, which is the default
+and currently the only supported body mode. They resolve one permutation body
+and emit complete passes within the requested stage selection. `mode: "all"`
+fails explicitly until portable complete effect reflection is available.
+The orchestration compatibility option `allPermutations: false` also means
+selected mode; `allPermutations: true` fails by the same rule instead of
+silently emitting one body.
+
+The returned structural qualification does not claim a complete effect
+resource. `packageValid` reports successful container construction;
+`sourceComplete`, `backendComplete`, and `runtimeComplete` remain false for
+the selected-body package.
+
 ## Static metadata
 
 The class exposes output-mode constants, accepted class keys, media and input

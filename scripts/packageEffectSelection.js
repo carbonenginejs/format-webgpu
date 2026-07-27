@@ -143,7 +143,7 @@ export function validatePackageEffectPaths(inputPath, outputPath, platform = pro
  * Prove that ANLS metadata and the separately resolved bytecode body use the
  * same mixed-radix selection before any shader bytes are packaged.
  *
- * @param {object} analysis Full effect analysis.
+ * @param {object} analysis Selected-body CEWGPU diagnostic analysis.
  * @param {object} selection Bytecode reader selection.
  * @returns {true} True when both resolutions are identical.
  */
