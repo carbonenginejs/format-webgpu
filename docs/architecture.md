@@ -39,6 +39,8 @@ then package data to the engine.
 - Resolving one compiled-effect permutation and complete pass.
 - Validating and preserving every source permutation index and raw-body alias
   in a backend-neutral identity-only graph.
+- Packing complete shared portable reflection for the selected version-15
+  body, with exact immutable byte vectors in a validated blob arena.
 - Normalizing effect, stage, binding, and decoded DXBC analysis.
 - Building validated shader intermediate representation and structured control
   flow.
@@ -49,8 +51,9 @@ then package data to the engine.
 
 ## Ownership elsewhere
 
-- `format-hlsl` owns compiled-effect parsing, permutation resolution, and
-  binding-manifest interpretation.
+- `format-hlsl` owns compiled-effect parsing, permutation resolution,
+  binding-manifest interpretation, and the shared selected-body portable
+  reflection schema/validator.
 - `format-dxbc` owns DXBC container and instruction decoding.
 - `engine-webgpu` owns `GPUDevice`, shader-module compilation, bind groups,
   pipelines, resource realization, device loss, and draw execution.

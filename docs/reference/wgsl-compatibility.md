@@ -1299,6 +1299,38 @@ topology and both stages emitted. A new browser gate is not required for this
 checkpoint because emitted WGSL, analysis, metadata, layouts, and transforms
 are unchanged; old readers tolerate the additive chunk.
 
+The 0.4.4 selected-reflection checkpoint adds complete version-15 reflection
+for the selected body in `RFLX`, with every exact byte vector externalized into
+canonical deduplicated `RBLB` records. The upstream
+`@carbonenginejs/format-hlsl/portable` v1 validator is rerun after
+reconstruction; package validation also reconciles INFO source identity,
+META/PGRF body identity, and every ANLS pass/stage source record. Earlier
+effect versions retain the legacy package surface. All-body reflection remains
+unsupported, so source/backend/runtime completeness remain false.
+
+The exact-build 3444265 corpus remains 507 qualified, 30 unsupported, and zero
+failed/unqualified. All 537 statuses and errors match 0.4.3. Across the 507
+qualified packages:
+
+- all `META`, `PGRF`, `ANLS`, and `WGSL` payloads are byte-identical;
+- INFO differs only by the 0.4.4 producer/translator versions and its RFLX/RBLB
+  pointer;
+- all 507 packages contain deterministic, structurally valid RFLX/RBLB;
+- reconstructing every selected portable document from RFLX/RBLB deep-equals
+  a fresh source reflection, including 16 non-default/non-first bodies; and
+- the reflected corpus covers 885 techniques, 937 passes, 1,863 stage
+  programs, 4,366 constants, 2,281 resources, 1,027 samplers, 16 UAVs, 1,589
+  render states, and 74,912 exact constant-default bytes.
+
+A packed-package Chrome smoke builds and reads a real version-15 effect in the
+browser, resolves all reflected byte references, structured-clones the JSON
+view, and fails closed after raw blob corruption with no console errors. The
+engine prepares a newly generated real `quads.sm_hi` CEWGPU package with 10
+canonical bindings and zero WGSL warnings. The high-tier
+`unpacked_quadv5.sm_depth` DX11 self-pair remains exhaustively qualified across
+480 bodies, 4,480 emitted stage occurrences, and 2,240 ready pass occurrences;
+the envelope slice changes none of its WGSL.
+
 ## Verification contract
 
 Every shader-emission, layout, or transform compatibility change requires the

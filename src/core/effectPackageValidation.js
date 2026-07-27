@@ -10,6 +10,11 @@ import {
     EFFECT_PERMUTATION_GRAPH_VERSION,
     validateEffectPermutationGraph
 } from "./effectPermutationGraph.js";
+import {
+    EFFECT_REFLECTION_BLOB_CHUNK,
+    EFFECT_REFLECTION_CHUNK,
+    validateEffectReflectionPointer
+} from "./effectReflectionPackage.js";
 
 const REQUIRED_EFFECT_CHUNKS = Object.freeze([ "INFO", "META", "ANLS", "WGSL" ]);
 const EFFECT_PACKAGE_KIND = "tr2-effect-webgpu";
@@ -286,6 +291,45 @@ function validatePermutationGraphReference(pkg, info)
         throw new Error("CEWGPU INFO permutation-graph counts disagree with PGRF");
     }
     return graph;
+}
+
+/**
+ * Read an optional INFO/RFLX/RBLB reference as one indivisible legacy-aware
+ * unit.
+ *
+ * @param {object} pkg Loaded CEWGPU package.
+ * @param {object} info Validated INFO document.
+ * @returns {object|null} Reflection pointer and chunks, or null when absent.
+ */
+function readEffectReflectionReference(pkg, info)
+{
+    const pointer = info.effectReflection;
+    const reflectionChunk = pkg.GetChunk(EFFECT_REFLECTION_CHUNK);
+    const blobChunk = pkg.GetChunk(EFFECT_REFLECTION_BLOB_CHUNK);
+    if (pointer === undefined && !reflectionChunk && !blobChunk) return null;
+
+    if (info.formatVersion !== 2 || pointer === undefined)
+    {
+        throw new Error("CEWGPU INFO.effectReflection is malformed");
+    }
+    if (!reflectionChunk)
+    {
+        throw new Error(
+            `CEWGPU INFO.effectReflection requires ${EFFECT_REFLECTION_CHUNK}`
+        );
+    }
+    if (!blobChunk)
+    {
+        throw new Error(
+            `CEWGPU INFO.effectReflection requires ${EFFECT_REFLECTION_BLOB_CHUNK}`
+        );
+    }
+
+    return {
+        pointer,
+        reflection: requireJsonObject(pkg, EFFECT_REFLECTION_CHUNK),
+        blobBytes: blobChunk.bytes
+    };
 }
 
 /**
@@ -1093,6 +1137,7 @@ export function validateEffectPackageEnvelope(pkg)
     }
     validateSourceIdentity(info.sourceIdentity, info.formatVersion === 2);
     const permutationGraph = validatePermutationGraphReference(pkg, info);
+    const effectReflection = readEffectReflectionReference(pkg, info);
     if (info.outputPath !== null
         && (typeof info.outputPath !== "string" || !info.outputPath))
     {
@@ -1136,9 +1181,40 @@ export function validateEffectPackageEnvelope(pkg)
             metadataOptions
         );
     }
+    if (effectReflection)
+    {
+        if (!permutationGraph)
+        {
+            throw new Error("CEWGPU effect reflection requires PGRF");
+        }
+        validateEffectReflectionPointer(
+            effectReflection.pointer,
+            effectReflection.reflection,
+            effectReflection.blobBytes,
+            {
+                permutationGraph,
+                permutationIndex: bodyIndex,
+                sourceIdentity: info.sourceIdentity,
+                sourcePath
+            }
+        );
+        if (effectReflection.reflection.source.effectVersion !== analysis.effectVersion
+            || effectReflection.reflection.source.compilerVersion !== analysis.compilerVersion)
+        {
+            throw new Error("CEWGPU RFLX source versions disagree with ANLS");
+        }
+    }
 
     const analysisPassKeys = collectAnalysisPassKeys(passes);
     const analysisKeys = collectStageKeys(stages, "ANLS");
+    if (effectReflection)
+    {
+        validateReflectionAnalysis(
+            effectReflection.reflection,
+            passes,
+            stages
+        );
+    }
     const shaderKeys = collectStageKeys(shaders, "WGSL");
     if (stages.some((stage) =>
         !analysisPassKeys.has(`${stage.techniqueName}.pass${stage.passIndex}`)))
@@ -1163,6 +1239,104 @@ export function validateEffectPackageEnvelope(pkg)
     validateResourceTransforms(wgsl, layoutKeys, shaderKeys, layouts);
     validatePartialBoundary(info, stages, effectName);
     return true;
+}
+
+/**
+ * Reconcile complete source reflection with compact ANLS identities.
+ *
+ * @param {object} reflection Validated RFLX document.
+ * @param {object[]} analysisPasses Validated ANLS pass records.
+ * @param {object[]} analysisStages Validated ANLS stage records.
+ * @returns {true} True when the two documents agree.
+ */
+function validateReflectionAnalysis(reflection, analysisPasses, analysisStages)
+{
+    const reflectedPasses = new Map();
+    const reflectedStages = new Map();
+    for (const technique of reflection.effect.techniques)
+    {
+        for (const [ passIndex, pass ] of technique.passes.entries())
+        {
+            const passKey = `${technique.name}.pass${passIndex}`;
+            if (reflectedPasses.has(passKey))
+            {
+                throw new Error(`CEWGPU RFLX contains duplicate pass ${passKey}`);
+            }
+            reflectedPasses.set(passKey, pass);
+            for (const stage of pass.stages)
+            {
+                const stageKey = `${passKey}.${stage.stageName}`;
+                if (reflectedStages.has(stageKey))
+                {
+                    throw new Error(`CEWGPU RFLX contains duplicate stage ${stageKey}`);
+                }
+                reflectedStages.set(stageKey, stage);
+            }
+        }
+    }
+
+    if (reflectedPasses.size !== analysisPasses.length
+        || reflectedStages.size !== analysisStages.length)
+    {
+        throw new Error("CEWGPU RFLX and ANLS pass/stage counts disagree");
+    }
+    for (const pass of analysisPasses)
+    {
+        const key = `${pass.techniqueName}.pass${pass.passIndex}`;
+        const reflected = reflectedPasses.get(key);
+        if (!reflected || !jsonEqual(reflected.renderStates, pass.states))
+        {
+            throw new Error(`CEWGPU RFLX pass ${key} disagrees with ANLS`);
+        }
+    }
+    for (const stage of analysisStages)
+    {
+        const reflected = reflectedStages.get(stage.key);
+        const program = reflected?.sourceProgram;
+        const signature = reflected?.input?.signature;
+        if (!reflected
+            || reflected.stageType !== stage.stageType
+            || reflected.stageName !== stage.stageName
+            || program?.kind !== "stage"
+            || program.stageType !== stage.stageType
+            || program.stageName !== stage.stageName
+            || program.shaderSize !== stage.shaderBytecode?.shaderSize
+            || program.stringTableOffset !== stage.shaderBytecode?.stringTableOffset
+            || !jsonEqual(signature?.threadGroupSize, stage.threadGroupSize)
+            || !samePipelineInputs(
+                signature?.pipelineInputs,
+                stage.pipelineInputs
+            ))
+        {
+            throw new Error(`CEWGPU RFLX stage ${stage.key} disagrees with ANLS`);
+        }
+    }
+    return true;
+}
+
+/**
+ * Compare authored pipeline-input numeric fields while ignoring ANLS display
+ * names.
+ *
+ * @param {object[]} reflected RFLX pipeline inputs.
+ * @param {object[]} analysis ANLS pipeline inputs.
+ * @returns {boolean} True when the ordered source fields agree.
+ */
+function samePipelineInputs(reflected, analysis)
+{
+    const fields = [
+        "usage",
+        "registerIndex",
+        "usageIndex",
+        "usedMask",
+        "type",
+        "dimension"
+    ];
+    return Array.isArray(reflected)
+        && Array.isArray(analysis)
+        && reflected.length === analysis.length
+        && reflected.every((entry, index) =>
+            fields.every((field) => entry[field] === analysis[index]?.[field]));
 }
 
 /**

@@ -12,6 +12,11 @@ import {
     EFFECT_PERMUTATION_GRAPH_VERSION
 } from "./effectPermutationGraph.js";
 import {
+    buildSelectedEffectReflection,
+    EFFECT_REFLECTION_BLOB_CHUNK,
+    EFFECT_REFLECTION_CHUNK
+} from "./effectReflectionPackage.js";
+import {
     DXBC_WGSL_TRANSLATOR_NAME,
     DXBC_WGSL_TRANSLATOR_VERSION,
     FORMAT_WEBGPU_PACKAGE_NAME,
@@ -159,6 +164,14 @@ export function buildEffectPackage(input, options = {})
     const wgsl = buildWgslSet(shaderEntries);
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);
     const permutationGraph = buildEffectPermutationGraph(resolved.effectRes);
+    const effectReflection = resolved.effectRes.m_version === 15
+        ? buildSelectedEffectReflection(
+            resolved.effectRes,
+            resolved.selection.bodyIndex,
+            permutationGraph,
+            { sourceIdentity, sourcePath: source }
+        )
+        : null;
     const completeness = Object.freeze({
         packageValid: true,
         sourceComplete: false,
@@ -184,6 +197,9 @@ export function buildEffectPackage(input, options = {})
             permutationCount: permutationGraph.variants.length,
             uniqueBodyCount: permutationGraph.bodies.length
         }),
+        ...(effectReflection
+            ? { effectReflection: effectReflection.pointer }
+            : {}),
         bodyMode: mode,
         completeness,
         stageCount: analysis.stages.length,
@@ -203,6 +219,10 @@ export function buildEffectPackage(input, options = {})
         [ "INFO", info ],
         [ "META", metadata ],
         [ EFFECT_PERMUTATION_GRAPH_CHUNK, permutationGraph ],
+        ...(effectReflection ? [
+            [ EFFECT_REFLECTION_CHUNK, effectReflection.reflection ],
+            [ EFFECT_REFLECTION_BLOB_CHUNK, effectReflection.blobBytes ]
+        ] : []),
         [ "ANLS", analysis ],
         [ "WGSL", wgsl ]
     ]);
@@ -227,6 +247,8 @@ export function buildEffectPackage(input, options = {})
         info: Object.freeze(info),
         metadata: Object.freeze(metadata),
         permutationGraph,
+        reflection: effectReflection?.reflection ?? null,
+        reflectionBlobs: effectReflection?.blobBytes ?? null,
         analysis,
         wgsl,
         inspection: Object.freeze(inspection),

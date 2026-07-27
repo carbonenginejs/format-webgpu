@@ -93,7 +93,8 @@ unresolved permutation assertions rather than silently selecting a default.
 `BuildEffect` and `buildEffect` accept `mode: "selected"`, which is the default
 and currently the only supported body mode. They resolve one permutation body
 and emit complete passes within the requested stage selection. `mode: "all"`
-fails explicitly until portable complete effect reflection is available.
+fails explicitly until portable reflection is serialized for every unique
+body.
 The orchestration compatibility option `allPermutations: false` also means
 selected mode; `allPermutations: true` fails by the same rule instead of
 silently emitting one body.
@@ -119,10 +120,21 @@ package-local unique-body key/digest. `Inspect` reports `permutationCount` and
 `uniqueBodyCount`. This is complete source topology with identity-only bodies;
 it does not make `mode: "all"` available.
 
+For version-15 input, new packages also emit complete selected-body reflection
+in `RFLX` and exact referenced byte payloads in `RBLB`. Build results expose
+these as `result.reflection` and `result.reflectionBlobs`. JSON reads expose
+`reflection` plus `reflectionBlobByteLength`; raw reads expose
+`CewgpuPackage.reflection`, `reflectionBlobBytes`, and
+`GetReflectionBlob(referenceOrKey)`. The latter returns an owned byte copy and
+requires an object reference to match its stored key, offset, byte length, and
+digest exactly. `Inspect` reports selected reflection body/source-program/blob
+counts and blob byte length. Earlier source versions omit both chunks.
+
 The returned structural qualification does not claim a complete effect
 resource. `packageValid` reports successful container construction;
 `sourceComplete`, `backendComplete`, and `runtimeComplete` remain false for
-the selected-body package.
+the selected-body package because other unique permutation bodies are not
+reflected or translated.
 
 ## Static metadata
 
@@ -140,7 +152,10 @@ Duplicate/non-ASCII chunk tags are rejected. A declared
 chunks, unsupported document versions, or inconsistent INFO/META/ANLS/WGSL
 identity, counts, keys, layouts, selection, and completeness fields. Declared
 PGRF pointers, schemas, counts, variant tuples, body references, and the
-selected index/options are reconciled as part of the same gate.
+selected index/options are reconciled as part of the same gate. Optional
+INFO/RFLX/RBLB reflection units additionally reconcile source/body identity,
+portable closed schemas, exact blob references/digests, and ANLS pass/stage
+source identities.
 Strict effect validation is activated by the `INFO.packageKind` marker;
 effect-only consumers must require that marker because unmarked CEWGPU
 containers intentionally remain generic.

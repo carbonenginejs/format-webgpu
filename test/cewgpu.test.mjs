@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
+import { buildEffectBodyReflection } from "@carbonenginejs/format-hlsl/portable";
+
 import CjsFormatWebgpu from "../src/index.js";
+import { readEffectAnalysis } from "../src/core/effectAnalysis.js";
 import { buildEffectAnalysis } from "../src/core/helpers.js";
 import {
     buildEffectPermutationGraph,
@@ -44,6 +47,98 @@ function mutateCanonicalEffect(mutations = {}, omitted = [])
         });
 
     return CjsFormatWebgpu.build(chunks);
+}
+
+function canonicalV15EffectChunks()
+{
+    const result = CjsFormatWebgpu.buildEffect(
+        buildMinimalStagedEffectBytes({ version: 15 }),
+        { source: "synthetic.sm_depth" }
+    );
+    const pkg = CjsFormatWebgpu.read(result.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+
+    return pkg.chunks.map((chunk) => [
+        chunk.tag,
+        chunk.tag === "RBLB"
+            ? Uint8Array.from(chunk.bytes)
+            : pkg.GetJson(chunk.tag)
+    ]);
+}
+
+function mutateCanonicalV15Effect(mutations = {}, omitted = [])
+{
+    const chunks = canonicalV15EffectChunks()
+        .filter(([ tag ]) => !omitted.includes(tag))
+        .map(([ tag, value ]) =>
+        {
+            if (!Object.prototype.hasOwnProperty.call(mutations, tag))
+            {
+                return [ tag, value ];
+            }
+
+            const mutation = mutations[tag];
+            if (typeof mutation !== "function") return [ tag, mutation ];
+            const copy = structuredClone(value);
+            mutation(copy);
+            return [ tag, copy ];
+        });
+
+    return CjsFormatWebgpu.build(chunks);
+}
+
+function hydrateReflectionBytes(value, pkg)
+{
+    if (value && typeof value === "object"
+        && !Array.isArray(value)
+        && [ "blobKey", "offset", "byteLength", "sha256" ]
+            .every((key) => Object.prototype.hasOwnProperty.call(value, key)))
+    {
+        const bytes = pkg.GetReflectionBlob(value);
+        assert(bytes, `missing reflection blob ${value.blobKey}`);
+        return bytes;
+    }
+    if (Array.isArray(value))
+    {
+        return value.map((entry) => hydrateReflectionBytes(entry, pkg));
+    }
+    if (value && typeof value === "object")
+    {
+        return Object.fromEntries(Object.entries(value).map(([ key, entry ]) => [
+            key,
+            hydrateReflectionBytes(entry, pkg)
+        ]));
+    }
+    return value;
+}
+
+function portableReflectionFromPackage(pkg)
+{
+    const reflection = pkg.reflection;
+    return {
+        format: reflection.portableFormat,
+        formatVersion: reflection.portableFormatVersion,
+        mode: "single-body",
+        keyScope: reflection.keyScope,
+        coverage: {
+            bodies: "single",
+            reflection: "complete",
+            sourcePrograms: "complete",
+            constantDefaults: "exact"
+        },
+        source: {
+            label: reflection.source.label,
+            effectVersion: reflection.source.effectVersion,
+            compilerVersion: reflection.source.compilerVersion,
+            nativeHash: pkg.GetReflectionBlob(reflection.source.nativeHash),
+            stringTableByteLength: reflection.source.stringTableByteLength,
+            byteLength: reflection.source.byteLength
+        },
+        permutationIndex: reflection.selectedBody.permutationIndex,
+        sourceRecord: { ...reflection.selectedBody.sourceRecord },
+        effect: hydrateReflectionBytes(reflection.effect, pkg)
+    };
 }
 
 function uniformLayoutBinding(overrides = {})
@@ -726,9 +821,234 @@ test("canonical effect packages reconcile INFO and complete PGRF topology", () =
     );
 });
 
+test("version 15 effect packages preserve complete selected-body reflection", () =>
+{
+    const source = buildMinimalStagedEffectBytes({
+        version: 15,
+        passCount: 2
+    });
+    const first = CjsFormatWebgpu.buildEffect(source, {
+        source: "synthetic.sm_depth"
+    });
+    const second = CjsFormatWebgpu.buildEffect(source, {
+        source: "synthetic.sm_depth"
+    });
+
+    assert.deepEqual(
+        first.inspection.chunks.map(({ tag }) => tag),
+        [ "INFO", "META", "PGRF", "RFLX", "RBLB", "ANLS", "WGSL" ]
+    );
+    assert.deepEqual(first.bytes, second.bytes);
+    assert.equal(first.info.effectReflection.chunk, "RFLX");
+    assert.equal(first.info.effectReflection.blobChunk, "RBLB");
+    assert.equal(first.info.effectReflection.bodyCount, 1);
+    assert.equal(first.reflection.selectedBody.permutationIndex, 0);
+    assert.equal(first.reflection.selectedBody.bodyKey, "body0");
+    assert.equal(first.reflection.source.label, "synthetic.sm_depth");
+    assert.equal(first.reflection.source.effectVersion, 15);
+    assert.equal(first.reflection.source.compilerVersion, 77);
+    assert.equal(first.reflection.coverage.reflection, "complete-for-listed");
+    assert.equal(first.inspection.reflectionBodyCount, 1);
+    assert.equal(first.inspection.reflectionSourceProgramCount, 2);
+    assert.equal(first.inspection.reflectionBlobCount, 3);
+    assert.equal(first.inspection.reflectionBlobByteLength, 100);
+    assert.equal(
+        Object.prototype.hasOwnProperty.call(first.reflection.effect, "name"),
+        false
+    );
+
+    const parsed = CjsFormatWebgpu.read(first.bytes);
+    assert.deepEqual(parsed.reflection, first.reflection);
+    assert.equal(parsed.reflectionBlobByteLength, first.reflectionBlobs.byteLength);
+    const raw = CjsFormatWebgpu.read(first.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+    assert.deepEqual(raw.reflectionBlobBytes, first.reflectionBlobs);
+    assert.deepEqual(
+        raw.GetReflectionBlob(first.reflection.source.nativeHash),
+        Uint8Array.from({ length: 32 }, (_, index) => index)
+    );
+    const program = first.reflection.effect.techniques[0].passes[0]
+        .stages[0].sourceProgram.bytes;
+    assert.equal(raw.GetReflectionBlob(program).byteLength, 68);
+    const repeatedProgram = first.reflection.effect.techniques[0].passes[1]
+        .stages[0].sourceProgram.bytes;
+    assert.deepEqual(repeatedProgram, program);
+    const defaults = first.reflection.effect.techniques[0].passes[0]
+        .stages[0].input.constantDefaults.bytes;
+    assert.equal(raw.GetReflectionBlob(defaults).byteLength, 0);
+
+    const owned = raw.GetReflectionBlob(program.blobKey);
+    owned[0] ^= 0xff;
+    assert.notEqual(owned[0], raw.GetReflectionBlob(program)[0]);
+    assert.equal(raw.GetReflectionBlob({
+        ...program,
+        offset: program.offset + 1
+    }), null);
+    assert.equal(raw.GetReflectionBlob("missing"), null);
+
+    raw.reflectionBlobBytes[program.offset] ^= 0xff;
+    assert.equal(raw.GetReflectionBlob(program), null);
+
+    const pristineRaw = CjsFormatWebgpu.read(second.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+    const resolved = readEffectAnalysis(source, {
+        source: "synthetic.sm_depth"
+    });
+    assert.deepEqual(
+        portableReflectionFromPackage(pristineRaw),
+        buildEffectBodyReflection(resolved.effectRes, 0)
+    );
+});
+
+test("pre-version-15 effect packages retain their exact legacy chunk surface", () =>
+{
+    for (const version of [ 8, 14 ])
+    {
+        const result = CjsFormatWebgpu.buildEffect(
+            buildMinimalStagedEffectBytes({ version }),
+            { source: `synthetic-v${version}.sm_hi` }
+        );
+
+        assert.deepEqual(
+            result.inspection.chunks.map(({ tag }) => tag),
+            [ "INFO", "META", "PGRF", "ANLS", "WGSL" ]
+        );
+        assert.equal(result.reflection, null);
+        assert.equal(result.reflectionBlobs, null);
+        assert.equal(
+            Object.prototype.hasOwnProperty.call(result.info, "effectReflection"),
+            false
+        );
+        const parsed = CjsFormatWebgpu.read(result.bytes);
+        assert.equal(parsed.reflection, null);
+        assert.equal(parsed.reflectionBlobByteLength, 0);
+        const raw = CjsFormatWebgpu.read(result.bytes, {
+            emit: CjsFormatWebgpu.OUTPUT_RAW
+        });
+        assert.equal(raw.reflectionBlobBytes, null);
+        assert.equal(raw.GetReflectionBlob("blob0"), null);
+    }
+});
+
+test("effect reflection pointer and chunks are one fail-closed unit", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.read(
+            mutateCanonicalV15Effect({}, [ "RFLX" ])
+        ),
+        /requires RFLX/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(
+            mutateCanonicalV15Effect({}, [ "RBLB" ])
+        ),
+        /requires RBLB/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            INFO: (value) => { delete value.effectReflection; }
+        })),
+        /INFO\.effectReflection is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            INFO: (value) => { value.effectReflection.blobCount += 1; }
+        })),
+        /counts disagree/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            INFO: (value) => { value.effectReflection.chunk = "NOPE"; }
+        })),
+        /INFO\.effectReflection is malformed/
+    );
+
+    const legacyCompatible = CjsFormatWebgpu.read(
+        mutateCanonicalV15Effect({
+            INFO: (value) => { delete value.effectReflection; }
+        }, [ "RFLX", "RBLB" ])
+    );
+    assert.equal(legacyCompatible.info.formatVersion, 2);
+    assert.equal(legacyCompatible.reflection, null);
+});
+
+test("effect reflection rejects corrupted identities, references, and blob bytes", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) => { value.selectedBody.bodyKey = "missing"; }
+        })),
+        /absent from PGRF|disagrees with PGRF/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) => { value.selectedBody.permutationIndex = 1; }
+        })),
+        /selected body disagrees with META/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) => { value.source.label = "other.sm_depth"; }
+        })),
+        /source identity disagrees with INFO/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) => { value.source.compilerVersion += 1; }
+        })),
+        /source versions disagree with ANLS/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) =>
+            {
+                value.source.nativeHash.offset += 1;
+            }
+        })),
+        /blob reference disagrees/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) => { value.blobStore.blobs[0].blobKey = "blob9"; }
+        })),
+        /noncanonical key/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) =>
+            {
+                const pass = value.effect.techniques[0].passes[0];
+                pass.renderStateCount = 1;
+                pass.renderStates.push({ state: 7, value: 11 });
+            }
+        })),
+        /RFLX pass Main\.pass0 disagrees with ANLS/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RFLX: (value) =>
+            {
+                value.effect.techniques[0].passes[0].stages[0]
+                    .input.signature.threadGroupSize.x += 1;
+            }
+        })),
+        /RFLX stage Main\.pass0\.vertex disagrees with ANLS/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.read(mutateCanonicalV15Effect({
+            RBLB: (value) => { value[0] ^= 0xff; }
+        })),
+        /blob-store envelope disagrees/
+    );
+});
+
 test("multi-axis effect packages reconcile selection and preserve PGRF across stage filtering", () =>
 {
     const source = buildMinimalStagedEffectBytes({
+        version: 15,
+        passCount: 2,
         permutations: [
             {
                 name: "QUALITY",
@@ -785,6 +1105,12 @@ test("multi-axis effect packages reconcile selection and preserve PGRF across st
         ]
     );
     assert.deepEqual(filtered.permutationGraph, complete.permutationGraph);
+    assert.equal(complete.wgsl.shaders.length, 2);
+    assert.equal(filtered.wgsl.shaders.length, 1);
+    assert.equal(complete.analysis.stages.length, 2);
+    assert.equal(filtered.analysis.stages.length, 2);
+    assert.equal(complete.reflection.effect.techniques[0].passes.length, 2);
+    assert.equal(filtered.reflection.effect.techniques[0].passes.length, 2);
 
     const completeRaw = CjsFormatWebgpu.read(complete.bytes, {
         emit: CjsFormatWebgpu.OUTPUT_RAW
@@ -792,14 +1118,19 @@ test("multi-axis effect packages reconcile selection and preserve PGRF across st
     const filteredRaw = CjsFormatWebgpu.read(filtered.bytes, {
         emit: CjsFormatWebgpu.OUTPUT_RAW
     });
-    assert.deepEqual(
-        Array.from(filteredRaw.GetChunk("PGRF").bytes),
-        Array.from(completeRaw.GetChunk("PGRF").bytes)
-    );
+    for (const tag of [ "PGRF", "RFLX", "RBLB" ])
+    {
+        assert.deepEqual(
+            Array.from(filteredRaw.GetChunk(tag).bytes),
+            Array.from(completeRaw.GetChunk(tag).bytes)
+        );
+    }
 
     const chunks = completeRaw.chunks.map((chunk) => [
         chunk.tag,
-        structuredClone(completeRaw.GetJson(chunk.tag))
+        chunk.tag === "RBLB"
+            ? Uint8Array.from(chunk.bytes)
+            : structuredClone(completeRaw.GetJson(chunk.tag))
     ]);
     const metadata = chunks.find(([ tag ]) => tag === "META")[1];
     const analysis = chunks.find(([ tag ]) => tag === "ANLS")[1];

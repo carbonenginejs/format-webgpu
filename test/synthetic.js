@@ -290,25 +290,41 @@ export function buildEffectBytes(options = {})
  *
  * @param {object} [options] Optional permutation axes.
  * @param {Array<object>} [options.permutations] Permutation axis descriptions.
+ * @param {8|14|15} [options.version] Compiled effect version.
+ * @param {1|2} [options.passCount] Number of identical minimal passes.
  * @returns {Uint8Array} Synthetic compiled effect bytes.
  */
 export function buildMinimalStagedEffectBytes(options = {})
 {
+    const version = options.version ?? 8;
+    if (![ 8, 14, 15 ].includes(version))
+    {
+        throw new TypeError("Minimal staged effect version must be 8, 14, or 15");
+    }
+    const passCount = options.passCount ?? 1;
+    if (![ 1, 2 ].includes(passCount))
+    {
+        throw new TypeError("Minimal staged effect pass count must be 1 or 2");
+    }
     const DCL_GLOBAL_FLAGS = 106;
     const DCL_TEMPS = 104;
     const RET = 62;
-    const tokens = new Uint32Array([
-        versionToken(1, 5, 0),
-        6,
-        opcodeToken(DCL_GLOBAL_FLAGS, 1) | (1 << 11),
-        opcodeToken(DCL_TEMPS, 2),
-        1,
-        opcodeToken(RET, 1)
-    ]);
-    const dxbc = buildDxbcContainer([ {
-        fourCC: "SHEX",
-        payload: new Uint8Array(tokens.buffer.slice(0))
-    } ]);
+    const buildStageDxbc = (programType) =>
+    {
+        const tokens = new Uint32Array([
+            versionToken(programType, 5, 0),
+            6,
+            opcodeToken(DCL_GLOBAL_FLAGS, 1) | (1 << 11),
+            opcodeToken(DCL_TEMPS, 2),
+            1,
+            opcodeToken(RET, 1)
+        ]);
+        return buildDxbcContainer([ {
+            fourCC: "SHEX",
+            payload: new Uint8Array(tokens.buffer.slice(0))
+        } ]);
+    };
+    const stages = [ { stageType: 0, dxbc: buildStageDxbc(1) } ];
     const permutations = options.permutations || [];
     const strings = [ "Main" ];
     for (const permutation of permutations)
@@ -320,35 +336,74 @@ export function buildMinimalStagedEffectBytes(options = {})
     const table = new ByteWriter();
     table.raw(stringTable.bytes);
     const mainOffset = stringTable.offsets.get("Main");
-    const dxbcOffset = table.length;
-    table.raw(dxbc);
+    for (const stage of stages)
+    {
+        stage.dxbcOffset = table.length;
+        table.raw(stage.dxbc);
+    }
 
     const body = new ByteWriter();
     body.u8(1);
     body.u32(mainOffset);
-    body.u8(1);
-    body.u8(1);
-    body.u8(0);
-    body.u8(0);
-    body.u32(dxbc.length);
-    body.u32(dxbcOffset);
-    body.u32(0);
-    body.u32(0);
-    body.u32(1);
-    body.u32(1);
-    body.u32(1);
-    body.u32(0);
-    body.u32(0);
-    body.u32(0);
-    body.u8(0);
-    body.u8(0);
-    body.u8(0);
-    body.u8(0);
-    body.u8(0);
+    body.u8(passCount);
+    for (let passIndex = 0; passIndex < passCount; passIndex += 1)
+    {
+        body.u8(stages.length);
+        for (const stage of stages)
+        {
+            body.u8(stage.stageType);
+            if (version === 8)
+            {
+                body.u8(0);
+                body.u32(stage.dxbc.length);
+                body.u32(stage.dxbcOffset);
+                body.u32(0);
+                body.u32(0);
+                body.u32(1);
+                body.u32(1);
+                body.u32(1);
+                body.u32(0);
+                body.u32(0);
+                body.u32(0);
+                body.u8(0);
+                body.u8(0);
+                body.u8(0);
+                body.u8(0);
+            }
+            else
+            {
+                body.u32(stage.dxbc.length);
+                body.u32(stage.dxbcOffset);
+                body.u32(0);
+                body.u32(0);
+                body.u32(0);
+                body.u8(0);
+                body.u8(0);
+                body.u8(0);
+                body.u32(0);
+                body.u32(0);
+                body.u32(0);
+                body.u8(0);
+                body.u8(0);
+                body.u8(0);
+                body.u8(0);
+            }
+        }
+        body.u8(0);
+    }
+    if (version > 13) body.u8(0);
     body.u16(0);
 
     const writer = new ByteWriter();
-    writer.u32(8);
+    writer.u32(version);
+    if (version === 15)
+    {
+        writer.u32(77);
+        writer.raw(Uint8Array.from(
+            { length: 32 },
+            (_, index) => index
+        ));
+    }
     writer.u32(table.length);
     writer.raw(table.toBytes());
     writer.u8(permutations.length);

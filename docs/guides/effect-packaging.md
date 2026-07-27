@@ -67,6 +67,13 @@ graph in `PGRF`. This preserves every axis, Cartesian permutation index,
 option-index tuple, compiler alias, and unique raw body identity even though
 only one selected body's reflection and WGSL are currently packaged.
 
+For version-15 input, the package also includes complete portable reflection
+for that selected body in `RFLX` and its exact immutable byte payloads in
+`RBLB`. These include authored parameter/resource metadata, constant defaults,
+stage/library source programs, signatures, static samplers, annotations, and
+the opaque native source hash. Earlier source versions keep the legacy package
+surface because portable reflection version 1 is intentionally version-15-only.
+
 ## Result
 
 The returned record contains:
@@ -77,6 +84,8 @@ The returned record contains:
 | `info` | Translator and package information. |
 | `metadata` | Selection and caller provenance. |
 | `permutationGraph` | Complete source permutation topology and identity-only body table. |
+| `reflection` | Complete selected-body portable reflection for version-15 input, otherwise `null`. |
+| `reflectionBlobs` | Exact RBLB bytes for reflected programs/defaults/native hash, otherwise `null`. |
 | `analysis` | Compact selected-body diagnostic binding/stage data; not lossless effect reflection. |
 | `wgsl` | Portable shader set and pass layouts. |
 | `inspection` | Summary produced by reading the built package. |
@@ -85,11 +94,18 @@ The returned record contains:
 `mode: "selected"` is the default and currently the only supported body mode.
 The package retains normalized analysis for that resolved body while emitting
 WGSL for the selected complete passes. PGRF retains the complete source
-permutation graph and identity of every unique raw body, but it does not retain
-those bodies' lossless reflection or backend programs. The package is
-therefore not sufficient by itself to hydrate a complete `Tr2EffectRes`.
-`mode: "all"` fails explicitly until a shared browser-safe format layer
-exposes portable complete reflection and all-body serialization.
+permutation graph and identity of every unique raw body, while RFLX/RBLB make
+the selected version-15 body sufficient to reconstruct its portable reflection
+inputs. Other unique bodies' reflection and backend programs are not retained,
+so the package is still insufficient to hydrate a complete all-permutation
+`Tr2EffectRes`. `mode: "all"` fails explicitly until all-body serialization is
+available.
+
+JSON `Read` output exposes `reflection` with byte references and
+`reflectionBlobByteLength`. Consumers that need exact defaults or source
+program bytes use `Read(bytes, { emit: "raw" })`, then call
+`GetReflectionBlob(referenceOrKey)`. The returned `Uint8Array` is an owned
+copy. An object reference must exactly match its RFLX inventory entry.
 
 Raw stage bytecode, decoded DXBC instruction trees, and compiler IR are
 transient build inputs and are not embedded in `ANLS`. Use `AnalyzeEffect`
@@ -100,7 +116,8 @@ broader completeness. `packageValid` means only that the selected CEWGPU
 container passed required-chunk, schema, cross-document, key, layout, and
 selection reconciliation. `sourceComplete` would require the graph now carried
 by PGRF plus every unique body's full portable reflection and immutable exact
-defaults.
+defaults. RFLX/RBLB currently satisfy that reflection requirement only for the
+selected body.
 `backendComplete` would additionally require every required translated
 program, layout, and transform. `runtimeComplete` would require
 complete-resource hydration and selection. None of these fields is

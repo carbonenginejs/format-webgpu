@@ -34,6 +34,8 @@ an unsupported version, truncated chunk, invalid magic, or trailing bytes.
 | `INFO` | JSON | Format and translator information. |
 | `META` | JSON | Caller provenance and effect-selection metadata. |
 | `PGRF` | JSON | Complete source permutation topology and identity-only body records. |
+| `RFLX` | JSON | Complete portable reflection for the selected version-15 body. |
+| `RBLB` | Raw bytes | Exact immutable byte payloads referenced by `RFLX`. |
 | `ANLS` | JSON or text | Compact selected-body diagnostic stage/binding data; not lossless effect reflection. |
 | `WGSL` | WGSL text or JSON | One raw module or a structured shader set with layouts. |
 
@@ -47,7 +49,10 @@ Generic CEWGPU containers may omit common chunks and may retain raw WGSL text.
 A package declaring `INFO.packageKind: "tr2-effect-webgpu"` has a stricter
 contract. The reader requires JSON `INFO`, `META`, `ANLS`, and `WGSL` chunks.
 Current producers also declare and emit `PGRF`; legacy INFO v1/v2 packages may
-omit it. The reader validates current schema versions and reconciles
+omit it. Version-15 sources additionally declare and emit `RFLX` plus `RBLB`.
+The three reflection fields are one optional, indivisible INFO-v2 unit so
+pre-reflection INFO-v2 packages remain readable. The reader validates current
+schema versions and reconciles
 translator/source/body identity, the complete source permutation topology,
 selected options, counts, pass/stage metadata, emitted shader and layout
 descriptors, explicit selection coverage, WGSL-set version features, and
@@ -79,15 +84,25 @@ counts.
   "packageKind": "tr2-effect-webgpu",
   "targetBackend": "webgpu",
   "backendPackage": "@carbonenginejs/format-webgpu",
-  "backendPackageVersion": "0.4.3",
+  "backendPackageVersion": "0.4.4",
   "translator": "dxbc-js-wgsl",
-  "translatorVersion": "0.4.3",
+  "translatorVersion": "0.4.4",
   "permutationGraph": {
     "chunk": "PGRF",
     "format": "CJS_EFFECT_PERMUTATION_GRAPH",
     "formatVersion": 1,
     "permutationCount": 1,
     "uniqueBodyCount": 1
+  },
+  "effectReflection": {
+    "chunk": "RFLX",
+    "format": "CJS_CEWGPU_EFFECT_REFLECTION",
+    "formatVersion": 1,
+    "blobChunk": "RBLB",
+    "bodyCount": 1,
+    "sourceProgramCount": 2,
+    "blobCount": 4,
+    "blobByteLength": 4096
   },
   "sourceIdentity": {
     "logicalPath": "res:/graphics/effect.dx11/example.sm_hi",
@@ -203,6 +218,55 @@ generic even when it happens to use the standard chunk tags. A consumer that
 expects an effect package must therefore require the marker as well as calling
 the reader.
 
+## Selected-body reflection
+
+For compiled-effect version 15, `BuildEffect` emits
+`CJS_CEWGPU_EFFECT_REFLECTION` version 1 in `RFLX` and a raw `RBLB` byte arena.
+INFO points to both and records their selected-body, source-program, blob, and
+byte counts. A pointer without either chunk, either chunk without the pointer,
+or any disagreeing count fails closed. Earlier source versions retain their
+legacy chunk surface because the shared portable reflection contract is
+version-15-only.
+
+RFLX embeds the shared `CJS_EFFECT_BODY_REFLECTION` version-1 effect graph for
+the selected permutation body. It preserves:
+
+- complete technique, pass, stage, and library topology;
+- render states, authored constants/resources/UAVs/samplers and annotations;
+- exact stage and library source programs;
+- exact immutable constant-default byte vectors;
+- signatures, registers, static samplers, pipeline inputs, and thread groups;
+- the opaque version-15 native source hash; and
+- source/body ranges and SHA-256 identities joined to INFO and PGRF.
+
+Every portable byte array is replaced by an exact reference containing
+`blobKey`, `offset`, `byteLength`, and lower-case SHA-256. `RFLX.blobStore`
+lists canonical contiguous `blobN` records covering RBLB exactly. Identical
+payloads are deduplicated by digest plus exact byte equality; dangling,
+overlapping, reordered, corrupt, or unreferenced payloads are rejected.
+
+The reader reconstructs the shared portable document during validation and
+reruns its closed-schema validator. It also reconciles the selected index/body
+with META/PGRF, source label and digest with INFO, source versions and every
+pass/stage source identity with ANLS.
+
+JSON reads expose RFLX references plus `reflectionBlobByteLength`. To consume
+the exact bytes, read with `emit: "raw"` and use
+`CewgpuPackage.GetReflectionBlob(referenceOrKey)`, which returns an owned copy.
+An object reference must exactly equal its inventory record; a string performs
+a package-local blob-key lookup.
+
+This is complete reflection for one selected body, not for every PGRF body.
+`INFO.completeness.sourceComplete` therefore remains false and `mode: "all"`
+remains unsupported. PGRF correctly continues to describe its own body table
+as `identity-only` with `reflection: "absent"`; RFLX is a separate
+selected-body document.
+
+For legacy compatibility, INFO remains version 2 and the entire optional
+reflection unit may be absent. The reader cannot distinguish an old valid
+INFO-v2 package from one with its pointer and both chunks removed; authenticity
+or downgrade resistance requires a separately authenticated outer artifact.
+
 ## Analysis document
 
 The current analysis document records normalized data for one selected effect
@@ -234,11 +298,12 @@ mistaken for complete source reflection, all-body translation, or runtime
 validation. The same booleans are embedded under `INFO.completeness`.
 All-body packaging is not yet supported.
 
-`@carbonenginejs/format-hlsl` owns source parsing and selected-body resolution.
-`format-webgpu` validates the parsed header into PGRF, owns transient byte
-indexing for diagnostics/translation, and owns backend programs, layouts, and
-transforms. A future lossless portable reflection serializer still belongs in
-a shared browser-safe format layer rather than in ANLS.
+`@carbonenginejs/format-hlsl` owns source parsing, selected-body resolution,
+and the shared browser-safe portable reflection contract. `format-webgpu`
+validates the parsed header into PGRF, packs the selected portable reflection
+into RFLX/RBLB, owns transient byte indexing for diagnostics/translation, and
+owns backend programs, layouts, and transforms. Lossless reflection remains
+separate from compact ANLS diagnostics.
 
 ## Structured WGSL set
 

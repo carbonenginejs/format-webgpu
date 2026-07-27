@@ -1,5 +1,6 @@
 import { CjsBinaryReader, cjsNormalizeBytes } from "./binary.js";
 import { validateCewgpuChunkTag } from "./tags.js";
+import { sha256Bytes } from "../sha256.js";
 
 const CEWGPU_MAGIC = "CWGP";
 const CEWGPU_FORMAT = "CEWGPU";
@@ -166,6 +167,61 @@ export class CewgpuPackage
     get permutationGraph()
     {
         return this.GetJson("PGRF");
+    }
+
+    /**
+     * Gets complete selected-body effect reflection when present.
+     *
+     * @returns {object|null} Parsed reflection document.
+     */
+    get reflection()
+    {
+        return this.GetJson("RFLX");
+    }
+
+    /**
+     * Gets the raw reflection blob store when present.
+     *
+     * @returns {Uint8Array|null} RBLB bytes.
+     */
+    get reflectionBlobBytes()
+    {
+        return this.GetChunk("RBLB")?.bytes ?? null;
+    }
+
+    /**
+     * Copies one reflected byte payload by blob key or exact reference.
+     *
+     * A string performs an inventory-key lookup. An object must exactly match
+     * the stored blob key, offset, byte length, and digest.
+     *
+     * @param {string|object} value Blob key or exact RFLX byte-reference object.
+     * @returns {Uint8Array|null} Owned payload bytes, or null when unavailable.
+     */
+    GetReflectionBlob(value)
+    {
+        const key = typeof value === "string" ? value : value?.blobKey;
+        const entry = this.reflection?.blobStore?.blobs
+            ?.find((candidate) => candidate.blobKey === key);
+        const bytes = this.reflectionBlobBytes;
+        if (!entry || !bytes) return null;
+        if (typeof value !== "string"
+            && (!value
+                || value.offset !== entry.offset
+                || value.byteLength !== entry.byteLength
+                || value.sha256 !== entry.sha256))
+        {
+            return null;
+        }
+        const end = entry.offset + entry.byteLength;
+        if (!Number.isSafeInteger(entry.offset) || entry.offset < 0
+            || !Number.isSafeInteger(entry.byteLength) || entry.byteLength < 0
+            || end > bytes.byteLength
+            || sha256Bytes(bytes.subarray(entry.offset, end)) !== entry.sha256)
+        {
+            return null;
+        }
+        return Uint8Array.from(bytes.subarray(entry.offset, end));
     }
 
     /**

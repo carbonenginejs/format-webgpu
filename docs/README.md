@@ -14,8 +14,11 @@ emission, pass-global binding planning, and CEWGPU assembly.
 
 Unsupported requested shader semantics fail explicitly instead of producing a
 partially translated selected pass. `BuildEffect` output remains selected-body
-data, not a complete effect resource. It does preserve the complete source
-permutation topology and identity-only unique-body table in `PGRF`.
+data, not a complete all-permutation effect resource. It preserves complete
+source permutation topology and identity-only unique-body records in `PGRF`.
+For version-15 effects it also preserves complete portable reflection for the
+selected body in `RFLX`, with exact defaults, source programs, and the native
+source hash stored in `RBLB`.
 
 ## Use this package when
 
@@ -26,7 +29,8 @@ Use `format-webgpu` when you need to:
 - lower supported DXBC vertex and fragment programs to WGSL;
 - build one collision-free WebGPU binding layout across a complete pass; or
 - convert one selected compiled-effect pass into a CEWGPU package while
-  preserving its complete source permutation graph.
+  preserving its complete source permutation graph and selected-body
+  reflection.
 
 Use `@carbonenginejs/format-hlsl` directly for effect metadata without WGSL
 conversion, and `@carbonenginejs/format-dxbc` directly for standalone DXBC
