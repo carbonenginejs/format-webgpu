@@ -3,7 +3,149 @@ import assert from "node:assert/strict";
 
 import CjsFormatWebgpu from "../src/index.js";
 import { buildEffectAnalysis } from "../src/core/helpers.js";
-import { buildCewgpuPackage, buildEffectBytes, buildMinimalVertexDxbc } from "./synthetic.js";
+import {
+    buildCewgpuPackage,
+    buildEffectBytes,
+    buildMinimalStagedEffectBytes,
+    buildMinimalVertexDxbc
+} from "./synthetic.js";
+
+function canonicalEffectChunks()
+{
+    const result = CjsFormatWebgpu.buildEffect(buildMinimalStagedEffectBytes(), {
+        source: "synthetic.sm_hi"
+    });
+    const pkg = CjsFormatWebgpu.read(result.bytes, { emit: CjsFormatWebgpu.OUTPUT_RAW });
+
+    return pkg.chunks.map((chunk) => [ chunk.tag, pkg.GetJson(chunk.tag) ]);
+}
+
+function mutateCanonicalEffect(mutations = {}, omitted = [])
+{
+    const chunks = canonicalEffectChunks()
+        .filter(([ tag ]) => !omitted.includes(tag))
+        .map(([ tag, value ]) =>
+        {
+            if (!Object.prototype.hasOwnProperty.call(mutations, tag))
+            {
+                return [ tag, value ];
+            }
+
+            const mutation = mutations[tag];
+            if (typeof mutation !== "function") return [ tag, mutation ];
+            const copy = structuredClone(value);
+            mutation(copy);
+            return [ tag, copy ];
+        });
+
+    return CjsFormatWebgpu.build(chunks);
+}
+
+function uniformLayoutBinding(overrides = {})
+{
+    return {
+        identity: "uniform-buffer:0:0",
+        scopeIdentity: "uniform-buffer:0:0@vertex",
+        resourceKind: "uniform-buffer",
+        generatedSymbol: "cb0",
+        registerSpace: 0,
+        registerIndex: 0,
+        group: 0,
+        binding: 0,
+        visibility: [ "vertex" ],
+        type: "array<vec4<f32>, 1>",
+        buffer: {
+            type: "uniform",
+            hasDynamicOffset: false,
+            minBindingSize: 16
+        },
+        ...overrides
+    };
+}
+
+function textureLayoutBinding(overrides = {})
+{
+    return {
+        identity: "sampled-resource:0:0",
+        scopeIdentity: "sampled-resource:0:0@vertex",
+        resourceKind: "sampled-resource",
+        generatedSymbol: "t0",
+        registerSpace: 0,
+        registerIndex: 0,
+        group: 0,
+        binding: 0,
+        visibility: [ "vertex" ],
+        type: "texture_2d<f32>",
+        texture: {
+            sampleType: "float",
+            viewDimension: "2d",
+            multisampled: false
+        },
+        ...overrides
+    };
+}
+
+function samplerCarbon()
+{
+    return {
+        name: null,
+        sampler: {
+            comparison: false,
+            minFilter: 0,
+            magFilter: 0,
+            mipFilter: 0,
+            addressU: 0,
+            addressV: 0,
+            addressW: 0,
+            mipLODBias: 0,
+            maxAnisotropy: 1,
+            comparisonFunc: 0,
+            borderColor: [ 0, 0, 0, 0 ],
+            minLOD: 0,
+            maxLOD: 0,
+            isDynamic: true
+        }
+    };
+}
+
+function signatureSamplerCarbon()
+{
+    const value = samplerCarbon();
+    delete value.sampler.isDynamic;
+    value.sampler.borderColor = 0;
+    return value;
+}
+
+function resourceCarbon(name = "Resource")
+{
+    return {
+        name,
+        type: 0,
+        arrayElements: 1,
+        isSRGB: false,
+        isAutoregister: false
+    };
+}
+
+function analysisBinding(overrides = {})
+{
+    return {
+        kind: "resource",
+        generatedSymbol: "t0",
+        registerIndex: 0,
+        registerType: 36,
+        registerSpace: 0,
+        registerCount: 1,
+        arrayCount: 1,
+        dynamic: true,
+        metadataName: null,
+        carbon: null,
+        annotations: [],
+        heapView: false,
+        sourceTruth: "carbon-stage-register",
+        ...overrides
+    };
+}
 
 test("static build and instance Build share one code path", () =>
 {
@@ -64,6 +206,13 @@ test("Build accepts string and raw-byte chunk payloads", () =>
     const json = CjsFormatWebgpu.read(bytes);
     assert.match(json.wgsl, /@vertex fn main/);
     assert.deepEqual(json.shaders, []);
+
+    assert.doesNotThrow(() => CjsFormatWebgpu.read(CjsFormatWebgpu.build([
+        [ "INFO", "generic raw information" ],
+        [ "META", "generic metadata" ],
+        [ "ANLS", "generic analysis" ],
+        [ "WGSL", "generic WGSL" ]
+    ]), { emit: CjsFormatWebgpu.OUTPUT_RAW }));
 });
 
 test("WGSL JSON exposes optional pass-level canonical layouts", () =>
@@ -110,6 +259,918 @@ test("Read rejects an unsupported CEWGPU version", () =>
     const view = new DataView(bytes.buffer);
     view.setUint32("CWGP".length, 99, true);
     assert.throws(() => CjsFormatWebgpu.read(bytes), /Unsupported CEWGPU version 99/);
+});
+
+test("CEWGPU construction and reading reject ambiguous chunk tags", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.build([
+            [ "INFO", {} ],
+            [ "INFO", {} ]
+        ]),
+        /duplicate chunk tag INFO/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.build([ [ "A\nBC", {} ] ]),
+        /four printable ASCII characters/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.build([ [ "\u0100BCD", {} ] ]),
+        /four printable ASCII characters/
+    );
+
+    const duplicate = buildCewgpuPackage([
+        [ "INFO", { value: 1 } ],
+        [ "INFO", { value: 2 } ]
+    ]);
+    assert.throws(
+        () => CjsFormatWebgpu.read(duplicate),
+        /duplicate chunk tag INFO/
+    );
+});
+
+test("CEWGPU reading rejects truncated, trailing, and invalid-tag bytes", () =>
+{
+    const bytes = CjsFormatWebgpu.build([ [ "INFO", {} ] ]);
+    assert.throws(
+        () => CjsFormatWebgpu.read(bytes.subarray(0, bytes.length - 1)),
+        /Unexpected end|out of bounds|requires/
+    );
+
+    const trailing = new Uint8Array(bytes.length + 1);
+    trailing.set(bytes);
+    assert.throws(
+        () => CjsFormatWebgpu.read(trailing),
+        /trailing bytes/
+    );
+
+    const invalidTag = buildCewgpuPackage([ [ "\u0000ABC", {} ] ]);
+    assert.throws(
+        () => CjsFormatWebgpu.read(invalidTag),
+        /four printable ASCII characters/
+    );
+});
+
+test("canonical effect packages require all versioned JSON documents", () =>
+{
+    for (const tag of [ "META", "ANLS", "WGSL" ])
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({}, [ tag ])),
+            new RegExp(`requires ${tag}`)
+        );
+    }
+
+    const genericWithoutInfo = CjsFormatWebgpu.read(
+        mutateCanonicalEffect({}, [ "INFO" ])
+    );
+    assert.equal(genericWithoutInfo.info, null);
+    assert.equal(genericWithoutInfo.shaders.length, 1);
+
+    for (const tag of [ "META", "ANLS", "WGSL" ])
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({ [tag]: "{" })),
+            new RegExp(`${tag} must contain valid JSON`)
+        );
+    }
+
+    const invalidVersions = [
+        [ "INFO", (value) => { value.formatVersion = 99; }, /INFO schema/ ],
+        [ "ANLS", (value) => { value.formatVersion = 99; }, /ANLS schema/ ],
+        [ "WGSL", (value) => { value.formatVersion = 99; }, /WGSL schema/ ]
+    ];
+    for (const [ tag, mutation, pattern ] of invalidVersions)
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({ [tag]: mutation })),
+            pattern
+        );
+    }
+});
+
+test("canonical effect packages accept every binding-manifest source form", () =>
+{
+    const bindings = [
+        analysisBinding(),
+        analysisBinding({
+            kind: "constantBuffer",
+            generatedSymbol: "cb0",
+            registerType: 0,
+            carbon: {
+                hasLocalConstants: false,
+                constantValueSize: 0,
+                constants: []
+            }
+        }),
+        analysisBinding({
+            kind: "sampler",
+            generatedSymbol: "s0",
+            registerType: 1,
+            carbon: signatureSamplerCarbon(),
+            sourceTruth: "carbon-signature-sampler"
+        }),
+        analysisBinding({
+            registerType: null,
+            carbon: resourceCarbon(""),
+            sourceTruth: "carbon-register-map"
+        }),
+        analysisBinding({
+            kind: "sampler",
+            generatedSymbol: "s0",
+            registerType: null,
+            carbon: samplerCarbon(),
+            sourceTruth: "carbon-register-map"
+        }),
+        analysisBinding({
+            kind: "uav",
+            generatedSymbol: "u0",
+            registerType: null,
+            carbon: resourceCarbon("Output"),
+            sourceTruth: "carbon-register-map"
+        })
+    ];
+
+    for (const binding of bindings)
+    {
+        const bytes = mutateCanonicalEffect({
+            ANLS: (value) => { value.stages[0].bindings = [ binding ]; }
+        });
+        assert.equal(CjsFormatWebgpu.read(bytes).analysis.stages[0].bindings.length, 1);
+    }
+});
+
+test("canonical effect packages reconcile texture descriptors with WGSL types", () =>
+{
+    const accepted = [
+        textureLayoutBinding(),
+        textureLayoutBinding({
+            type: "texture_2d_array<f32>",
+            texture: {
+                sampleType: "float",
+                viewDimension: "2d-array",
+                multisampled: false
+            }
+        }),
+        textureLayoutBinding({
+            type: "texture_cube<f32>",
+            texture: {
+                sampleType: "float",
+                viewDimension: "cube",
+                multisampled: false
+            }
+        }),
+        textureLayoutBinding({
+            type: "texture_3d<f32>",
+            texture: {
+                sampleType: "float",
+                viewDimension: "3d",
+                multisampled: false
+            }
+        })
+    ];
+
+    for (const binding of accepted)
+    {
+        assert.doesNotThrow(() => CjsFormatWebgpu.read(mutateCanonicalEffect({
+            WGSL: (value) =>
+            {
+                value.layouts[0].bindGroups = [ { group: 0, bindings: [ binding ] } ];
+            }
+        })));
+    }
+
+    const rejected = [
+        textureLayoutBinding({ type: "texture_cube<f32>" }),
+        textureLayoutBinding({
+            texture: {
+                sampleType: "uint",
+                viewDimension: "2d",
+                multisampled: false
+            }
+        }),
+        textureLayoutBinding({
+            texture: {
+                sampleType: "float",
+                viewDimension: "2d",
+                multisampled: true
+            }
+        }),
+        textureLayoutBinding({ type: "texture_depth_2d" })
+    ];
+
+    for (const binding of rejected)
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ { group: 0, bindings: [ binding ] } ];
+                }
+            })),
+            /binding 0 is malformed/
+        );
+    }
+});
+
+test("canonical effect packages reconcile provenance, counts, keys, and selection", () =>
+{
+    const mutations = [
+        {
+            chunks: { INFO: (value) => { value.shaderCount += 1; } },
+            pattern: /INFO counts/
+        },
+        {
+            chunks: { META: (value) => { value.sourcePath = "other.sm_hi"; } },
+            pattern: /source or body mode/
+        },
+        {
+            chunks: { META: (value) => { value.effectName = "other"; } },
+            pattern: /effect selection/
+        },
+        {
+            chunks: { META: (value) => { value.bodyIndex += 1; } },
+            pattern: /effect selection/
+        },
+        {
+            chunks: { META: (value) => { value.selectedOptions = [ { name: "X", value: "Y" } ]; } },
+            pattern: /selectedOptions/
+        },
+        {
+            chunks: {
+                INFO: (value) => { delete value.sourcePath; },
+                META: (value) => { delete value.sourcePath; },
+                ANLS: (value) => { delete value.source; }
+            },
+            pattern: /INFO\.sourcePath/
+        },
+        {
+            chunks: { INFO: (value) => { delete value.sourceIdentity; } },
+            pattern: /INFO\.sourceIdentity/
+        },
+        {
+            chunks: { INFO: (value) => { delete value.translator; } },
+            pattern: /INFO\.translator/
+        },
+        {
+            chunks: {
+                INFO: (value) =>
+                {
+                    value.sourcePath = "   ";
+                    value.sourceIdentity.logicalPath = "   ";
+                },
+                META: (value) => { value.sourcePath = "   "; },
+                ANLS: (value) => { value.source = "   "; }
+            },
+            pattern: /INFO\.sourcePath/
+        },
+        {
+            chunks: {
+                META: (value) => { value.bodyIndex = "zero"; },
+                ANLS: (value) => { value.bodyIndex = "zero"; }
+            },
+            pattern: /META\.bodyIndex/
+        },
+        {
+            chunks: {
+                META: (value) => { value.selectedOptions = {}; },
+                ANLS: (value) => { value.selectedOptions = {}; }
+            },
+            pattern: /selectedOptions/
+        },
+        {
+            chunks: {
+                META: (value) =>
+                {
+                    const option = {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        defaultValue: "LOW",
+                        source: "local"
+                    };
+                    value.selectedOptions = [ option, { ...option } ];
+                },
+                ANLS: (value) =>
+                {
+                    const option = {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        defaultValue: "LOW",
+                        source: "local"
+                    };
+                    value.selectedOptions = [ option, { ...option } ];
+                }
+            },
+            pattern: /malformed or duplicated/
+        },
+        {
+            chunks: {
+                META: (value) =>
+                {
+                    value.selectedOptions = [ {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        defaultValue: "LOW",
+                        source: "default"
+                    } ];
+                },
+                ANLS: (value) =>
+                {
+                    value.selectedOptions = [ {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        defaultValue: "LOW",
+                        source: "default"
+                    } ];
+                }
+            },
+            pattern: /malformed or duplicated/
+        },
+        {
+            chunks: {
+                META: (value) =>
+                {
+                    value.selectedOptions = [ {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        source: "local"
+                    } ];
+                },
+                ANLS: (value) =>
+                {
+                    value.selectedOptions = [ {
+                        name: "QUALITY",
+                        value: "HIGH",
+                        optionIndex: 1,
+                        defaultOption: 0,
+                        source: "local"
+                    } ];
+                }
+            },
+            pattern: /malformed or duplicated/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.shaders[0].key = "Other.pass0.vertex";
+                    value.shaders[0].techniqueName = "Other";
+                }
+            },
+            pattern: /shader absent from ANLS/
+        },
+        {
+            chunks: { WGSL: (value) => { value.shaders[0].stageType = 99; } },
+            pattern: /noncanonical key/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].stageName = "toString";
+                    value.stages[0].key = "Main.pass0.toString";
+                    delete value.stages[0].stageType;
+                },
+                WGSL: (value) =>
+                {
+                    value.shaders[0].stageName = "toString";
+                    value.shaders[0].key = "Main.pass0.toString";
+                    delete value.shaders[0].stage;
+                    delete value.shaders[0].stageType;
+                }
+            },
+            pattern: /noncanonical key/
+        },
+        {
+            chunks: {
+                INFO: (value) =>
+                {
+                    value.stageCount += 1;
+                    value.selectedStageCount += 1;
+                    value.shaderCount += 1;
+                },
+                ANLS: (value) =>
+                {
+                    const compute = structuredClone(value.stages[0]);
+                    compute.key = "Main.pass0.compute";
+                    compute.stageName = "compute";
+                    compute.stageType = 2;
+                    compute.shaderBytecode.stageName = "compute";
+                    compute.shaderBytecode.stageType = 2;
+                    value.stages.push(compute);
+                },
+                WGSL: (value) =>
+                {
+                    const compute = structuredClone(value.shaders[0]);
+                    compute.key = "Main.pass0.compute";
+                    compute.stageName = "compute";
+                    compute.stage = "compute";
+                    compute.stageType = 2;
+                    compute.threadGroupSize = [ 1, 1, 1 ];
+                    value.shaders.push(compute);
+                }
+            },
+            pattern: /mixes compute and render stages/
+        },
+        {
+            chunks: { WGSL: (value) => { delete value.shaders[0].code; } },
+            pattern: /invalid stage metadata/
+        },
+        {
+            chunks: { WGSL: (value) => { value.layouts[0].key = "Other.pass0"; } },
+            pattern: /noncanonical key/
+        },
+        {
+            chunks: { WGSL: (value) => { value.layouts[0].passIndex = 1; } },
+            pattern: /noncanonical key/
+        },
+        {
+            chunks: {
+                META: (value) =>
+                {
+                    value.wgslSelection = {
+                        mode: "explicit",
+                        completePasses: true,
+                        techniqueName: "Main",
+                        passIndex: 0,
+                        requestedStageNames: [ "vertex" ],
+                        selectedStageKeys: [ "Other.pass0.vertex" ]
+                    };
+                }
+            },
+            pattern: /complete ANLS scope/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [
+                        { group: 1, bindings: [] },
+                        { group: 1, bindings: [] }
+                    ];
+                }
+            },
+            pattern: /duplicate bind group/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ { group: 1, bindings: [] } ];
+                }
+            },
+            pattern: /contiguous from zero/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    const binding = {
+                        identity: "uniform-buffer:0:0",
+                        scopeIdentity: "uniform-buffer:0:0@vertex",
+                        resourceKind: "uniform-buffer",
+                        generatedSymbol: "cb0",
+                        registerSpace: 0,
+                        registerIndex: 0,
+                        group: 0,
+                        binding: 0,
+                        visibility: [ "vertex" ],
+                        type: "array<vec4<f32>, 1>",
+                        buffer: {
+                            type: "uniform",
+                            hasDynamicOffset: false,
+                            minBindingSize: 16
+                        }
+                    };
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [ binding, { ...binding } ]
+                    } ];
+                }
+            },
+            pattern: /binding 1 is malformed or duplicated/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [
+                            uniformLayoutBinding(),
+                            uniformLayoutBinding({
+                                identity: "uniform-buffer:0:1",
+                                scopeIdentity: "uniform-buffer:0:1@vertex",
+                                registerIndex: 1,
+                                binding: 1
+                            })
+                        ]
+                    } ];
+                }
+            },
+            pattern: /duplicates a shader binding symbol/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [
+                            uniformLayoutBinding(),
+                            uniformLayoutBinding({
+                                scopeIdentity: "uniform-buffer:0:0",
+                                binding: 1,
+                                visibility: [ "vertex", "fragment" ],
+                                generatedSymbol: "cb0_shared"
+                            })
+                        ]
+                    } ];
+                }
+            },
+            pattern: /mixes shared and stage-scoped bindings/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [ {
+                            identity: "sampled-resource:0:0",
+                            scopeIdentity: "sampled-resource:0:0@vertex",
+                            resourceKind: "sampled-resource",
+                            generatedSymbol: "t0",
+                            registerSpace: 0,
+                            registerIndex: 0,
+                            group: 0,
+                            binding: 0,
+                            visibility: [ "vertex" ],
+                            type: "sampler",
+                            texture: {
+                                sampleType: "float",
+                                viewDimension: "2d",
+                                multisampled: false
+                            }
+                        } ]
+                    } ];
+                }
+            },
+            pattern: /binding 0 is malformed/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    const binding = {
+                        identity: "uniform-buffer:0:0",
+                        scopeIdentity: "uniform-buffer:0:0@vertex",
+                        resourceKind: "uniform-buffer",
+                        generatedSymbol: "cb0",
+                        registerSpace: 0,
+                        registerIndex: 0,
+                        group: 0,
+                        binding: 0,
+                        visibility: [ "vertex" ],
+                        type: "array<vec4<f32>, 1>",
+                        buffer: {
+                            type: "uniform",
+                            hasDynamicOffset: false,
+                            minBindingSize: 16
+                        }
+                    };
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [
+                            binding,
+                            { ...binding, binding: 1, generatedSymbol: "cb0_duplicate" }
+                        ]
+                    } ];
+                }
+            },
+            pattern: /binding 1 is malformed or duplicated/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].shaderBytecode.bytes = [ 1, 2, 3 ];
+                }
+            },
+            pattern: /embeds transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.passes; } },
+            pattern: /ANLS\.passes/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.effectVersion; } },
+            pattern: /effect\/compiler version/
+        },
+        {
+            chunks: { ANLS: (value) => { value.passes[0].states = {}; } },
+            pattern: /invalid identity/
+        },
+        {
+            chunks: { ANLS: (value) => { value.passes[0].states = [ null ]; } },
+            pattern: /invalid identity/
+        },
+        {
+            chunks: { ANLS: (value) => { value.passes.push({ ...value.passes[0] }); } },
+            pattern: /duplicate pass/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.stages[0].shaderBytecode; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.stages[0].bindings; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.stages[0].shaderHandle; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { delete value.stages[0].threadGroupSize; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { value.stages[0].pipelineInputs = [ null ]; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { ANLS: (value) => { value.stages[0].bindings = [ null ]; } },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        kind: "sampler",
+                        generatedSymbol: "s0",
+                        registerType: 36
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [
+                        analysisBinding({ registerSpace: 5 }),
+                        analysisBinding({
+                            registerType: null,
+                            carbon: resourceCarbon(),
+                            sourceTruth: "carbon-register-map"
+                        })
+                    ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        kind: "constantBuffer",
+                        generatedSymbol: "cb0",
+                        registerType: 0,
+                        carbon: {
+                            hasLocalConstants: false,
+                            constantValueSize: 0,
+                            constants: []
+                        },
+                        heapView: true
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        generatedSymbol: "t1"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        kind: "sampler",
+                        generatedSymbol: "s0",
+                        registerType: null,
+                        registerCount: 2,
+                        arrayCount: 2,
+                        carbon: samplerCarbon(),
+                        sourceTruth: "carbon-register-map"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        registerType: 36,
+                        carbon: resourceCarbon(),
+                        sourceTruth: "carbon-register-map"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        registerType: null,
+                        registerCount: 2,
+                        carbon: resourceCarbon(),
+                        sourceTruth: "carbon-register-map"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        kind: "sampler",
+                        generatedSymbol: "s0",
+                        registerType: 1,
+                        carbon: null,
+                        sourceTruth: "carbon-signature-sampler"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: {
+                ANLS: (value) =>
+                {
+                    value.stages[0].bindings = [ analysisBinding({
+                        kind: "sampler",
+                        generatedSymbol: "s0",
+                        registerType: 1,
+                        carbon: {},
+                        sourceTruth: "carbon-signature-sampler"
+                    }) ];
+                }
+            },
+            pattern: /transient compiler data/
+        },
+        {
+            chunks: { WGSL: (value) => { value.formatVersion = 3; } },
+            pattern: /version 3 requires resource transforms/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.resourceTransforms = [ { id: "bogus" } ];
+                }
+            },
+            pattern: /version 2 cannot contain resource transforms/
+        },
+        {
+            chunks: {
+                WGSL: (value) =>
+                {
+                    value.layouts[0].bindGroups = [ {
+                        group: 0,
+                        bindings: [ {
+                            identity: "sampled-resource:0:0",
+                            scopeIdentity: "sampled-resource:0:0@vertex",
+                            resourceKind: "sampled-resource",
+                            generatedSymbol: "t0",
+                            registerSpace: 0,
+                            registerIndex: 0,
+                            group: 0,
+                            binding: 0,
+                            visibility: [ "vertex" ],
+                            type: "texture_2d_array<f32>",
+                            transformId: "orphan",
+                            arrayLayerCount: 2,
+                            texture: {
+                                sampleType: "float",
+                                viewDimension: "2d-array",
+                                multisampled: false
+                            }
+                        } ]
+                    } ];
+                }
+            },
+            pattern: /version 2 cannot contain resource transforms/
+        }
+    ];
+
+    for (const { chunks, pattern } of mutations)
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect(chunks)),
+            pattern
+        );
+    }
+});
+
+test("canonical explicit selection proves its complete ANLS scope", () =>
+{
+    const valid = mutateCanonicalEffect({
+        META: (value) =>
+        {
+            value.wgslSelection = {
+                mode: "explicit",
+                completePasses: true,
+                techniqueName: "Main",
+                passIndex: 0,
+                requestedStageNames: [ "vertex" ],
+                selectedStageKeys: [ "Main.pass0.vertex" ]
+            };
+        }
+    });
+    assert.equal(CjsFormatWebgpu.read(valid).shaders.length, 1);
+
+    const incomplete = mutateCanonicalEffect({
+        INFO: (value) => { value.stageCount += 1; },
+        META: (value) =>
+        {
+            value.wgslSelection = {
+                mode: "explicit",
+                completePasses: true,
+                techniqueName: "Main",
+                passIndex: 0,
+                requestedStageNames: [ "vertex" ],
+                selectedStageKeys: [ "Main.pass0.vertex" ]
+            };
+        },
+        ANLS: (value) =>
+        {
+            const pixel = structuredClone(value.stages[0]);
+            pixel.key = "Main.pass0.pixel";
+            pixel.stageName = "pixel";
+            pixel.stageType = 1;
+            pixel.shaderBytecode.stageName = "pixel";
+            pixel.shaderBytecode.stageType = 1;
+            value.stages.push(pixel);
+        }
+    });
+    assert.throws(
+        () => CjsFormatWebgpu.read(incomplete),
+        /complete ANLS scope/
+    );
+
+    for (const mutate of [
+        (selection) => { selection.techniqueName = "Other"; },
+        (selection) => { selection.passIndex = 1; },
+        (selection) => { selection.requestedStageNames = [ "pixel" ]; },
+        (selection) => { selection.passIndex = null; }
+    ])
+    {
+        assert.throws(
+            () => CjsFormatWebgpu.read(mutateCanonicalEffect({
+                META: (value) =>
+                {
+                    value.wgslSelection = {
+                        mode: "explicit",
+                        completePasses: true,
+                        techniqueName: "Main",
+                        passIndex: 0,
+                        requestedStageNames: [ "vertex" ],
+                        selectedStageKeys: [ "Main.pass0.vertex" ]
+                    };
+                    mutate(value.wgslSelection);
+                }
+            })),
+            /complete ANLS scope/
+        );
+    }
 });
 
 test("AnalyzeEffect resolves exact permutation assertions even when the body cannot decode", () =>

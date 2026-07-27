@@ -1,4 +1,5 @@
 import { CjsBinaryReader, cjsNormalizeBytes } from "./binary.js";
+import { validateCewgpuChunkTag } from "./tags.js";
 
 const CEWGPU_MAGIC = "CWGP";
 const CEWGPU_FORMAT = "CEWGPU";
@@ -58,6 +59,11 @@ export class CewgpuPackage
             for (let index = 0; index < chunkCount; index += 1)
             {
                 const tag = decodeAscii(stream.readRaw(4));
+                validateCewgpuChunkTag(tag);
+                if (this.chunkMap.has(tag))
+                {
+                    throw new Error(`CEWGPU package contains duplicate chunk tag ${tag}`);
+                }
                 const size = stream.readUint32();
                 const offset = stream.offset;
                 const chunkBytes = stream.readRaw(size);

@@ -37,7 +37,33 @@ an unsupported version, truncated chunk, invalid magic, or trailing bytes.
 | `WGSL` | WGSL text or JSON | One raw module or a structured shader set with layouts. |
 
 Unknown four-character chunks remain readable as raw bytes. The package
-builder preserves the caller's chunk order.
+builder preserves the caller's chunk order. Chunk tags must be four printable
+ASCII characters, and duplicate tags are rejected by both builder and reader.
+
+## Selected-effect envelope
+
+Generic CEWGPU containers may omit common chunks and may retain raw WGSL text.
+A package declaring `INFO.packageKind: "tr2-effect-webgpu"` has a stricter
+contract. The reader requires JSON `INFO`, `META`, `ANLS`, and `WGSL` chunks;
+validates their current schema versions; and reconciles translator/source/body
+identity, selected options, counts, pass/stage metadata, emitted shader and
+layout descriptors, explicit selection coverage, WGSL-set version features,
+and selected-body completeness flags. Declared effect layouts use unique bind
+groups contiguous from group zero and unique binding slots and physical
+identities.
+
+The `INFO`, `META`, and `ANLS` source labels must agree. The optional canonical
+`INFO.sourceIdentity.logicalPath` is a separate resource identity and may
+differ from that diagnostic label.
+
+The selected-effect validator also requires compact `ANLS` stages to omit raw
+byte arrays and retain null DXBC/IR fields. `BuildEffect` runs the same reader
+validation before returning `qualification.ok: true`.
+
+The package-kind marker is the opt-in discriminator: without it, a container is
+generic even when it happens to use the standard chunk tags. A consumer that
+expects an effect package must therefore require the marker as well as calling
+the reader.
 
 ## Analysis document
 

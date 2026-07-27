@@ -44,7 +44,9 @@ const emittedShaders = result.wgsl;
 ```
 
 The `source` value is diagnostic provenance only. The method does not open
-that path.
+that path. Callers may separately provide `sourceIdentity` with a canonical
+`logicalPath` plus optional `game`, `client`, `build`, and `md5` fields. Its
+logical path need not equal the diagnostic label.
 
 ## Result
 
@@ -74,7 +76,8 @@ when return-only DXBC/IR diagnostics are required.
 
 The qualification record distinguishes structural package validity from
 broader completeness. `packageValid` means only that the selected CEWGPU
-container passed structural construction. `sourceComplete` would require
+container passed required-chunk, schema, cross-document, key, layout, and
+selection reconciliation. `sourceComplete` would require
 every axis, permutation mapping, unique body, and full portable reflection.
 `backendComplete` would additionally require every required translated
 program, layout, and transform. `runtimeComplete` would require

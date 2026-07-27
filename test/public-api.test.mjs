@@ -210,6 +210,18 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     assert.deepEqual(packaged.info.completeness, result.info.completeness);
     assert.equal(packaged.metadata.bodyMode, "selected");
 
+    const distinctIdentity = CjsFormatWebgpu.buildEffect(source, {
+        source: "diagnostic-label",
+        sourceIdentity: {
+            logicalPath: "res:/graphics/effect.dx11/synthetic.sm_hi"
+        }
+    });
+    assert.equal(distinctIdentity.info.sourcePath, "diagnostic-label");
+    assert.equal(
+        distinctIdentity.info.sourceIdentity.logicalPath,
+        "res:/graphics/effect.dx11/synthetic.sm_hi"
+    );
+
     const compatibilityResult = CjsFormatWebgpu.buildEffect(source, {
         allPermutations: false
     });

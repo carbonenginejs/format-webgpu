@@ -98,6 +98,10 @@ The orchestration compatibility option `allPermutations: false` also means
 selected mode; `allPermutations: true` fails by the same rule instead of
 silently emitting one body.
 
+`source` remains a caller-owned diagnostic label. An optional
+`sourceIdentity.logicalPath` records the canonical resource identity
+independently and may differ from that label.
+
 The returned structural qualification does not claim a complete effect
 resource. `packageValid` reports successful container construction;
 `sourceComplete`, `backendComplete`, and `runtimeComplete` remain false for
@@ -114,6 +118,13 @@ and package version.
 Malformed package input and unsafe analysis paths throw or report a
 `CjsWebgpuReadError` internally. Unsupported WGSL semantics fail closed with
 the operation, stage, and source context needed to identify the boundary.
+Duplicate/non-ASCII chunk tags are rejected. A declared
+`tr2-effect-webgpu` package also fails closed on missing or malformed JSON
+chunks, unsupported document versions, or inconsistent INFO/META/ANLS/WGSL
+identity, counts, keys, layouts, selection, and completeness fields.
+Strict effect validation is activated by the `INFO.packageKind` marker;
+effect-only consumers must require that marker because unmarked CEWGPU
+containers intentionally remain generic.
 
 ## Related documentation
 

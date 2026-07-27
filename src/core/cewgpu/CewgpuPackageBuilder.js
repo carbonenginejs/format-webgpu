@@ -1,3 +1,5 @@
+import { validateCewgpuChunkTag } from "./tags.js";
+
 const CEWGPU_MAGIC = "CWGP";
 const CEWGPU_VERSION = 1;
 const textEncoder = new TextEncoder();
@@ -15,8 +17,9 @@ export class CewgpuPackageBuilder
    */
     static build(chunks)
     {
+        const tags = new Set();
         const encodedChunks = chunks.map(([ tag, value ]) => ({
-            tag: normalizeTag(tag),
+            tag: normalizeTag(tag, tags),
             bytes: normalizeChunkValue(value)
         }));
 
@@ -48,15 +51,18 @@ export class CewgpuPackageBuilder
  * Normalizes a package chunk tag.
  *
  * @param {string} tag Four-character chunk tag.
+ * @param {Set<string>} tags Tags already present in the package.
  * @returns {string} Normalized tag.
  */
-function normalizeTag(tag)
+function normalizeTag(tag, tags)
 {
-    if (typeof tag !== "string" || tag.length !== 4)
+    const normalized = validateCewgpuChunkTag(tag);
+    if (tags.has(normalized))
     {
-        throw new Error(`CEWGPU chunk tag must be four characters: ${tag}`);
+        throw new Error(`CEWGPU package contains duplicate chunk tag ${normalized}`);
     }
-    return tag;
+    tags.add(normalized);
+    return normalized;
 }
 
 /**

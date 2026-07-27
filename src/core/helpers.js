@@ -3,6 +3,7 @@ import { normalizeBytecodeBytes, readEffectAnalysis } from "./effectAnalysis.js"
 
 import { CewgpuPackage } from "./cewgpu/CewgpuPackage.js";
 import { CewgpuPackageBuilder } from "./cewgpu/CewgpuPackageBuilder.js";
+import { validateEffectPackageEnvelope } from "./effectPackageValidation.js";
 import { CjsWebgpuReadError } from "./errors.js";
 import { lowerDxbcToIr } from "./ir/lowerDxbcToIr.js";
 import {
@@ -201,6 +202,18 @@ export function readRaw(input, values)
                 cause: pkg.readError || null
             }
         );
+    }
+
+    try
+    {
+        validateEffectPackageEnvelope(pkg);
+    }
+    catch (error)
+    {
+        throw new CjsWebgpuReadError(error.message, {
+            source: values.source,
+            cause: error
+        });
     }
 
     return pkg;
