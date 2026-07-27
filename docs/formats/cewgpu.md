@@ -52,9 +52,48 @@ and selected-body completeness flags. Declared effect layouts use unique bind
 groups contiguous from group zero and unique binding slots and physical
 identities.
 
-The `INFO`, `META`, and `ANLS` source labels must agree. The optional canonical
-`INFO.sourceIdentity.logicalPath` is a separate resource identity and may
-differ from that diagnostic label.
+The binary container version and the `INFO` document version are independent.
+`BuildEffect` emits selected-effect `INFO.formatVersion: 2`. The reader retains
+legacy selected-effect INFO version 1 support and rejects unknown INFO
+versions; generic packages remain outside this marker-gated schema.
+
+INFO version 2 records `targetBackend: "webgpu"`, the producing backend package
+name/version, and the translator name/version. Its `sourceIdentity` contains
+the exact source byte length and a required lower-case SHA-256 digest. The
+builder computes that digest synchronously over the exact input byte view and
+rejects a conflicting caller-supplied digest. Optional MD5 is retained only as
+source-system provenance.
+
+The INFO v2 provenance subset uses the following keys. Package and translator
+versions use semantic-version syntax; the complete INFO document also includes
+source/output paths, selected-body mode, completeness flags, and stage/layout
+counts.
+
+```json
+{
+  "format": "CEWGPU",
+  "formatVersion": 2,
+  "packageKind": "tr2-effect-webgpu",
+  "targetBackend": "webgpu",
+  "backendPackage": "@carbonenginejs/format-webgpu",
+  "backendPackageVersion": "0.4.2",
+  "translator": "dxbc-js-wgsl",
+  "translatorVersion": "0.4.2",
+  "sourceIdentity": {
+    "logicalPath": "res:/graphics/effect.dx11/example.sm_hi",
+    "game": "Eve",
+    "client": "tranquility",
+    "build": "0000000",
+    "byteLength": 1024,
+    "md5": null,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+```
+
+The `INFO`, `META`, and `ANLS` source labels must agree.
+`INFO.sourceIdentity.logicalPath` is a separate canonical resource identity and
+may differ from that diagnostic label.
 
 The selected-effect validator also requires compact `ANLS` stages to omit raw
 byte arrays and retain null DXBC/IR fields. `BuildEffect` runs the same reader

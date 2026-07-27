@@ -100,7 +100,15 @@ silently emitting one body.
 
 `source` remains a caller-owned diagnostic label. An optional
 `sourceIdentity.logicalPath` records the canonical resource identity
-independently and may differ from that label.
+independently and may differ from that label. The builder records the exact
+source byte length and computes a lower-case SHA-256 digest over the active
+input byte view. A caller-supplied `sourceIdentity.sha256` is accepted only
+when it matches that digest.
+
+`BuildEffect` emits selected-effect INFO schema version 2 with explicit WebGPU
+target, backend-package name/version, and translator name/version provenance.
+The CEWGPU binary container remains version 1, and the reader retains legacy
+selected-effect INFO version 1 support.
 
 The returned structural qualification does not claim a complete effect
 resource. `packageValid` reports successful container construction;

@@ -6,6 +6,14 @@ import { buildWgsl } from "./wgsl/emitWgsl.js";
 import { buildWgslSet } from "./wgsl/buildWgslSet.js";
 import { buildResourceTransformPlan } from "./wgsl/buildResourceTransformPlan.js";
 import {
+    DXBC_WGSL_TRANSLATOR_NAME,
+    DXBC_WGSL_TRANSLATOR_VERSION,
+    FORMAT_WEBGPU_PACKAGE_NAME,
+    FORMAT_WEBGPU_PACKAGE_VERSION,
+    WEBGPU_BACKEND_NAME
+} from "./packageMetadata.js";
+import { sha256Bytes } from "./sha256.js";
+import {
     isParticleClearEffectCandidate,
     particleClearEffectProofFor,
     preflightParticleClearEffectProfile
@@ -33,6 +41,11 @@ export function buildEffectPackage(input, options = {})
     const mode = normalizeMode(options.mode, options.allPermutations);
     const source = normalizeSource(options.source);
     const outputPath = normalizeOptionalString(options.outputPath, "Effect outputPath");
+    const sourceIdentity = normalizeSourceIdentity(
+        options.sourceIdentity,
+        source,
+        input
+    );
     const permutation = normalizeEffectPermutation(options.permutation);
     const selection = normalizeSelection(options.selection);
     const resolved = readEffectAnalysis(input, { source, permutation });
@@ -139,7 +152,6 @@ export function buildEffectPackage(input, options = {})
     }));
     const wgsl = buildWgslSet(shaderEntries);
     const wgslSelection = buildWgslSelectionMetadata(selection, selectedStages);
-    const sourceIdentity = normalizeSourceIdentity(options.sourceIdentity, source, input);
     const completeness = Object.freeze({
         packageValid: true,
         sourceComplete: false,
@@ -148,12 +160,16 @@ export function buildEffectPackage(input, options = {})
     });
     const info = {
         format: "CEWGPU",
-        formatVersion: 1,
+        formatVersion: 2,
         packageKind: "tr2-effect-webgpu",
         sourcePath: source,
         outputPath,
         sourceIdentity,
-        translator: "dxbc-js-wgsl",
+        targetBackend: WEBGPU_BACKEND_NAME,
+        backendPackage: FORMAT_WEBGPU_PACKAGE_NAME,
+        backendPackageVersion: FORMAT_WEBGPU_PACKAGE_VERSION,
+        translator: DXBC_WGSL_TRANSLATOR_NAME,
+        translatorVersion: DXBC_WGSL_TRANSLATOR_VERSION,
         bodyMode: mode,
         completeness,
         stageCount: analysis.stages.length,
@@ -311,12 +327,22 @@ function normalizeSourceIdentity(value, source, input)
         throw new TypeError("Effect input must be Uint8Array, ArrayBuffer, or ArrayBufferView bytes");
     }
 
+    const sha256 = sha256Bytes(bytes);
+    if (value?.sha256 !== undefined && value?.sha256 !== null
+        && value.sha256 !== sha256)
+    {
+        throw new Error(
+            "Effect sourceIdentity.sha256 does not match the exact effect input bytes"
+        );
+    }
+
     return Object.freeze({
         logicalPath: value?.logicalPath ?? source,
         game: value?.game ?? null,
         client: value?.client ?? null,
         build: value?.build === undefined || value?.build === null ? null : String(value.build),
         byteLength: bytes.byteLength,
-        md5: value?.md5 ?? null
+        md5: value?.md5 ?? null,
+        sha256
     });
 }

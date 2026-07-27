@@ -349,6 +349,25 @@ test("canonical effect packages require all versioned JSON documents", () =>
     }
 });
 
+test("canonical effect packages retain legacy INFO version 1 readability", () =>
+{
+    const bytes = mutateCanonicalEffect({
+        INFO: (value) =>
+        {
+            value.formatVersion = 1;
+            delete value.targetBackend;
+            delete value.backendPackage;
+            delete value.backendPackageVersion;
+            delete value.translatorVersion;
+            delete value.sourceIdentity.sha256;
+        }
+    });
+
+    const result = CjsFormatWebgpu.read(bytes);
+    assert.equal(result.info.formatVersion, 1);
+    assert.equal(result.info.translator, "dxbc-js-wgsl");
+});
+
 test("canonical effect packages accept every binding-manifest source form", () =>
 {
     const bindings = [
@@ -511,6 +530,43 @@ test("canonical effect packages reconcile provenance, counts, keys, and selectio
         {
             chunks: { INFO: (value) => { delete value.translator; } },
             pattern: /INFO\.translator/
+        },
+        {
+            chunks: { INFO: (value) => { delete value.targetBackend; } },
+            pattern: /INFO\.targetBackend/
+        },
+        {
+            chunks: { INFO: (value) => { delete value.backendPackage; } },
+            pattern: /INFO\.backendPackage/
+        },
+        {
+            chunks: { INFO: (value) => { value.backendPackageVersion = "latest"; } },
+            pattern: /INFO\.backendPackage/
+        },
+        {
+            chunks: {
+                INFO: (value) =>
+                {
+                    value.translatorVersion = " ";
+                }
+            },
+            pattern: /INFO\.translator/
+        },
+        {
+            chunks: {
+                INFO: (value) => { value.translatorVersion = "1.0.0-01"; }
+            },
+            pattern: /INFO\.translator/
+        },
+        {
+            chunks: { INFO: (value) => { delete value.sourceIdentity.sha256; } },
+            pattern: /INFO\.sourceIdentity/
+        },
+        {
+            chunks: {
+                INFO: (value) => { value.sourceIdentity.sha256 = "A".repeat(64); }
+            },
+            pattern: /INFO\.sourceIdentity/
         },
         {
             chunks: {

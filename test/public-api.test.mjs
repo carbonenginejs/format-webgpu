@@ -1,11 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import CjsFormatWebgpu, { CjsFormatWebgpu as NamedCjsFormatWebgpu } from "../src/index.js";
 import { buildCewgpuPackage, buildMinimalStagedEffectBytes } from "./synthetic.js";
 
 class Package {}
 class Resource {}
+
+const PACKAGE_MANIFEST = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8")
+);
 
 const SAMPLE_CHUNKS = [
     [ "INFO", { format: "CEWGPU", formatVersion: 1, analyzer: "dxbc-phase1" } ],
@@ -80,7 +86,8 @@ test("implemented metadata advertises the package surface", () =>
     assert.equal(CjsFormatWebgpu.implementationStatus, "partial");
     assert.equal(CjsFormatWebgpu.format, "CEWGPU");
     assert.equal(CjsFormatWebgpu.analysisFormat, "CEWGPU_ANALYSIS");
-    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.1");
+    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.2");
+    assert.equal(CjsFormatWebgpu.packageVersion, PACKAGE_MANIFEST.version);
 });
 
 test("static read and instance Read share one code path", () =>
@@ -170,12 +177,26 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
             logicalPath: "res:/graphics/effect.dx11/synthetic.sm_hi",
             game: "Eve",
             build: "3430261",
-            md5: "00000000000000000000000000000000"
+            md5: "00000000000000000000000000000000",
+            sha256: createHash("sha256").update(source).digest("hex")
         }
     });
 
     assert.equal(CjsFormatWebgpu.isCewgpu(result.bytes), true);
+    assert.equal(result.info.formatVersion, 2);
+    assert.equal(result.info.targetBackend, "webgpu");
+    assert.equal(result.info.backendPackage, "@carbonenginejs/format-webgpu");
+    assert.equal(
+        result.info.backendPackageVersion,
+        CjsFormatWebgpu.packageVersion
+    );
+    assert.equal(result.info.translator, "dxbc-js-wgsl");
+    assert.equal(result.info.translatorVersion, CjsFormatWebgpu.packageVersion);
     assert.equal(result.info.sourceIdentity.build, "3430261");
+    assert.equal(
+        result.info.sourceIdentity.sha256,
+        createHash("sha256").update(source).digest("hex")
+    );
     assert.equal(result.qualification.ok, true);
     assert.equal(result.qualification.level, "structural");
     assert.equal(result.qualification.validator, "cewgpu-structural");
@@ -226,6 +247,16 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
         allPermutations: false
     });
     assert.equal(compatibilityResult.info.bodyMode, "selected");
+});
+
+test("buildEffect rejects a caller source hash that disagrees with its exact bytes", () =>
+{
+    assert.throws(
+        () => CjsFormatWebgpu.buildEffect(buildMinimalStagedEffectBytes(), {
+            sourceIdentity: { sha256: "0".repeat(64) }
+        }),
+        /sourceIdentity\.sha256 does not match/
+    );
 });
 
 test("instance BuildEffect honors reusable source and permutation values", () =>

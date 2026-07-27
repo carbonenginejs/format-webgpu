@@ -18,6 +18,7 @@ import {
     particleEmitSemanticDigest,
     sha256Utf8
 } from "../src/core/wgsl/particleEmitSemanticDigest.js";
+import { sha256Bytes } from "../src/core/sha256.js";
 
 function register(typeName, registerIndex, {
     componentCount = 4,
@@ -5761,6 +5762,33 @@ test("browser-safe SHA-256 matches node:crypto known and varied vectors", () =>
             createHash("sha256").update(message).digest("hex")
         );
     }
+});
+
+test("browser-safe SHA-256 hashes exact byte views", () =>
+{
+    const storage = Uint8Array.from([
+        0xde, 0xad, 0x00, 0xff, 0x80, 0x01, 0xbe, 0xef
+    ]);
+    const view = storage.subarray(2, 6);
+    const expected = createHash("sha256").update(view).digest("hex");
+
+    assert.equal(sha256Bytes(view), expected);
+    assert.equal(
+        sha256Bytes(new DataView(storage.buffer, 2, 4)),
+        expected
+    );
+    assert.equal(
+        sha256Bytes(view.slice().buffer),
+        expected
+    );
+    assert.notEqual(
+        sha256Bytes(storage),
+        expected
+    );
+    assert.throws(
+        () => sha256Bytes("not bytes"),
+        /must be Uint8Array, ArrayBuffer, or ArrayBufferView/
+    );
 });
 
 test("particle emit digest is lossless across aliases, presence, descriptors, and numeric types", () =>

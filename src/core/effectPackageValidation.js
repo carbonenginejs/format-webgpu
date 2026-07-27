@@ -1,7 +1,19 @@
 import { normalizeResourceTransformPlan } from "./wgsl/buildResourceTransformPlan.js";
+import {
+    DXBC_WGSL_TRANSLATOR_NAME,
+    FORMAT_WEBGPU_PACKAGE_NAME,
+    WEBGPU_BACKEND_NAME
+} from "./packageMetadata.js";
 
 const REQUIRED_EFFECT_CHUNKS = Object.freeze([ "INFO", "META", "ANLS", "WGSL" ]);
 const EFFECT_PACKAGE_KIND = "tr2-effect-webgpu";
+const SEMANTIC_VERSION = new RegExp(
+    "^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)"
+    + "(?:-(?:(?:0|[1-9]\\d*)|(?:\\d*[A-Za-z-][0-9A-Za-z-]*))"
+    + "(?:\\.(?:(?:0|[1-9]\\d*)|(?:\\d*[A-Za-z-][0-9A-Za-z-]*)))*)?"
+    + "(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+    "u"
+);
 const STAGE_SCHEMA = Object.freeze({
     vertex: Object.freeze({ stage: "vertex", stageType: 0 }),
     pixel: Object.freeze({ stage: "fragment", stageType: 1 }),
@@ -194,15 +206,23 @@ function validateSelectedOptions(value, context)
  * Validate the canonical INFO source-identity record.
  *
  * @param {any} value Candidate source identity.
+ * @param {boolean} requireSha256 Whether the schema requires a strong hash.
  * @returns {object} Validated source identity.
  */
-function validateSourceIdentity(value)
+function validateSourceIdentity(value, requireSha256)
 {
     if (!value || typeof value !== "object" || Array.isArray(value)
         || typeof value.logicalPath !== "string" || !value.logicalPath.trim()
         || !Number.isSafeInteger(value.byteLength) || value.byteLength < 1
         || (value.md5 !== null
             && (typeof value.md5 !== "string" || !/^[0-9a-f]{32}$/u.test(value.md5)))
+        || (requireSha256
+            ? typeof value.sha256 !== "string"
+                || !/^[0-9a-f]{64}$/u.test(value.sha256)
+            : value.sha256 !== undefined
+                && value.sha256 !== null
+                && (typeof value.sha256 !== "string"
+                    || !/^[0-9a-f]{64}$/u.test(value.sha256)))
         || ![ "game", "client", "build" ].every((field) =>
             value[field] === null
             || (typeof value[field] === "string" && !!value[field])))
@@ -928,9 +948,9 @@ export function validateEffectPackageEnvelope(pkg)
     const analysis = requireJsonObject(pkg, "ANLS");
     const wgsl = requireJsonObject(pkg, "WGSL");
 
-    if (info.format !== "CEWGPU" || info.formatVersion !== 1)
+    if (info.format !== "CEWGPU" || ![ 1, 2 ].includes(info.formatVersion))
     {
-        throw new Error("CEWGPU INFO schema must be CEWGPU version 1");
+        throw new Error("CEWGPU INFO schema must be selected-effect version 1 or 2");
     }
     if (analysis.format !== "CEWGPU_ANALYSIS" || analysis.formatVersion !== 1)
     {
@@ -959,11 +979,30 @@ export function validateEffectPackageEnvelope(pkg)
     }
 
     const sourcePath = requireString(info.sourcePath, "INFO.sourcePath");
-    if (info.translator !== "dxbc-js-wgsl")
+    if (info.formatVersion === 1 && info.translator !== DXBC_WGSL_TRANSLATOR_NAME)
     {
         throw new Error("CEWGPU INFO.translator must identify dxbc-js-wgsl");
     }
-    validateSourceIdentity(info.sourceIdentity);
+    if (info.formatVersion === 2)
+    {
+        if (info.targetBackend !== WEBGPU_BACKEND_NAME)
+        {
+            throw new Error("CEWGPU INFO.targetBackend must identify webgpu");
+        }
+        if (info.backendPackage !== FORMAT_WEBGPU_PACKAGE_NAME
+            || typeof info.backendPackageVersion !== "string"
+            || !SEMANTIC_VERSION.test(info.backendPackageVersion))
+        {
+            throw new Error("CEWGPU INFO.backendPackage provenance is malformed");
+        }
+        if (info.translator !== DXBC_WGSL_TRANSLATOR_NAME
+            || typeof info.translatorVersion !== "string"
+            || !SEMANTIC_VERSION.test(info.translatorVersion))
+        {
+            throw new Error("CEWGPU INFO.translator provenance is malformed");
+        }
+    }
+    validateSourceIdentity(info.sourceIdentity, info.formatVersion === 2);
     if (info.outputPath !== null
         && (typeof info.outputPath !== "string" || !info.outputPath))
     {

@@ -1264,6 +1264,22 @@ Representative implicit-LOD and derivative cases are browser-gated with the
 directive enabled, while uniform control-flow cases verify that the directive
 is not emitted unnecessarily.
 
+## Selected-effect package provenance
+
+`BuildEffect` emits selected-effect INFO schema version 2 while the binary
+CEWGPU container remains version 1. INFO v2 records the WebGPU target,
+backend-package and translator semantic versions, and a lower-case SHA-256
+digest computed over the exact compiled-effect input byte view. A conflicting
+caller digest fails closed. The reader retains legacy selected-effect INFO v1
+support and rejects unknown INFO schema versions.
+
+This is a metadata/container checkpoint, not a shader-emission capability. The
+exact-build corpus retains 507 qualified and 30 unsupported packages with no
+failures; all 537 status/error results are unchanged. Every one of the 507
+qualified package byte streams changes only in INFO, while all 507 `META`,
+`ANLS`, and `WGSL` payloads remain byte-identical. No new browser gate is
+required because no emitted WGSL, layout, or transform changed.
+
 ## Verification contract
 
 Every compatibility change requires the package suite and a representative

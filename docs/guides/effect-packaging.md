@@ -45,8 +45,16 @@ const emittedShaders = result.wgsl;
 
 The `source` value is diagnostic provenance only. The method does not open
 that path. Callers may separately provide `sourceIdentity` with a canonical
-`logicalPath` plus optional `game`, `client`, `build`, and `md5` fields. Its
-logical path need not equal the diagnostic label.
+`logicalPath` plus optional `game`, `client`, `build`, `md5`, and `sha256`
+fields. Its logical path need not equal the diagnostic label. `BuildEffect`
+always computes the lower-case SHA-256 digest over the exact input byte view;
+when a caller supplies `sha256`, the build fails if it does not match.
+
+Selected-effect packages use INFO schema version 2 while the binary CEWGPU
+container remains version 1. INFO v2 identifies the `webgpu` target, the
+producing `@carbonenginejs/format-webgpu` package version, and the
+`dxbc-js-wgsl` translator version. The reader continues to accept legacy
+selected-effect INFO v1 packages.
 
 ## Result
 

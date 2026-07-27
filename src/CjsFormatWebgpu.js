@@ -4,6 +4,7 @@ import { buildWgsl } from "./core/wgsl/emitWgsl.js";
 import { buildWgslBindingPlan } from "./core/wgsl/buildWgslBindingPlan.js";
 import { buildWgslSet } from "./core/wgsl/buildWgslSet.js";
 import { buildEffectPackage } from "./core/packageEffect.js";
+import { FORMAT_WEBGPU_PACKAGE_VERSION } from "./core/packageMetadata.js";
 import {
     CEWGPU_ANALYSIS_FORMAT,
     CEWGPU_FORMAT,
@@ -411,7 +412,7 @@ export class CjsFormatWebgpu
     static implementationStatus = "partial";
     static format = CEWGPU_FORMAT;
     static analysisFormat = CEWGPU_ANALYSIS_FORMAT;
-    static packageVersion = "0.4.1";
+    static packageVersion = FORMAT_WEBGPU_PACKAGE_VERSION;
 }
 
 export default CjsFormatWebgpu;
