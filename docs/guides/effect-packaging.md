@@ -55,7 +55,7 @@ The returned record contains:
 | `bytes` | Encoded CEWGPU package bytes. |
 | `info` | Translator and package information. |
 | `metadata` | Selection and caller provenance. |
-| `analysis` | Selected-body diagnostic binding/stage data and DXBC analysis when available; not lossless effect reflection. |
+| `analysis` | Compact selected-body diagnostic binding/stage data; not lossless effect reflection. |
 | `wgsl` | Portable shader set and pass layouts. |
 | `inspection` | Summary produced by reading the built package. |
 | `qualification` | Structural conversion outcome. |
@@ -65,7 +65,12 @@ The package retains normalized analysis for that resolved body while emitting
 WGSL for the selected complete passes. It does not retain lossless source
 reflection or other permutation bodies, so it is not sufficient by itself to
 hydrate a complete `Tr2EffectRes`. `mode: "all"` fails explicitly until the
-upstream effect reader exposes portable complete reflection.
+`@carbonenginejs/format-hlsl` reader exposes portable complete reflection and
+all-body enumeration.
+
+Raw stage bytecode, decoded DXBC instruction trees, and compiler IR are
+transient build inputs and are not embedded in `ANLS`. Use `AnalyzeEffect`
+when return-only DXBC/IR diagnostics are required.
 
 The qualification record distinguishes structural package validity from
 broader completeness. `packageValid` means only that the selected CEWGPU

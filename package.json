@@ -33,7 +33,7 @@
   "license": "MIT",
   "dependencies": {
     "@carbonenginejs/format-dxbc": "^0.1.4",
-    "@carbonenginejs/format-hlsl": "^0.1.1"
+    "@carbonenginejs/format-hlsl": "^0.1.4"
   },
   "repository": {
     "type": "git",

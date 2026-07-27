@@ -1,5 +1,5 @@
 import CjsFormatDxbc from "@carbonenginejs/format-dxbc";
-import { readEffectAnalysis } from "./effectAnalysis.js";
+import { normalizeBytecodeBytes, readEffectAnalysis } from "./effectAnalysis.js";
 
 import { CewgpuPackage } from "./cewgpu/CewgpuPackage.js";
 import { CewgpuPackageBuilder } from "./cewgpu/CewgpuPackageBuilder.js";
@@ -294,11 +294,75 @@ function dxbcSource(source, key)
     return source ? `${source}#${key}` : key;
 }
 
+function resolvedStageBytecode(stage, key, bytecodeByKey)
+{
+    if (!Number.isInteger(stage.stageType)
+        || !Number.isInteger(stage.passIndex)
+        || typeof stage.techniqueName !== "string"
+        || !stage.techniqueName
+        || typeof stage.stageName !== "string"
+        || !stage.stageName)
+    {
+        throw new Error(`${key} manifest stage identity is invalid`);
+    }
+
+    const innerStageType = stage.shaderBytecode?.stageType;
+    if (innerStageType !== undefined && !Number.isInteger(innerStageType))
+    {
+        throw new Error(`${key} manifest stage bytecode type is invalid`);
+    }
+
+    let raw = bytecodeByKey?.get(key);
+    if (!raw && bytecodeByKey instanceof Map)
+    {
+        raw = Array.from(bytecodeByKey.values()).find((entry) =>
+            entry.techniqueName === stage.techniqueName
+            && entry.passIndex === stage.passIndex
+            && entry.stageType === stage.stageType
+        );
+    }
+    if (!raw) return stage.shaderBytecode?.bytes;
+
+    if (!Number.isInteger(raw.stageType)
+        || stage.stageType !== raw.stageType
+        || (innerStageType !== undefined && innerStageType !== raw.stageType)
+        || stage.stageName !== raw.stageName
+        || (stage.shaderBytecode?.stageName !== undefined
+            && stage.shaderBytecode.stageName !== raw.stageName))
+    {
+        throw new Error(`${key} manifest and raw stage metadata disagree`);
+    }
+
+    if (stage.shaderBytecode?.bytes !== undefined)
+    {
+        const manifestBytes = normalizeBytecodeBytes(
+            stage.shaderBytecode.bytes,
+            `${key} manifest stage bytecode`
+        );
+        if (!manifestBytes
+            || manifestBytes.length !== raw.bytes.length
+            || manifestBytes.some((value, index) => value !== raw.bytes[index]))
+        {
+            throw new Error(`${key} manifest and raw stage bytecode disagree`);
+        }
+    }
+
+    return raw.bytes;
+}
+
 function analyzeStage(stage, options)
 {
     const key = `${stage.techniqueName}.pass${stage.passIndex}.${stage.stageName}`;
+    const shaderBytecode = stage.shaderBytecode && typeof stage.shaderBytecode === "object"
+        ? { ...stage.shaderBytecode }
+        : stage.shaderBytecode;
+    if (shaderBytecode && typeof shaderBytecode === "object")
+    {
+        delete shaderBytecode.bytes;
+    }
     const out = {
         ...stage,
+        shaderBytecode,
         key,
         dxbc: null,
         dxbcError: null,
@@ -306,15 +370,23 @@ function analyzeStage(stage, options)
         irError: null
     };
 
-    const bytecodeBytes = stage.shaderBytecode?.bytes;
-    if (!Array.isArray(bytecodeBytes) || bytecodeBytes.length === 0)
+    if (options.decodeBytecode === false)
+    {
+        return out;
+    }
+
+    const bytecodeBytes = normalizeBytecodeBytes(
+        options.bytecodeBytes ?? stage.shaderBytecode?.bytes,
+        `${key} stage bytecode`
+    );
+    if (!bytecodeBytes?.length)
     {
         return out;
     }
 
     try
     {
-        out.dxbc = CjsFormatDxbc.read(Uint8Array.from(bytecodeBytes), {
+        out.dxbc = CjsFormatDxbc.read(bytecodeBytes, {
             source: dxbcSource(options.source, key),
             decodeInstructions: options.decodeInstructions
         });
@@ -350,15 +422,30 @@ function analyzeStage(stage, options)
  * @param {object} resolved Raw resolved-effect context from `readEffectAnalysis`.
  * @param {object} [options] Analysis options.
  * @param {string} [options.source] Source label for diagnostics.
+ * @param {boolean} [options.decodeBytecode] Whether stage bytecode is inspected.
  * @param {boolean} [options.decodeInstructions] Whether DXBC instructions are decoded.
  * @returns {object} Plain JSON-compatible analysis data.
  */
 export function buildEffectAnalysis(resolved, options = {})
 {
     const source = options.source || resolved.effectRes?.sourcePath || "memory";
+    const decodeBytecode = options.decodeBytecode !== undefined ? !!options.decodeBytecode : true;
     const decodeInstructions = options.decodeInstructions !== undefined ? !!options.decodeInstructions : true;
     const manifest = resolved.bindingManifest?.toJSON?.() ?? null;
-    const stages = (manifest?.stages || []).map((stage) => analyzeStage(stage, { source, decodeInstructions }));
+    const bytecodeByKey = resolved.stageBytecodeByKey instanceof Map
+        ? resolved.stageBytecodeByKey
+        : null;
+    const stages = (manifest?.stages || []).map((stage) =>
+    {
+        const key = `${stage.techniqueName}.pass${stage.passIndex}.${stage.stageName}`;
+
+        return analyzeStage(stage, {
+            source,
+            decodeBytecode,
+            decodeInstructions,
+            bytecodeBytes: resolvedStageBytecode(stage, key, bytecodeByKey)
+        });
+    });
 
     return toJsonValue({
         format: CEWGPU_ANALYSIS_FORMAT,

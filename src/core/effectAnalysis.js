@@ -1,94 +1,114 @@
-import CjsFormatHlsl, * as Hlsl from "@carbonenginejs/format-hlsl";
+import { readEffectAnalysis as readHlslEffectAnalysis } from "@carbonenginejs/format-hlsl";
 
-function normalizeSelections(values, source)
+/**
+ * Copy supported byte containers into an independent active byte view.
+ *
+ * @param {Array|ArrayBuffer|ArrayBufferView|null|undefined} value Byte source.
+ * @param {string} context Error context.
+ * @returns {Uint8Array|null} Copied bytes, or null when absent.
+ */
+export function normalizeBytecodeBytes(value, context)
 {
-    if (values instanceof Map)
-    {
-        return Array.from(values, ([ name, value ]) => ({ name, value, source }));
-    }
-    if (!Array.isArray(values)) return [];
-    return values.map((entry) => ({
-        name: entry?.name || "",
-        value: entry?.value || "",
-        source
-    }));
-}
+    if (value === undefined || value === null) return null;
 
-function resolveSelection(effectRes, permutation)
-{
-    const local = normalizeSelections(permutation, "local");
-    const global = normalizeSelections(effectRes.constructor.globalEffectOptions || [], "global");
-    const selectedOptions = [];
-    let bodyIndex = 0;
-    let multiplier = 1;
-
-    for (const axis of effectRes.m_permutations || [])
+    if (Array.isArray(value))
     {
-        let optionIndex = axis.defaultOption;
-        let source = "default";
-        const selected = global.find((entry) => entry.name === axis.name)
-            || local.find((entry) => entry.name === axis.name);
-        if (selected)
+        for (let index = 0; index < value.length; index++)
         {
-            const index = axis.options.findIndex((value) => value === selected.value);
-            if (index >= 0)
+            if (!Object.prototype.hasOwnProperty.call(value, index)
+                || !Number.isInteger(value[index])
+                || value[index] < 0
+                || value[index] > 255)
             {
-                optionIndex = index;
-                source = selected.source;
+                throw new TypeError(`${context} must contain only byte values`);
             }
         }
-        selectedOptions.push({
-            name: axis.name,
-            value: axis.options[optionIndex] ?? null,
-            optionIndex,
-            defaultOption: axis.defaultOption,
-            defaultValue: axis.options[axis.defaultOption] ?? null,
-            source
-        });
-        bodyIndex += optionIndex * multiplier;
-        multiplier *= axis.options.length || 1;
+
+        return Uint8Array.from(value);
     }
-    return { bodyIndex, selectedOptions };
+
+    if (value instanceof Uint8Array) return Uint8Array.from(value);
+    if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+    if (ArrayBuffer.isView(value))
+    {
+        return Uint8Array.from(new Uint8Array(
+            value.buffer,
+            value.byteOffset,
+            value.byteLength
+        ));
+    }
+
+    throw new TypeError(`${context} must be an array or byte view`);
 }
 
-function readEffectAnalysisCompat(input, options)
+function collectStageBytecodeByKey(effectDescription)
 {
-    const permutation = options.permutation ?? [];
-    const effectRes = CjsFormatHlsl.read(input, {
-        emit: "raw",
-        source: options.source,
-        permutation
-    });
-    const selection = resolveSelection(effectRes, permutation);
-    let shader = null;
-    try
+    const bytecodeByKey = new Map();
+
+    for (const technique of effectDescription?.techniques ?? [])
     {
-        shader = effectRes.GetShader(permutation);
+        for (let passIndex = 0; passIndex < technique.passes.length; passIndex++)
+        {
+            const stageInputs = technique.passes[passIndex].stageInputs;
+            for (let stageType = 0; stageType < stageInputs.length; stageType++)
+            {
+                const stage = stageInputs[stageType];
+                if (!stage?.m_exists) continue;
+
+                const stageName = stage.cjsShaderBytecode?.stageName;
+                const bytecodeStageType = stage.cjsShaderBytecode?.stageType;
+                const value = stage.cjsShaderBytecode?.bytes;
+
+                if (!stageName || value === undefined || value === null) continue;
+                if (!Number.isInteger(bytecodeStageType) || bytecodeStageType !== stageType)
+                {
+                    throw new Error(
+                        `${technique.name}.pass${passIndex}.${stageName} stage type metadata is inconsistent`
+                    );
+                }
+
+                const key = `${technique.name}.pass${passIndex}.${stageName}`;
+                if (bytecodeByKey.has(key))
+                {
+                    throw new Error(`Resolved effect contains duplicate stage bytecode ${key}`);
+                }
+
+                const bytes = normalizeBytecodeBytes(value, `${key} stage bytecode`);
+                if (!bytes?.length)
+                {
+                    throw new TypeError(`${key} stage bytecode must be a non-empty byte view`);
+                }
+
+                bytecodeByKey.set(key, {
+                    techniqueName: technique.name,
+                    passIndex,
+                    stageType,
+                    stageName,
+                    bytes
+                });
+            }
+        }
     }
-    catch
-    {
-        shader = null;
-    }
-    const effectDescription = shader ? shader.GetEffectDescription() : null;
-    const bindingManifest = effectDescription
-        ? Hlsl.Tr2EffectBindingManifest.fromEffectDescription(effectDescription)
-        : null;
-    return { effectRes, shader, selection, effectDescription, bindingManifest };
+
+    return bytecodeByKey;
 }
 
 /**
  * Resolve one compiled-effect permutation for WebGPU packaging.
  *
- * format-hlsl 0.1.2+ provides the one-shot helper. The compatibility path
- * retains support for the public 0.1.1 raw-reader and binding-manifest surface.
+ * format-hlsl owns source parsing, selected-permutation resolution, and the
+ * binding manifest. This adapter adds only a validated transient byte index.
  *
  * @param {Uint8Array|ArrayBuffer|Buffer|DataView} input Tr2 effect bytes.
  * @param {object} [options] Source and permutation options.
- * @returns {object} Resolved raw effect, shader, selection, description, and manifest.
+ * @returns {object} Resolved raw effect, selection, reflection, and transient stage bytes.
  */
 export function readEffectAnalysis(input, options = {})
 {
-    return typeof Hlsl.readEffectAnalysis === "function"
-        ? Hlsl.readEffectAnalysis(input, options)
-        : readEffectAnalysisCompat(input, options);
+    const resolved = readHlslEffectAnalysis(input, options);
+
+    return {
+        ...resolved,
+        stageBytecodeByKey: collectStageBytecodeByKey(resolved.effectDescription)
+    };
 }

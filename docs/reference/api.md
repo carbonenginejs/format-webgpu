@@ -81,6 +81,11 @@ instance methods:
 | `schema` | Optional caller schema record retained by the profile. |
 | `classes` | Optional constructor registrations keyed by `CLASS_KEYS`. |
 
+`AnalyzeEffect` decodes real selected-body stage bytes for return-only
+diagnostics. `decodeInstructions: false` retains compact DXBC program metadata
+without instruction or IR trees. `BuildEffect` keeps those bytes transient for
+WGSL compilation and writes compact selected-body `ANLS` diagnostics instead.
+
 ## Effect-package options
 
 `BuildEffect` and `buildEffect` accept `mode: "selected"`, which is the default

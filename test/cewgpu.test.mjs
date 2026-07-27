@@ -201,6 +201,7 @@ test("buildEffectAnalysis normalizes manifest stages and decodes DXBC", () =>
     assert.equal(analysis.passes.length, 1);
     assert.equal(analysis.stages.length, 1);
     assert.equal(analysis.stages[0].key, "Main.pass0.vertex");
+    assert.equal(analysis.stages[0].shaderBytecode.bytes, undefined);
     assert.equal(analysis.stages[0].dxbc.program.programTypeName, "vertex");
     assert.equal(analysis.stages[0].dxbc.instructions, null);
     assert.equal(analysis.stages[0].dxbcError, null);
@@ -230,7 +231,187 @@ test("buildEffectAnalysis normalizes manifest stages and decodes DXBC", () =>
             }
         }
     }, { source: "synthetic.sm_hi", decodeInstructions: true });
+    assert.equal(withIr.stages[0].shaderBytecode.bytes, undefined);
     assert.equal(withIr.stages[0].ir.format, "CJS_SHADER_IR");
     assert.equal(withIr.stages[0].ir.stage, "vertex");
     assert.equal(withIr.stages[0].irError, null);
+});
+
+test("buildEffectAnalysis validates transient raw stage identity and bytes", () =>
+{
+    const dxbc = buildMinimalVertexDxbc();
+    const padded = new Uint8Array(dxbc.length + 4);
+    padded.set(dxbc, 2);
+    const activeBytes = padded.subarray(2, 2 + dxbc.length);
+    const manifestStage = {
+        techniqueName: "Main",
+        passIndex: 0,
+        stageType: 0,
+        stageName: "vertex",
+        shaderBytecode: {
+            stageType: 0,
+            stageName: "vertex",
+            shaderSize: dxbc.length
+        },
+        bindings: []
+    };
+    const resolved = {
+        effectRes: { m_version: 8, m_compilerVersion: 1 },
+        effectDescription: { version: 8, effectName: "fixture" },
+        selection: { bodyIndex: 0, selectedOptions: [] },
+        bindingManifest: {
+            toJSON()
+            {
+                return {
+                    effectName: "fixture",
+                    version: 8,
+                    passes: [],
+                    stages: [ manifestStage ]
+                };
+            }
+        },
+        stageBytecodeByKey: new Map([ [
+            "Main.pass0.vertex",
+            { stageType: 0, stageName: "vertex", bytes: activeBytes }
+        ] ])
+    };
+
+    const analysis = buildEffectAnalysis(resolved, { decodeInstructions: false });
+    assert.equal(analysis.stages[0].dxbc.program.programTypeName, "vertex");
+    assert.equal(analysis.stages[0].shaderBytecode.bytes, undefined);
+
+    const mismatchedType = {
+        ...resolved,
+        stageBytecodeByKey: new Map([ [
+            "Main.pass0.vertex",
+            { stageType: 1, stageName: "vertex", bytes: activeBytes }
+        ] ])
+    };
+    assert.throws(
+        () => buildEffectAnalysis(mismatchedType),
+        /manifest and raw stage metadata disagree/
+    );
+
+    const mismatchedName = {
+        ...resolved,
+        stageBytecodeByKey: new Map([ [
+            "Main.pass0.pixel",
+            {
+                techniqueName: "Main",
+                passIndex: 0,
+                stageType: 0,
+                stageName: "pixel",
+                bytes: activeBytes
+            }
+        ] ])
+    };
+    assert.throws(
+        () => buildEffectAnalysis(mismatchedName),
+        /manifest and raw stage metadata disagree/
+    );
+
+    const invalidInnerType = {
+        ...resolved,
+        bindingManifest: {
+            toJSON()
+            {
+                return {
+                    effectName: "fixture",
+                    version: 8,
+                    passes: [],
+                    stages: [ {
+                        ...manifestStage,
+                        shaderBytecode: {
+                            ...manifestStage.shaderBytecode,
+                            stageType: "0"
+                        }
+                    } ]
+                };
+            }
+        }
+    };
+    assert.throws(
+        () => buildEffectAnalysis(invalidInnerType),
+        /manifest stage bytecode type is invalid/
+    );
+
+    const conflictingBytes = {
+        ...resolved,
+        bindingManifest: {
+            toJSON()
+            {
+                return {
+                    effectName: "fixture",
+                    version: 8,
+                    passes: [],
+                    stages: [ {
+                        ...manifestStage,
+                        shaderBytecode: {
+                            ...manifestStage.shaderBytecode,
+                            bytes: [ ...dxbc.slice(0, -1), dxbc.at(-1) ^ 0xff ]
+                        }
+                    } ]
+                };
+            }
+        }
+    };
+    assert.throws(
+        () => buildEffectAnalysis(conflictingBytes),
+        /manifest and raw stage bytecode disagree/
+    );
+
+    const compactManifestOnly = {
+        ...resolved,
+        stageBytecodeByKey: null,
+        bindingManifest: {
+            toJSON()
+            {
+                return {
+                    effectName: "fixture",
+                    version: 8,
+                    passes: [],
+                    stages: [ {
+                        ...manifestStage,
+                        shaderBytecode: {
+                            ...manifestStage.shaderBytecode,
+                            bytes: Array.from(dxbc)
+                        }
+                    } ]
+                };
+            }
+        }
+    };
+    const compact = buildEffectAnalysis(compactManifestOnly, {
+        decodeBytecode: false,
+        decodeInstructions: false
+    });
+    assert.equal(compact.stages[0].shaderBytecode.bytes, undefined);
+    assert.equal(compact.stages[0].dxbc, null);
+    assert.equal(compact.stages[0].ir, null);
+
+    const invalidManifestBytes = {
+        ...resolved,
+        stageBytecodeByKey: null,
+        bindingManifest: {
+            toJSON()
+            {
+                return {
+                    effectName: "fixture",
+                    version: 8,
+                    passes: [],
+                    stages: [ {
+                        ...manifestStage,
+                        shaderBytecode: {
+                            ...manifestStage.shaderBytecode,
+                            bytes: [ 0, 256 ]
+                        }
+                    } ]
+                };
+            }
+        }
+    };
+    assert.throws(
+        () => buildEffectAnalysis(invalidManifestBytes),
+        /must contain only byte values/
+    );
 });

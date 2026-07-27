@@ -40,15 +40,16 @@ export function buildEffectPackage(input, options = {})
 
     const analysis = buildEffectAnalysis(resolved, {
         source,
-        decodeInstructions: true
+        decodeBytecode: false,
+        decodeInstructions: false
     });
-    const bytecodeByKey = collectStageBytecode(resolved.effectDescription);
+    const bytecodeByKey = resolved.stageBytecodeByKey;
     const selectedStages = selectEffectStages(analysis.stages, selection);
     const programsByKey = new Map();
     const programForKey = (key) =>
     {
         if (programsByKey.has(key)) return programsByKey.get(key);
-        const bytecode = bytecodeByKey.get(key);
+        const bytecode = bytecodeByKey.get(key)?.bytes;
 
         if (!bytecode?.length)
         {
@@ -218,30 +219,6 @@ function normalizeMode(value, allPermutations)
     }
 
     return mode;
-}
-
-function collectStageBytecode(effectDescription)
-{
-    const bytecodeByKey = new Map();
-
-    for (const technique of effectDescription?.techniques ?? [])
-    {
-        for (let passIndex = 0; passIndex < technique.passes.length; passIndex++)
-        {
-            for (const stage of technique.passes[passIndex].stageInputs.filter(Boolean))
-            {
-                const stageName = stage.cjsShaderBytecode?.stageName;
-                const bytes = stage.cjsShaderBytecode?.bytes;
-
-                if (stage.m_exists && stageName && bytes?.length)
-                {
-                    bytecodeByKey.set(`${technique.name}.pass${passIndex}.${stageName}`, bytes);
-                }
-            }
-        }
-    }
-
-    return bytecodeByKey;
 }
 
 function normalizeSource(value)

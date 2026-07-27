@@ -80,6 +80,7 @@ test("implemented metadata advertises the package surface", () =>
     assert.equal(CjsFormatWebgpu.implementationStatus, "partial");
     assert.equal(CjsFormatWebgpu.format, "CEWGPU");
     assert.equal(CjsFormatWebgpu.analysisFormat, "CEWGPU_ANALYSIS");
+    assert.equal(CjsFormatWebgpu.packageVersion, "0.4.1");
 });
 
 test("static read and instance Read share one code path", () =>
@@ -149,6 +150,17 @@ test("toJSON converts typed arrays and nested structures", () =>
     assert.deepEqual(converted, { tokens: [ 1, 2 ], nested: [ { mask: [ 3 ] } ] });
 });
 
+test("analyzeEffect decodes real parser stage bytes without embedding them", () =>
+{
+    const analysis = CjsFormatWebgpu.analyzeEffect(buildMinimalStagedEffectBytes());
+    const stage = analysis.stages[0];
+
+    assert.equal(stage.key, "Main.pass0.vertex");
+    assert.equal(stage.shaderBytecode.bytes, undefined);
+    assert.equal(stage.dxbc.program.programTypeName, "vertex");
+    assert.equal(stage.ir.format, "CJS_SHADER_IR");
+});
+
 test("buildEffect exposes structurally qualified selected-body CEWGPU packaging", () =>
 {
     const source = buildMinimalStagedEffectBytes();
@@ -187,6 +199,9 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     assert.equal(result.metadata.bodyMode, "selected");
     assert.equal(result.info.selectedStageCount, 1);
     assert.equal(result.analysis.stages[0].key, "Main.pass0.vertex");
+    assert.equal(result.analysis.stages[0].shaderBytecode.bytes, undefined);
+    assert.equal(result.analysis.stages[0].dxbc, null);
+    assert.equal(result.analysis.stages[0].ir, null);
     assert.equal(result.wgsl.shaders.length, 1);
     assert.equal(result.inspection.shaderCount, 1);
     const packaged = CjsFormatWebgpu.read(result.bytes);
