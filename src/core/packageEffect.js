@@ -12,6 +12,7 @@ import {
 } from "./wgsl/lowerParticleClearComputePrograms.js";
 import {
     buildWgslSelectionMetadata,
+    normalizeEffectPermutation,
     selectEffectStages,
     validateResolvedPermutation
 } from "./packageEffectSelection.js";
@@ -32,7 +33,7 @@ export function buildEffectPackage(input, options = {})
     const mode = normalizeMode(options.mode, options.allPermutations);
     const source = normalizeSource(options.source);
     const outputPath = normalizeOptionalString(options.outputPath, "Effect outputPath");
-    const permutation = normalizePermutation(options.permutation);
+    const permutation = normalizeEffectPermutation(options.permutation);
     const selection = normalizeSelection(options.selection);
     const resolved = readEffectAnalysis(input, { source, permutation });
 
@@ -243,24 +244,6 @@ function normalizeOptionalString(value, name)
     }
 
     return result;
-}
-
-function normalizePermutation(value)
-{
-    if (value === undefined || value === null)
-    {
-        return [];
-    }
-
-    if (!Array.isArray(value))
-    {
-        throw new TypeError("Effect permutation policy must be an array");
-    }
-
-    return value.map((entry) => Object.freeze({
-        name: String(entry?.name ?? ""),
-        value: String(entry?.value ?? "")
-    }));
 }
 
 function normalizeSelection(value)

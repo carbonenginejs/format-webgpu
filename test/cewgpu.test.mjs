@@ -112,7 +112,7 @@ test("Read rejects an unsupported CEWGPU version", () =>
     assert.throws(() => CjsFormatWebgpu.read(bytes), /Unsupported CEWGPU version 99/);
 });
 
-test("AnalyzeEffect reports selected permutation information even when the body cannot decode", () =>
+test("AnalyzeEffect resolves exact permutation assertions even when the body cannot decode", () =>
 {
     const bytes = buildEffectBytes({
         permutations: [
@@ -138,6 +138,50 @@ test("AnalyzeEffect reports selected permutation information even when the body 
         [ "QUALITY", "HIGH", "local" ]
     ]);
     assert.deepEqual(analysis.stages, []);
+
+    const fromMap = CjsFormatWebgpu.analyzeEffect(bytes, {
+        permutation: new Map([ [ "QUALITY", "HIGH" ] ])
+    });
+    assert.equal(fromMap.bodyIndex, 1);
+
+    const withDefault = CjsFormatWebgpu.analyzeEffect(bytes);
+    assert.equal(withDefault.bodyIndex, 0);
+    assert.equal(withDefault.selectedOptions[0].value, "LOW");
+    assert.equal(withDefault.selectedOptions[0].source, "default");
+
+    assert.throws(
+        () => CjsFormatWebgpu.analyzeEffect(bytes, {
+            permutation: [ { name: "UNKNOWN", value: "HIGH" } ]
+        }),
+        /Unknown effect permutation axis UNKNOWN/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.analyzeEffect(bytes, {
+            permutation: [ { name: "QUALITY", value: "INVALID" } ]
+        }),
+        /requested INVALID but resolved LOW/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.analyzeEffect(bytes, {
+            permutation: [
+                { name: "QUALITY", value: "HIGH" },
+                { name: "QUALITY", value: "HIGH" }
+            ]
+        }),
+        /duplicates axis QUALITY/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.analyzeEffect(bytes, {
+            permutation: [ { name: "QUALITY", value: 1 } ]
+        }),
+        /Requested effect permutation is malformed/
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.analyzeEffect(bytes, {
+            permutation: { QUALITY: "HIGH" }
+        }),
+        /must be an array or Map/
+    );
 });
 
 test("buildEffectAnalysis normalizes manifest stages and decodes DXBC", () =>

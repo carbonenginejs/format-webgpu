@@ -5,6 +5,10 @@ import { CewgpuPackage } from "./cewgpu/CewgpuPackage.js";
 import { CewgpuPackageBuilder } from "./cewgpu/CewgpuPackageBuilder.js";
 import { CjsWebgpuReadError } from "./errors.js";
 import { lowerDxbcToIr } from "./ir/lowerDxbcToIr.js";
+import {
+    normalizeEffectPermutation,
+    validateResolvedPermutation
+} from "./packageEffectSelection.js";
 
 export const OUTPUT_JSON = "json";
 export const OUTPUT_RAW = "raw";
@@ -472,10 +476,15 @@ export function buildEffectAnalysis(resolved, options = {})
  */
 export function analyzeEffectWithValues(input, values)
 {
+    const permutation = normalizeEffectPermutation(values.permutation);
     const resolved = readEffectAnalysis(input, {
         source: values.source,
-        permutation: values.permutation
+        permutation
     });
+    validateResolvedPermutation(
+        permutation,
+        resolved.selection?.selectedOptions ?? []
+    );
 
     return buildEffectAnalysis(resolved, {
         source: values.source,

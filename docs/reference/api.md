@@ -77,7 +77,7 @@ instance methods:
 | `emit` | `"json"` by default or `"raw"` for the internal package object. |
 | `source` | Caller-owned diagnostic label; it is never opened. |
 | `decodeInstructions` | Includes decoded instruction and shader IR detail during analysis. |
-| `permutation` | Permutation assertions used by effect analysis. |
+| `permutation` | Exact NAME=VALUE assertions as an array or `Map`. |
 | `schema` | Optional caller schema record retained by the profile. |
 | `classes` | Optional constructor registrations keyed by `CLASS_KEYS`. |
 
@@ -85,6 +85,8 @@ instance methods:
 diagnostics. `decodeInstructions: false` retains compact DXBC program metadata
 without instruction or IR trees. `BuildEffect` keeps those bytes transient for
 WGSL compilation and writes compact selected-body `ANLS` diagnostics instead.
+Both `AnalyzeEffect` and `BuildEffect` reject malformed, duplicate, unknown, or
+unresolved permutation assertions rather than silently selecting a default.
 
 ## Effect-package options
 

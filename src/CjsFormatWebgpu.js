@@ -199,7 +199,13 @@ export class CjsFormatWebgpu
      */
     BuildEffect(input, options = {})
     {
-        return buildEffectPackage(input, options);
+        const values = this.GetValues();
+
+        return buildEffectPackage(input, {
+            source: values.source,
+            permutation: values.permutation,
+            ...options
+        });
     }
 
     /**

@@ -216,6 +216,23 @@ test("buildEffect exposes structurally qualified selected-body CEWGPU packaging"
     assert.equal(compatibilityResult.info.bodyMode, "selected");
 });
 
+test("instance BuildEffect honors reusable source and permutation values", () =>
+{
+    const source = buildMinimalStagedEffectBytes();
+    const profile = new CjsFormatWebgpu({
+        source: "profile.sm_hi",
+        permutation: [ { name: "UNKNOWN", value: "ON" } ]
+    });
+
+    assert.throws(
+        () => profile.BuildEffect(source),
+        /Unknown effect permutation axis UNKNOWN/
+    );
+
+    const result = profile.BuildEffect(source, { permutation: [] });
+    assert.equal(result.info.sourcePath, "profile.sm_hi");
+});
+
 test("buildEffect rejects unsupported all-body packaging explicitly", () =>
 {
     assert.throws(

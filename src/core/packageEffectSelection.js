@@ -5,6 +5,44 @@ const STAGE_NAMES = new Set([ "vertex", "pixel", "compute" ]);
 const KNOWN_UNSUPPORTED_STAGE_NAMES = new Set([ "geometry", "hull", "domain" ]);
 
 /**
+ * Normalize caller permutation assertions without coercing malformed values.
+ *
+ * @param {object[]|Map<string,string>|null|undefined} value Permutation assertions.
+ * @returns {object[]} Frozen NAME=VALUE assertion records.
+ */
+export function normalizeEffectPermutation(value)
+{
+    if (value === undefined || value === null)
+    {
+        return Object.freeze([]);
+    }
+
+    const entries = value instanceof Map
+        ? Array.from(value, ([ name, option ]) => ({ name, value: option }))
+        : value;
+
+    if (!Array.isArray(entries))
+    {
+        throw new TypeError("Effect permutation policy must be an array or Map");
+    }
+
+    return Object.freeze(entries.map((entry) =>
+    {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)
+            || typeof entry.name !== "string" || !entry.name
+            || typeof entry.value !== "string" || !entry.value)
+        {
+            throw new TypeError("Requested effect permutation is malformed");
+        }
+
+        return Object.freeze({
+            name: entry.name,
+            value: entry.value
+        });
+    }));
+}
+
+/**
  * Verify that every requested permutation resolved exactly.
  *
  * @param {object[]} requested Requested NAME=VALUE records.
