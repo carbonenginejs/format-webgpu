@@ -1400,13 +1400,23 @@ Evidence for the introducing change: the every-permutation reader join resolves
 every permutation of a real Quad family package to translated programs and
 reaches every unique body; the selected body's shared units are byte-identical
 to that package's own `WGSL` chunk; a full corpus rebuild leaves every
-selected-mode package byte-identical with unchanged statuses; and every
-translated module belonging to bodies that selected-mode packaging never
-emitted was compiled on a real WebGPU adapter with zero warnings, taken from a
-High `.sm_depth` explicit PPT-on Detail-family package including its
-version-3 resource-transform units. That is compiler and module evidence for
-the newly packaged bodies. It is not a prepared-pipeline or rendered claim for
-them.
+selected-mode package byte-identical with unchanged statuses; every effect in
+the corpus builds in all-body mode with no build failures, the small number of
+partial results losing bodies only to already-documented compiler boundaries;
+and 202 translated modules from bodies that selected-mode packaging never
+emitted were compiled on a real WebGPU adapter with zero warnings, including a
+High `.sm_depth` explicit PPT-on Detail-family package with version-3
+resource-transform units and the exact bounded particle-clear compute profile.
+That is compiler and module evidence for the newly packaged bodies. It is not a
+prepared-pipeline or rendered claim for them.
+
+Two defects in the first implementation were found only by building the whole
+corpus in all-body mode, not by the package suite: stage selection outside the
+per-body guard turned one geometry-stage body into a whole-package failure, and
+the all-body path initially omitted the particle-clear effect-profile
+preflight. The synthetic fixtures cannot express either condition, so an
+all-body corpus sweep is part of this feature's verification, not an optional
+extra.
 
 ## Verification contract
 
