@@ -220,3 +220,25 @@ test("a selected-mode package cannot smuggle in an all-body graph", () =>
         /selected-mode packages cannot declare an all-body backend graph/u
     );
 });
+
+test("accessors stay closed until the package passes validation", async () =>
+{
+    const { CewgpuPackage } = await import("../src/core/cewgpu/CewgpuPackage.js");
+    const result = buildAllBodyPackage();
+    const direct = new CewgpuPackage();
+
+    assert.equal(direct.Read(result.bytes), true, "container decodes");
+    assert.ok(direct.info, "chunks remain readable");
+
+    // A container read outside the validated entry point must not hydrate.
+    assert.equal(direct.GetPortableEffectReflection(0), null);
+    assert.equal(direct.GetBackendBodyPrograms(0), null);
+
+    // The same bytes through the validating reader do hydrate.
+    const validated = CjsFormatWebgpu.read(result.bytes, {
+        emit: CjsFormatWebgpu.OUTPUT_RAW
+    });
+
+    assert.ok(validated.GetPortableEffectReflection(0));
+    assert.ok(validated.GetBackendBodyPrograms(0));
+});

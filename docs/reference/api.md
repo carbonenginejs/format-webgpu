@@ -108,6 +108,12 @@ permutation to its translated passes, defaulting to `META.bodyIndex`. It returns
 null when the package carries no all-body graph, and an explicitly unsupported
 record when that body could not be lowered.
 
+Both `GetBackendBodyPrograms` and `GetPortableEffectReflection` return null
+until the package has passed canonical envelope validation. Every documented
+read entry point validates, so this is transparent to normal consumers; it
+prevents a hand-assembled or tampered container from being hydrated as though
+it had been checked.
+
 `source` remains a caller-owned diagnostic label. An optional
 `sourceIdentity.logicalPath` records the canonical resource identity
 independently and may differ from that label. The builder records the exact

@@ -18,6 +18,7 @@ import {
     validateEffectReflectionPointer
 } from "./effectReflectionPackage.js";
 import { sha256Bytes } from "./sha256.js";
+import { markEffectPackageValidated } from "./cewgpu/CewgpuPackage.js";
 import {
     EFFECT_BACKEND_BODY_SET_CHUNK,
     EFFECT_BACKEND_BODY_SET_FORMAT,
@@ -1529,6 +1530,7 @@ export function validateEffectPackageEnvelope(pkg)
     validateSelection(metadata, stages, shaderKeys);
     validateResourceTransforms(wgsl, layoutKeys, shaderKeys, layouts);
     validatePartialBoundary(info, stages, effectName);
+    markEffectPackageValidated(pkg);
     return true;
 }
 

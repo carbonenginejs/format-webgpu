@@ -5,6 +5,7 @@ import {
     hydrateEffectReflectionForPermutation
 } from "../effectReflectionPackage.js";
 
+const validatedEffectPackages = new WeakSet();
 const CEWGPU_MAGIC = "CWGP";
 const CEWGPU_FORMAT = "CEWGPU";
 const CEWGPU_VERSION = 1;
@@ -254,6 +255,7 @@ export class CewgpuPackage
         permutationIndex
     )
     {
+        if (!validatedEffectPackages.has(this)) return null;
         const reflection = getCachedJson(this, "RFLX");
         const permutationGraph = getCachedJson(this, "PGRF");
         if (!reflection || !permutationGraph) return null;
@@ -293,6 +295,7 @@ export class CewgpuPackage
      */
     GetBackendBodyPrograms(permutationIndex)
     {
+        if (!validatedEffectPackages.has(this)) return null;
         const bodySet = getCachedJson(this, "WGSB");
         const permutationGraph = getCachedJson(this, "PGRF");
         if (!bodySet || !permutationGraph) return null;
@@ -473,4 +476,20 @@ function cloneJson(value)
 function decodeAscii(bytes)
 {
     return String.fromCharCode(...bytes);
+}
+
+/**
+ * Marks one package as having passed the canonical effect envelope.
+ *
+ * Reflection and backend accessors return null until this runs, so a
+ * hand-assembled or tampered container cannot be hydrated as if it had been
+ * validated. This is intentionally an internal deep import rather than
+ * package-root API.
+ *
+ * @param {CewgpuPackage} pkg Validated package reader.
+ * @returns {void}
+ */
+export function markEffectPackageValidated(pkg)
+{
+    validatedEffectPackages.add(pkg);
 }
