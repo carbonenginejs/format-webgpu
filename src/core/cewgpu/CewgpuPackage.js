@@ -269,6 +269,84 @@ export class CewgpuPackage
     }
 
     /**
+     * Gets the all-body backend translation graph when present.
+     *
+     * Selected-mode packages do not carry this chunk.
+     *
+     * @returns {object|null} Parsed `CJS_WGSL_BODY_SET` document.
+     */
+    get backendBodySet()
+    {
+        return this.GetJson("WGSB");
+    }
+
+    /**
+     * Resolves the translated backend passes for one permutation index.
+     *
+     * Joins `PGRF` variant identity to the `WGSB` body record and expands every
+     * pass reference into its shared translation unit. Returns null when the
+     * package carries no all-body graph, and an explicitly unsupported record
+     * when that body could not be lowered.
+     *
+     * @param {number} [permutationIndex] Exact PGRF permutation index.
+     * @returns {object|null} Resolved backend body, or null when unavailable.
+     */
+    GetBackendBodyPrograms(permutationIndex)
+    {
+        const bodySet = getCachedJson(this, "WGSB");
+        const permutationGraph = getCachedJson(this, "PGRF");
+        if (!bodySet || !permutationGraph) return null;
+
+        const index = permutationIndex
+            ?? getCachedJson(this, "META")?.bodyIndex
+            ?? 0;
+        const variant = permutationGraph.variants?.[index];
+        if (!variant) return null;
+
+        const body = bodySet.bodies?.find((entry) => entry.bodyKey === variant.bodyKey);
+        if (!body) return null;
+        if (body.status !== "translated")
+        {
+            return {
+                permutationIndex: index,
+                bodyKey: body.bodyKey,
+                status: body.status,
+                error: body.error,
+                passes: []
+            };
+        }
+
+        const units = new Map((bodySet.passUnits ?? []).map((unit) => [ unit.key, unit ]));
+
+        return {
+            permutationIndex: index,
+            bodyKey: body.bodyKey,
+            status: body.status,
+            error: null,
+            passes: body.passes.map((pass) =>
+            {
+                const unit = units.get(pass.unitKey);
+                if (!unit)
+                {
+                    throw new Error(
+                        `CEWGPU backend body ${body.bodyKey} references missing translation unit ${pass.unitKey}`
+                    );
+                }
+                return {
+                    passKey: pass.passKey,
+                    unitKey: pass.unitKey,
+                    wgslSetVersion: unit.wgslSetVersion,
+                    shaders: unit.shaders,
+                    layouts: unit.layouts,
+                    ...(unit.resourceTransforms
+                        ? { resourceTransforms: unit.resourceTransforms }
+                        : {})
+                };
+            })
+        };
+    }
+
+    /**
    * Gets normalized shader analysis from the `ANLS` chunk.
    *
    * @returns {string|null} Analysis text.

@@ -101,9 +101,17 @@ portable source reflection. `META.bodyIndex` selects a PGRF variant; its
 `bodyKey` selects the matching RFLX body. A raw reader exposes that join as
 `GetPortableEffectReflection(permutationIndex)`, returning a freshly owned,
 format-hlsl-validated single-body document with every byte reference expanded
-to `Uint8Array`. Turning that portable document into a live `Tr2EffectRes`
-remains consumer/engine work. `mode: "all"` fails until translated programs,
-layouts, and resource transforms are packaged for every body.
+to `Uint8Array`. `runtime-resource` `Tr2EffectRes` consumes that document,
+hydrates a canonical device-free `Tr2Shader`, and caches it by selected body
+index. Engines still own prepared pipelines and GPU realization.
+
+`mode: "all"` additionally packages translated programs, layouts, and resource
+transforms for every unique body in a `WGSB` chunk, and
+`GetBackendBodyPrograms(permutationIndex)` resolves any permutation to them.
+Because one pass of one body is the translation unit, bodies whose pass is
+byte-identical share a single stored unit rather than duplicating its WGSL.
+Bodies the compiler cannot lower stay in the package as explicitly unsupported
+records with a reason, and never remove that body's source reflection.
 
 JSON `Read` output exposes `reflection` with byte references and
 `reflectionBlobByteLength`. Consumers that need exact defaults or source

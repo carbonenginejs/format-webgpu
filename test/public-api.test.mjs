@@ -317,21 +317,23 @@ test("instance BuildEffect honors reusable source and permutation values", () =>
     assert.equal(result.info.sourcePath, "profile.sm_hi");
 });
 
-test("buildEffect rejects unsupported all-body packaging explicitly", () =>
+test("buildEffect gates all-body packaging on complete source reflection", () =>
 {
+    // Version 8-14 inputs carry no portable reflection, so there is no
+    // validated unique-body inventory to translate against.
     assert.throws(
         () => CjsFormatWebgpu.buildEffect(
             buildMinimalStagedEffectBytes(),
             { mode: "all" }
         ),
-        /all-body backend packaging requires translated programs/u
+        /requires complete version-15 source reflection/u
     );
     assert.throws(
         () => CjsFormatWebgpu.buildEffect(
             buildMinimalStagedEffectBytes(),
             { allPermutations: true }
         ),
-        /all-body backend packaging requires translated programs/u
+        /requires complete version-15 source reflection/u
     );
     assert.throws(
         () => CjsFormatWebgpu.buildEffect(
@@ -339,5 +341,12 @@ test("buildEffect rejects unsupported all-body packaging explicitly", () =>
             { allPermutations: "false" }
         ),
         /allPermutations compatibility option must be boolean/u
+    );
+    assert.throws(
+        () => CjsFormatWebgpu.buildEffect(
+            buildMinimalStagedEffectBytes(),
+            { mode: "partial" }
+        ),
+        /supported modes are selected and all/u
     );
 });

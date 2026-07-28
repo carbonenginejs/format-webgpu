@@ -17,6 +17,12 @@ import {
     EFFECT_REFLECTION_CHUNK
 } from "./effectReflectionPackage.js";
 import {
+    buildEffectBackendBodySet,
+    EFFECT_BACKEND_BODY_SET_CHUNK,
+    EFFECT_BACKEND_BODY_SET_FORMAT,
+    EFFECT_BACKEND_BODY_SET_VERSION
+} from "./effectBackendBodySet.js";
+import {
     DXBC_WGSL_TRANSLATOR_NAME,
     DXBC_WGSL_TRANSLATOR_VERSION,
     FORMAT_WEBGPU_PACKAGE_NAME,
@@ -171,6 +177,20 @@ export function buildEffectPackage(input, options = {})
             { sourceIdentity, sourcePath: source }
         )
         : null;
+    if (mode === "all" && !effectReflection)
+    {
+        throw new Error(
+            "Effect package mode all requires complete version-15 source reflection"
+        );
+    }
+
+    const backendBodySet = mode === "all"
+        ? buildEffectBackendBodySet(resolved.effectRes, permutationGraph, {
+            source,
+            selection,
+            bindingPolicy: options.bindingPolicy
+        })
+        : null;
     const completeness = Object.freeze({
         packageValid: true,
         sourceComplete: effectReflection !== null,
@@ -203,7 +223,22 @@ export function buildEffectPackage(input, options = {})
             ? {
                 effectReflection: effectReflection.pointer,
                 sourceBodyCoverage: "all-unique",
-                backendBodyCoverage: "selected"
+                backendBodyCoverage: backendBodySet
+                    ? backendBodySet.coverage.bodies
+                    : "selected"
+            }
+            : {}),
+        ...(backendBodySet
+            ? {
+                backendBodySet: Object.freeze({
+                    chunk: EFFECT_BACKEND_BODY_SET_CHUNK,
+                    format: EFFECT_BACKEND_BODY_SET_FORMAT,
+                    formatVersion: EFFECT_BACKEND_BODY_SET_VERSION,
+                    sha256: sha256Utf8(`${JSON.stringify(backendBodySet)}\n`),
+                    bodyCount: backendBodySet.bodyCount,
+                    translatedBodyCount: backendBodySet.translatedBodyCount,
+                    passUnitCount: backendBodySet.passUnitCount
+                })
             }
             : {}),
         bodyMode: mode,
@@ -230,7 +265,8 @@ export function buildEffectPackage(input, options = {})
             [ EFFECT_REFLECTION_BLOB_CHUNK, effectReflection.blobBytes ]
         ] : []),
         [ "ANLS", analysis ],
-        [ "WGSL", wgsl ]
+        [ "WGSL", wgsl ],
+        ...(backendBodySet ? [ [ EFFECT_BACKEND_BODY_SET_CHUNK, backendBodySet ] ] : [])
     ]);
     const inspection = inspectWithValues(bytes, {
         source,
@@ -245,6 +281,13 @@ export function buildEffectPackage(input, options = {})
         selectedStageCount: selectedStages.length,
         shaderCount: wgsl.shaders.length,
         layoutCount: wgsl.layouts.length,
+        ...(backendBodySet
+            ? {
+                backendBodyCount: backendBodySet.bodyCount,
+                backendTranslatedBodyCount: backendBodySet.translatedBodyCount,
+                backendPassUnitCount: backendBodySet.passUnitCount
+            }
+            : {}),
         nativeComparison: false
     });
 
@@ -257,6 +300,7 @@ export function buildEffectPackage(input, options = {})
         reflectionBlobs: effectReflection?.blobBytes ?? null,
         analysis,
         wgsl,
+        backendBodySet,
         inspection: Object.freeze(inspection),
         qualification
     });
@@ -271,12 +315,11 @@ function normalizeMode(value, allPermutations)
 
     const mode = String(allPermutations === true ? "all" : value ?? "selected").trim();
 
-    if (mode !== "selected")
+    if (mode !== "selected" && mode !== "all")
     {
         throw new Error(
             `Effect package mode ${mode || "<empty>"} is not supported; `
-            + "all-body backend packaging requires translated programs, layouts, "
-            + "and resource transforms for every body"
+            + "supported modes are selected and all"
         );
     }
 

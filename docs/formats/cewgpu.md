@@ -283,18 +283,49 @@ references to fresh owned `Uint8Array` payloads, and reruns the
 INFO v3 declares `sourceBodyCoverage: "all-unique"` and
 `completeness.sourceComplete: true`. This means complete portable source-effect
 semantics for that exact compiled input. It does not embed raw body records and
-is not an archival reconstruction of the original `.sm_*` bytes. The hydrated
-portable document is stable input for a future effect-resource adapter, not a
-live `Tr2EffectRes`: renderer handles, resource-set descriptions, derived
-dynamic classifications, layouts, caches, and programs remain consumer-owned.
+is not an archival reconstruction of the original `.sm_*` bytes. The accessor
+returns a fresh, owned plain portable document. `runtime-resource`
+`Tr2EffectRes` consumes it to select and cache a canonical device-free
+`Tr2Shader`; renderer handles, resource-set descriptions, derived dynamic
+classifications, layouts, and programs remain engine-owned.
 PGRF
 correctly continues to describe its own body table as `identity-only` with
 `reflection: "absent"` because RFLX is a separate document.
 
 `bodyMode: "selected"` and `backendBodyCoverage: "selected"` describe ANLS and
-WGSL scope. `backendComplete` and `runtimeComplete` remain false, and
-`mode: "all"` remains unsupported until translated programs, layouts, and
-resource transforms exist for every body.
+WGSL scope. `backendComplete` and `runtimeComplete` remain false.
+
+## All-body backend graph (`WGSB`)
+
+`mode: "all"` (or the `allPermutations: true` compatibility request) additionally
+translates every unique source body and stores the result in a `WGSB`
+`CJS_WGSL_BODY_SET` chunk. It requires complete version-15 source reflection,
+because the unique-body inventory comes from RFLX/PGRF.
+
+The translation unit is one pass of one body: the binding plan, the
+resource-transform plan, and every stage's WGSL are derived together, so bodies
+whose pass carries byte-identical stage bytecode, semantic bindings, and render
+states share exactly one unit. `bodies[]` maps each `bodyKey` to
+`{passKey, unitKey}` references, and `passUnits[]` holds the shared translated
+programs, layouts, and transforms. Real Quad ship families collapse several
+hundred passes into a small fraction of that many units.
+
+A body that cannot be lowered is retained as
+`status: "unsupported"` with an explicit reason and no passes. Its complete
+source reflection remains in RFLX, so a partial backend never removes source
+truth; `coverage.bodies` and `INFO.backendBodyCoverage` then report `partial`
+instead of `all-unique`.
+
+`INFO.backendBodySet` binds the exact chunk digest and counts. Selected-mode
+packages must not carry the chunk, and an all-body package must contain one
+record for every unique permutation-graph body. All-body packages still emit
+`WGSL` for the selected body, and its programs are byte-identical to the
+corresponding shared translation units.
+
+Translating every body still does not make the package backend- or
+runtime-complete: `backendComplete` and `runtimeComplete` stay false until the
+engine parses these records, realizes their layouts and resource transforms,
+and passes an exact draw gate.
 
 Legacy INFO v2 may omit reflection or carry selected-body RFLX v1/RBLB. The
 current reader validates both forms. INFO v3 requires PGRF plus RFLX v2/RBLB;
@@ -323,8 +354,9 @@ when requested, shader-IR diagnostics. `BuildEffect` uses the same transient
 byte index for WGSL compilation but does not persist raw bytecode, decoded
 instructions, or compiler IR in `ANLS`.
 
-`BuildEffect` records `bodyMode: "selected"` in `INFO` and `META`; for INFO v3
-this is explicitly backend scope. Its returned qualification record uses
+`BuildEffect` records `bodyMode` in `INFO` and `META`; for INFO v3 this is
+explicitly backend scope, and it stays `selected` unless all-body packaging was
+requested. Its returned qualification record uses
 `validator: "cewgpu-structural"` and reports `packageValid: true`. Version-15
 packages report `sourceComplete: true`, `backendComplete: false`, and
 `runtimeComplete: false`; versions 8-14 report all three completeness flags

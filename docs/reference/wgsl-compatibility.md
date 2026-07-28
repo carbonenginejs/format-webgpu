@@ -1336,8 +1336,9 @@ output with INFO v3 plus all-unique RFLX v2/RBLB. It records complete portable
 reflection for every unique version-15 source body while ANLS/WGSL remain
 selected-backend data. `GetPortableEffectReflection(permutationIndex)` exposes
 any package permutation as a fresh, format-hlsl-validated document with owned
-byte payloads. A live `Tr2EffectRes` and renderer-owned handles remain a
-consumer concern.
+byte payloads. `runtime-resource` owns `Tr2EffectRes` selection, canonical
+`Tr2Shader` hydration, and the per-index cache; renderer-owned handles remain
+an engine concern.
 
 An exhaustive build-3444265 oracle retains 507 qualified, 30 unsupported, and
 zero failed/unqualified results. For all 507 emitted packages, `META`, `PGRF`,
@@ -1366,6 +1367,46 @@ prepared through the unchanged engine-webgpu reader on a real WebGPU adapter.
 The DX11 package contains 144 reflected bodies and the DX12 package 288; each
 selected Main pass exposes two modules and 25 canonical bindings. Both browser
 gates compile with zero WGSL warnings.
+
+## All-body backend packaging
+
+`mode: "all"` translates every unique source body and stores the result in a
+`WGSB` `CJS_WGSL_BODY_SET` chunk. Selected mode remains the default and is
+unchanged.
+
+The translation unit is deliberately one pass of one body rather than one
+stage. A pass owns its binding plan and resource-transform plan, so identical
+stage bytecode can legitimately translate differently when its pass-mates
+differ; sharing at stage granularity would be unsound. Bodies whose pass
+carries byte-identical stage bytecode, semantic bindings, and render states
+therefore share exactly one stored unit. On real uber-shader ship families this
+is the difference between storing every body's programs and storing a small
+fraction of them, because most permutation axes change only one stage of one
+pass.
+
+A body the compiler cannot lower is retained as an explicitly unsupported
+record carrying its reason, and coverage degrades to `partial`. Its complete
+source reflection is untouched, so a partial backend never silently reduces
+source truth. This is the fail-closed alternative to dropping a body or
+shrinking the reported shader count.
+
+Translating every body is deliberately **not** treated as backend completeness.
+`backendComplete` and `runtimeComplete` remain false, matching the sibling
+WebGL package, because neither the engine's realization of these layouts and
+resource transforms nor an exact draw of them has been gated. `INFO` carries
+the honest scope in `backendBodyCoverage` instead.
+
+Evidence for the introducing change: the every-permutation reader join resolves
+every permutation of a real Quad family package to translated programs and
+reaches every unique body; the selected body's shared units are byte-identical
+to that package's own `WGSL` chunk; a full corpus rebuild leaves every
+selected-mode package byte-identical with unchanged statuses; and every
+translated module belonging to bodies that selected-mode packaging never
+emitted was compiled on a real WebGPU adapter with zero warnings, taken from a
+High `.sm_depth` explicit PPT-on Detail-family package including its
+version-3 resource-transform units. That is compiler and module evidence for
+the newly packaged bodies. It is not a prepared-pipeline or rendered claim for
+them.
 
 ## Verification contract
 

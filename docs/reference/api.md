@@ -92,14 +92,21 @@ unresolved permutation assertions rather than silently selecting a default.
 
 ## Effect-package options
 
-`BuildEffect` and `buildEffect` accept `mode: "selected"`, which is the default
-and currently the only supported backend body mode. They resolve one
-permutation body and emit complete passes within the requested stage
-selection. `mode: "all"` fails until translated programs, layouts, and
-resource transforms are packaged for every body.
-The orchestration compatibility option `allPermutations: false` also means
-selected mode; `allPermutations: true` fails by the same rule instead of
-silently emitting one body.
+`BuildEffect` and `buildEffect` accept `mode: "selected"`, which remains the
+default. They resolve one permutation body and emit complete passes within the
+requested stage selection.
+
+`mode: "all"` additionally translates every unique source body into a `WGSB`
+chunk and reports `backendBodyCoverage: "all-unique"`, or `"partial"` when some
+body could not be lowered. It requires complete version-15 source reflection and
+fails closed on versions 8-14, which carry no validated body inventory. The
+orchestration compatibility option `allPermutations: true` selects the same
+mode, and `allPermutations: false` means selected mode.
+
+`CewgpuPackage.GetBackendBodyPrograms(permutationIndex)` resolves any
+permutation to its translated passes, defaulting to `META.bodyIndex`. It returns
+null when the package carries no all-body graph, and an explicitly unsupported
+record when that body could not be lowered.
 
 `source` remains a caller-owned diagnostic label. An optional
 `sourceIdentity.logicalPath` records the canonical resource identity
@@ -146,9 +153,11 @@ reports `sourceComplete: true` for the exact input's portable semantic graph
 while `backendComplete` and `runtimeComplete` remain false. Versions 8-14
 report all three completeness flags false. Source completeness does not embed
 raw body records, translate every body, construct a live `Tr2EffectRes`, or
-prove prepared pipelines/rendering. `GetPortableEffectReflection` hydrates the
-portable source document; it does not construct renderer-owned handles,
-layouts, caches, resource sets, or stage programs.
+prove prepared pipelines/rendering. `GetPortableEffectReflection` reconstructs
+and validates fresh owned plain portable data; `runtime-resource`
+`Tr2EffectRes` performs canonical runtime-class hydration and selection. The
+accessor does not construct renderer-owned handles, layouts, resource sets, or
+stage programs.
 
 ## Static metadata
 

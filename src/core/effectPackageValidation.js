@@ -18,6 +18,11 @@ import {
     validateEffectReflectionPointer
 } from "./effectReflectionPackage.js";
 import { sha256Bytes } from "./sha256.js";
+import {
+    EFFECT_BACKEND_BODY_SET_CHUNK,
+    EFFECT_BACKEND_BODY_SET_FORMAT,
+    EFFECT_BACKEND_BODY_SET_VERSION
+} from "./effectBackendBodySet.js";
 
 const REQUIRED_EFFECT_CHUNKS = Object.freeze([ "INFO", "META", "ANLS", "WGSL" ]);
 const EFFECT_PACKAGE_KIND = "tr2-effect-webgpu";
@@ -276,6 +281,182 @@ function validateSourceIdentity(value, requireSha256)
  * @param {object} info Validated INFO document.
  * @returns {object|null} Validated graph, or null for a legacy package.
  */
+/**
+ * Validate the all-body backend graph against its INFO pointer, the source
+ * permutation graph, and the selected-body `WGSL` document.
+ *
+ * @param {object} pkg CEWGPU package reader.
+ * @param {object} info INFO document.
+ * @param {object|null} permutationGraph Validated PGRF document.
+ * @returns {object|null} Validated backend body set, or null when absent.
+ */
+function validateBackendBodySetReference(pkg, info, permutationGraph)
+{
+    const pointer = info.backendBodySet;
+    const chunk = pkg.GetChunk(EFFECT_BACKEND_BODY_SET_CHUNK);
+
+    if (pointer === undefined && !chunk)
+    {
+        if (info.bodyMode === "all")
+        {
+            throw new Error(
+                `CEWGPU body mode all requires ${EFFECT_BACKEND_BODY_SET_CHUNK}`
+            );
+        }
+        return null;
+    }
+    if (info.bodyMode !== "all")
+    {
+        throw new Error(
+            "CEWGPU selected-mode packages cannot declare an all-body backend graph"
+        );
+    }
+    if (!pointer || typeof pointer !== "object" || Array.isArray(pointer) || !chunk)
+    {
+        throw new Error("CEWGPU INFO.backendBodySet is malformed");
+    }
+    requireExactKeys(pointer, [
+        "chunk",
+        "format",
+        "formatVersion",
+        "sha256",
+        "bodyCount",
+        "translatedBodyCount",
+        "passUnitCount"
+    ], "CEWGPU INFO.backendBodySet");
+    if (pointer.chunk !== EFFECT_BACKEND_BODY_SET_CHUNK
+        || pointer.format !== EFFECT_BACKEND_BODY_SET_FORMAT
+        || pointer.formatVersion !== EFFECT_BACKEND_BODY_SET_VERSION)
+    {
+        throw new Error("CEWGPU INFO.backendBodySet is malformed");
+    }
+    if (typeof pointer.sha256 !== "string"
+        || !/^[0-9a-f]{64}$/u.test(pointer.sha256)
+        || sha256Bytes(chunk.bytes) !== pointer.sha256)
+    {
+        throw new Error("CEWGPU INFO backend body-set digest disagrees with WGSB");
+    }
+    if (!permutationGraph)
+    {
+        throw new Error("CEWGPU all-body backend graph requires PGRF");
+    }
+
+    const bodySet = requireJsonObject(pkg, EFFECT_BACKEND_BODY_SET_CHUNK);
+    if (bodySet.format !== EFFECT_BACKEND_BODY_SET_FORMAT
+        || bodySet.formatVersion !== EFFECT_BACKEND_BODY_SET_VERSION)
+    {
+        throw new Error("CEWGPU WGSB document is malformed");
+    }
+
+    const bodies = requireArray(bodySet, "bodies", EFFECT_BACKEND_BODY_SET_CHUNK);
+    const passUnits = requireArray(bodySet, "passUnits", EFFECT_BACKEND_BODY_SET_CHUNK);
+    const unitKeys = new Set();
+
+    for (const unit of passUnits)
+    {
+        if (!unit || typeof unit !== "object" || typeof unit.key !== "string" || !unit.key
+            || unitKeys.has(unit.key)
+            || !Array.isArray(unit.shaders) || !unit.shaders.length
+            || !Array.isArray(unit.layouts) || !unit.layouts.length
+            || ![ 2, 3 ].includes(unit.wgslSetVersion))
+        {
+            throw new Error(
+                `CEWGPU WGSB translation unit ${unit?.key || "<unknown>"} is malformed`
+            );
+        }
+        unitKeys.add(unit.key);
+    }
+
+    const graphBodyKeys = new Set(permutationGraph.bodies.map((body) => body.key));
+    const seen = new Set();
+    let translated = 0;
+
+    for (const body of bodies)
+    {
+        if (!body || typeof body !== "object"
+            || !graphBodyKeys.has(body.bodyKey)
+            || seen.has(body.bodyKey)
+            || ![ "translated", "unsupported" ].includes(body.status))
+        {
+            throw new Error(
+                `CEWGPU WGSB body ${body?.bodyKey || "<unknown>"} does not reconcile with PGRF`
+            );
+        }
+        seen.add(body.bodyKey);
+
+        const variant = permutationGraph.variants[body.representativePermutationIndex];
+        if (!variant || variant.bodyKey !== body.bodyKey)
+        {
+            throw new Error(
+                `CEWGPU WGSB body ${body.bodyKey} has an inconsistent representative permutation`
+            );
+        }
+        if (body.status === "unsupported")
+        {
+            if (typeof body.error !== "string" || !body.error
+                || body.passCount !== 0 || body.passes.length)
+            {
+                throw new Error(
+                    `CEWGPU WGSB unsupported body ${body.bodyKey} must retain an explicit reason and no passes`
+                );
+            }
+            continue;
+        }
+        translated++;
+        if (body.error !== null || !Array.isArray(body.passes) || !body.passes.length
+            || body.passCount !== body.passes.length)
+        {
+            throw new Error(
+                `CEWGPU WGSB translated body ${body.bodyKey} is malformed`
+            );
+        }
+        for (const pass of body.passes)
+        {
+            if (!pass || typeof pass.passKey !== "string" || !pass.passKey
+                || !unitKeys.has(pass.unitKey))
+            {
+                throw new Error(
+                    `CEWGPU WGSB body ${body.bodyKey} references missing translation unit`
+                );
+            }
+        }
+    }
+
+    if (seen.size !== graphBodyKeys.size)
+    {
+        throw new Error(
+            "CEWGPU WGSB does not cover every unique permutation-graph body"
+        );
+    }
+    if (requireCount(pointer.bodyCount, "INFO.backendBodySet.bodyCount") !== bodies.length
+        || requireCount(
+            pointer.translatedBodyCount,
+            "INFO.backendBodySet.translatedBodyCount"
+        ) !== translated
+        || requireCount(
+            pointer.passUnitCount,
+            "INFO.backendBodySet.passUnitCount"
+        ) !== passUnits.length)
+    {
+        throw new Error("CEWGPU INFO backend body-set counts disagree with WGSB");
+    }
+    if (!translated)
+    {
+        throw new Error("CEWGPU WGSB requires at least one translated body");
+    }
+
+    const expectedCoverage = translated === bodies.length ? "all-unique" : "partial";
+    if (bodySet.coverage?.bodies !== expectedCoverage
+        || info.backendBodyCoverage !== expectedCoverage)
+    {
+        throw new Error(
+            "CEWGPU WGSB coverage disagrees with its translated body count"
+        );
+    }
+
+    return bodySet;
+}
+
 function validatePermutationGraphReference(pkg, info)
 {
     const pointer = info.permutationGraph;
@@ -892,9 +1073,12 @@ function validatePartialBoundary(info, stages, effectName)
             "CEWGPU INFO.completeness is inconsistent with source/backend coverage"
         );
     }
+    const expectedBackendCoverage = info.bodyMode === "all"
+        ? [ "all-unique", "partial" ]
+        : [ "selected" ];
     if (sourceComplete
         && (info.sourceBodyCoverage !== "all-unique"
-            || info.backendBodyCoverage !== "selected"))
+            || !expectedBackendCoverage.includes(info.backendBodyCoverage)))
     {
         throw new Error(
             "CEWGPU INFO v3 source/backend body coverage is inconsistent"
@@ -1215,6 +1399,7 @@ export function validateEffectPackageEnvelope(pkg)
     }
     validateSourceIdentity(info.sourceIdentity, info.formatVersion >= 2);
     const permutationGraph = validatePermutationGraphReference(pkg, info);
+    validateBackendBodySetReference(pkg, info, permutationGraph);
     const effectReflection = readEffectReflectionReference(pkg, info);
     if (info.outputPath !== null
         && (typeof info.outputPath !== "string" || !info.outputPath))
@@ -1240,7 +1425,8 @@ export function validateEffectPackageEnvelope(pkg)
     requireString(analysis.source, "ANLS.source");
     requireString(analysis.effectName, "ANLS.effectName");
     requireCount(analysis.bodyIndex, "ANLS.bodyIndex");
-    if (info.bodyMode !== "selected" || metadata.bodyMode !== info.bodyMode
+    if ((info.bodyMode !== "selected" && info.bodyMode !== "all")
+        || metadata.bodyMode !== info.bodyMode
         || metadata.sourcePath !== sourcePath || analysis.source !== sourcePath)
     {
         throw new Error("CEWGPU INFO/META/ANLS source or body mode disagree");
@@ -1282,7 +1468,9 @@ export function validateEffectPackageEnvelope(pkg)
             if (effectReflection.pointer.formatVersion
                     !== EFFECT_REFLECTION_VERSION
                 || info.sourceBodyCoverage !== "all-unique"
-                || info.backendBodyCoverage !== "selected"
+                || !(info.bodyMode === "all"
+                    ? [ "all-unique", "partial" ].includes(info.backendBodyCoverage)
+                    : info.backendBodyCoverage === "selected")
                 || reflectionCounts.permutationCount
                     !== permutationGraph.variants.length
                 || reflectionCounts.bodyCount !== permutationGraph.bodies.length)
