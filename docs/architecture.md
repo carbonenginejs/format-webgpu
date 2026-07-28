@@ -59,8 +59,10 @@ then package data to the engine.
   pipelines, resource realization, device loss, and draw execution.
 - Node tooling owns indexed input acquisition, filesystem adapters, caching,
   build reports, and optional native comparison.
-- Runtime packages own scene objects, resource lifecycles, and authored effect
-  references.
+- `runtime-resource` owns effect-resource lifecycle, permutation selection,
+  canonical device-free `Tr2Shader` hydration, and shader caching.
+- `runtime-trinity` owns authored effect/material facades, parameters, options,
+  sampler overrides, and scene references.
 
 ## Browser and Node boundary
 
