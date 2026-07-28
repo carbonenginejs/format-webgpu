@@ -9,6 +9,11 @@ import { buildWgslSet } from "./wgsl/buildWgslSet.js";
 import { buildResourceTransformPlan } from "./wgsl/buildResourceTransformPlan.js";
 import { sha256Bytes, sha256Utf8 } from "./sha256.js";
 import { selectEffectStages } from "./packageEffectSelection.js";
+import {
+    isParticleClearEffectCandidate,
+    particleClearEffectProofFor,
+    preflightParticleClearEffectProfile
+} from "./wgsl/lowerParticleClearComputePrograms.js";
 
 export const EFFECT_BACKEND_BODY_SET_CHUNK = "WGSB";
 export const EFFECT_BACKEND_BODY_SET_FORMAT = "CJS_WGSL_BODY_SET";
@@ -30,7 +35,12 @@ function passUnitSignature(pass)
             .map((stage) => ({
                 stageName: stage.stageName,
                 bytecode: stage.bytecodeDigest,
-                semanticBindings: stage.semanticBindings
+                semanticBindings: stage.semanticBindings,
+                // An effect profile changes emission, so two otherwise identical
+                // passes must not share one unit when their proofs differ.
+                effectProfileProof: stage.effectProfileProof
+                    ? sha256Utf8(JSON.stringify(stage.effectProfileProof))
+                    : null
             }))
             .sort((left, right) => left.stageName.localeCompare(right.stageName))
     });
@@ -116,7 +126,7 @@ function resolveBody(effectRes, permutationIndex, source)
     };
 }
 
-function buildPassEntries(analysis, resolved, selection)
+function buildPassEntries(analysis, resolved, selection, effectProfileContext)
 {
     const selectedStages = selectEffectStages(analysis.stages, selection);
     const passes = new Map();
@@ -145,30 +155,25 @@ function buildPassEntries(analysis, resolved, selection)
             semanticBindings: analysis.stages.find((candidate) =>
                 candidate.techniqueName === stage.techniqueName
                 && candidate.passIndex === stage.passIndex
-                && candidate.stageName === stage.stageName)?.bindings || []
+                && candidate.stageName === stage.stageName)?.bindings || [],
+            effectProfileProof: particleClearEffectProofFor(
+                effectProfileContext,
+                stage.key
+            )
         });
     }
 
     return Array.from(passes.values());
 }
 
-function translatePassUnit(pass, resolved, source, bindingPolicy)
+function translatePassUnit(pass, programForKey, source, bindingPolicy)
 {
-    const irEntries = pass.stages.map((stage) =>
-    {
-        const bytecode = resolved.stageBytecodeByKey.get(stage.bytecodeKey)?.bytes;
-
-        if (!bytecode?.length)
-        {
-            throw new Error(`${stage.bytecodeKey} has no shader bytecode`);
-        }
-
-        return {
-            key: stage.key,
-            ir: lowerDxbcToIr(bytecode, { source: `${source}#${stage.key}` }),
-            semanticBindings: stage.semanticBindings
-        };
-    });
+    const irEntries = pass.stages.map((stage) => ({
+        key: stage.key,
+        ir: programForKey(stage.bytecodeKey),
+        semanticBindings: stage.semanticBindings,
+        effectProfileProof: stage.effectProfileProof
+    }));
     const resourceTransformPlan = buildResourceTransformPlan(
         irEntries.map((entry) => ({
             ir: entry.ir,
@@ -176,10 +181,13 @@ function translatePassUnit(pass, resolved, source, bindingPolicy)
         })),
         { layoutKey: pass.passKey }
     );
+    const proof = irEntries.find((entry) => entry.effectProfileProof)
+        ?.effectProfileProof ?? null;
     const plan = buildWgslBindingPlan(
         irEntries.map((entry) => entry.ir),
         {
             ...(bindingPolicy ?? {}),
+            ...(proof ? { effectProfileProof: proof } : {}),
             ...(resourceTransformPlan ? { resourceTransformPlan } : {})
         }
     );
@@ -188,7 +196,10 @@ function translatePassUnit(pass, resolved, source, bindingPolicy)
         key: entry.key,
         shader: buildWgsl(entry.ir, {
             bindingPlan: plan,
-            ...(resourceTransformPlan ? { resourceTransformPlan } : {})
+            ...(resourceTransformPlan ? { resourceTransformPlan } : {}),
+            ...(entry.effectProfileProof
+                ? { effectProfileProof: entry.effectProfileProof }
+                : {})
         })
     })));
 }
@@ -249,13 +260,56 @@ export function buildEffectBackendBodySet(effectRes, permutationGraph, options =
         seenBodyKeys.add(graphBody.key);
 
         let resolvedBody = null;
+        let passes = null;
+        let programForKey = null;
 
         try
         {
             resolvedBody = resolveBody(effectRes, group.permutationIndex, source);
+
+            // One IR cache per body, so a stage shared by two passes lowers once
+            // and the effect-profile preflight can seed it exactly as the
+            // selected-body path does.
+            const programsByKey = new Map();
+            programForKey = (key) =>
+            {
+                if (programsByKey.has(key)) return programsByKey.get(key);
+
+                const bytecode = resolvedBody.resolved.stageBytecodeByKey.get(key)?.bytes;
+
+                if (!bytecode?.length)
+                {
+                    throw new Error(`${key} has no shader bytecode`);
+                }
+
+                const program = lowerDxbcToIr(bytecode, { source: `${source}#${key}` });
+                programsByKey.set(key, program);
+                return program;
+            };
+
+            let effectProfileContext = null;
+
+            if (isParticleClearEffectCandidate(resolvedBody.resolved.effectDescription))
+            {
+                programForKey("Main.pass0.compute");
+                programForKey("Main.pass1.compute");
+                effectProfileContext = preflightParticleClearEffectProfile(
+                    resolvedBody.resolved.effectDescription,
+                    programsByKey
+                );
+            }
+
+            passes = buildPassEntries(
+                resolvedBody.analysis,
+                resolvedBody.resolved,
+                selection,
+                effectProfileContext
+            );
         }
         catch (error)
         {
+            // Stage selection and profile preflight fail closed per body: an
+            // unsupported stage kind in one body must not fail the package.
             bodies.push(Object.freeze({
                 bodyKey: graphBody.key,
                 representativePermutationIndex: group.permutationIndex,
@@ -267,11 +321,6 @@ export function buildEffectBackendBodySet(effectRes, permutationGraph, options =
             continue;
         }
 
-        const passes = buildPassEntries(
-            resolvedBody.analysis,
-            resolvedBody.resolved,
-            selection
-        );
         const bodyPasses = [];
         let failure = null;
 
@@ -288,7 +337,7 @@ export function buildEffectBackendBodySet(effectRes, permutationGraph, options =
                 {
                     wgsl = translatePassUnit(
                         pass,
-                        resolvedBody.resolved,
+                        programForKey,
                         source,
                         bindingPolicy
                     );
