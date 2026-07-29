@@ -86,7 +86,7 @@ test("implemented metadata advertises the package surface", () =>
     assert.equal(CjsFormatWebgpu.implementationStatus, "partial");
     assert.equal(CjsFormatWebgpu.format, "CEWGPU");
     assert.equal(CjsFormatWebgpu.analysisFormat, "CEWGPU_ANALYSIS");
-    assert.equal(CjsFormatWebgpu.packageVersion, "0.5.0");
+    assert.equal(CjsFormatWebgpu.packageVersion, "0.6.0");
     assert.equal(CjsFormatWebgpu.packageVersion, PACKAGE_MANIFEST.version);
 });
 

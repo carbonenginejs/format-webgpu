@@ -86,9 +86,9 @@ completeness flags, and stage/layout counts.
   "packageKind": "tr2-effect-webgpu",
   "targetBackend": "webgpu",
   "backendPackage": "@carbonenginejs/format-webgpu",
-  "backendPackageVersion": "0.5.0",
+  "backendPackageVersion": "0.6.0",
   "translator": "dxbc-js-wgsl",
-  "translatorVersion": "0.5.0",
+  "translatorVersion": "0.6.0",
   "permutationGraph": {
     "chunk": "PGRF",
     "format": "CJS_EFFECT_PERMUTATION_GRAPH",
